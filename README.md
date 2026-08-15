@@ -10,7 +10,6 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 - **Filesystem**: AVFS (Autonomous Virtual FileSystem) RAM disk
 - **Scripting**: RSH v2.3 (RadiumOS Shell Language)
 - **Hardware**: PS4 DualShock 4 USB HID driver (UHCI + OHCI)
-- **Emulation**: Complete NES emulator with 6502 CPU, PPU, Mappers 0-4
 - **Security**: AES-128 CBC encryption/decryption
 - **Tools**: Radium Geiger hex viewer, desktop environment, 15+ apps
 
@@ -18,8 +17,7 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 
 ```bash
 make clean
-make build
-make run    # Launch in QEMU
+make run    # Launch in QEMU / If os is not built first then by default it will build then run :)
 ```
 
 ## Project Structure
