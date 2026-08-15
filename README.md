@@ -11,7 +11,7 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 - **Scripting**: RSH v2.3 (RadiumOS Shell Language)
 - **Hardware**: Keyboard Driver (most keybinds working !)
 - **Security**: AES-128 CBC encryption/decryption
-- **Tools**: Radium Geiger hex viewer, desktop environment, 15+ apps
+- **Tools**: Radium Geiger hex viewer
 
 ## Building
 
