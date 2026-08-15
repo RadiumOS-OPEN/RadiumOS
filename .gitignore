@@ -1,20 +1,12 @@
-# Binaries and build outputs
-*.bin
+# Build outputs, ISOs, and binaries
 *.iso
-*.img
-*.log
-*.dump
+*.bin
 *.o
 *.a
-*.so
+*.img
+os.bin
+os.iso
+packages/iso/boot/os.bin
 
-# Logs and temporary files
-*.txt
-*.json
-radium_backups/
-clipboard.txt
-disk.img
-
-# IDE/Editor files
-.vscode/
-.idea/
+# Rust build artifacts
+rust_lib/target/

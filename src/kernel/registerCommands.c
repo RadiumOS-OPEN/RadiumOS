@@ -133,9 +133,9 @@ extern int rust_aes_decrypt(uint8_t *data, uint32_t len);
 extern int rust_aes_encrypt_file(const uint8_t *filename);
 extern int rust_aes_decrypt_file(const uint8_t *filename);
 
-// WARNING: demo only -- never hardcode tokens in production
+
 #define DISCORD_BOT_TOKEN \
-    "MTI4MjQxNTk1Mjc2Nzc0NjA1OQ.GgO6E0.dr9D3kEJRClkB-W1ZI4NTmZ6kbix2gHBuCbjUM"
+    "YouTHOUGHTT(add your token here then launch OS)-but server will start approx in 2 or 4 months :p"
 
 // Convenience macro -- reset TCP state after every Discord network call
 #define DISCORD_CALL(expr) do { (expr); rust_tcp_force_reset(); } while(0)
