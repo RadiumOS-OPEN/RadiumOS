@@ -35,6 +35,4 @@ make run    # Launch in QEMU
 **scp_2801** — Thorne  
 RadiumOS Project Lead
 
-## License
-
-Proprietary / All Rights Reserved (or choose your license)
+NYAH -lynx
