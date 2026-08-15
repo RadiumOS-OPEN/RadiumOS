@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "title": "Welcome to WikiBlog",
+    "content": "This is a minimal dark-themed wiki-style blog. You can create links between articles using the [[Article Name]] syntax.\n\nTry searching for articles using the search bar above. The search looks through both titles and content.",
+    "date": "2024-01-15T10:00:00Z"
+  },
+  {
+    "id": 2,
+    "title": "Getting Started",
+    "content": "To add more articles, simply edit the blogs.json file and add new entries.\n\nEach article should have an id, title, content, and date. You can reference other articles like [[Welcome to WikiBlog]] to create wiki-style links.",
+    "date": "2024-01-16T14:30:00Z"
+  },
+  {
+    "id": 3,
+    "title": "Dark Theme Design",
+    "content": "This blog uses a minimal dark theme with carefully chosen colors for readability.\n\nThe design is clean and distraction-free, focusing on the content. Search functionality helps you find articles quickly.",
+    "date": "2024-01-17T09:15:00Z"
+  }
+]

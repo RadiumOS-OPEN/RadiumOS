@@ -5,30 +5,57 @@
 #include "../sound/sound.h"
 extern uint8_t terminal_color; // Assuming terminal_color is of type uint8_t
 void meltdown_screen(char* message, char* file, int line, int error_code, int cr2, int int_no){
-    terminal_clear_inFunction();
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_RED);
-    print("\n\n\n\n\n\n\n\n");
-    print("\t\t\t\t\t\===[ Meltdown Occurred at RadiumKernel! ]===\n\n");
-
-    print("\t\t\t\t\tError Message : \"");
-    print(message);
-    print("\"\n");
-    print("\t\t\t\t\tError Code    : ");
-    printr("0x%x\n", error_code);
-    printr("\t\t\t\t\tCR2           : 0x%x (%d)\n", cr2, cr2);
-    printr("\t\t\t\t\t\Interrupt No. : 0x%x", int_no);
-    print("\n");
-    print("\t\t\t\t\t=[ Handler Information ]=\n\t");
-    print("\t\t\t\t\tFile name   : ");
-    print(file);
-    print("\n");
-    print("\t\t\t\t\tLine number : ");
-    printr("\t\t\t\t\t%d", line);
-    asm volatile("cli");
+    vga_window_t main_win = vga_create_centered_window(
+        100, 100, 
+        VGA_COLOR_WHITE, 
+        VGA_COLOR_RED  // Changed to RED for error display
+    );
+    
+    // Set title for error screen
+    vga_win_set_title(&main_win, "Meltdown - RadiumKernel");
+    
+    // Buffer for formatted strings
+    char buffer[256];
+    
+    // Add error content
+    int row = 2;
+    vga_win_puts_centered(&main_win, row++, "__~~==[ Meltdown Occurred at RadiumKernel! ]===");
+    row++;
+    
+    vga_win_puts(&main_win, row++, 5, "Error Message:");
+    vga_win_puts(&main_win, row++, 7, message);
+    row++;
+    
+    // Format error code
+    printr(buffer, "Error Code: 0x%x", error_code);
+    vga_win_puts(&main_win, row++, 5, buffer);
+    
+    // Format CR2
+    printr(buffer, "CR2: 0x%x (%d)", cr2, cr2);
+    vga_win_puts(&main_win, row++, 5, buffer);
+    
+    // Format interrupt number
+    printr(buffer, "Interrupt No.: 0x%x", int_no);
+    vga_win_puts(&main_win, row++, 5, buffer);
+    row++;
+    
+    // Handler information
+    vga_win_puts(&main_win, row++, 5, "=[ Handler Information ]=");
+    printr(buffer, "File name: %s", file);
+    vga_win_puts(&main_win, row++, 5, buffer);
+    printr(buffer, "Line number: %d", line);
+    vga_win_puts(&main_win, row++, 5, buffer);
+    
+    // Refresh to display
+    vga_win_refresh(&main_win);
+    
+    // Wait with error sound
     while (true) {
-        //speaker_play_error_sound();
+        speaker_play_error_sound();
     }
-
+    
+    // This will never execute due to infinite loop
+    vga_destroy_window(&main_win);
 }
 void handle_error(const char* message, const char* errorType) {
     terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_RED));

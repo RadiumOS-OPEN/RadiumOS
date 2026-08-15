@@ -1,16 +1,21 @@
 #include "utility.h"
+#include "../terminal/terminal.h"
+#include "../Avfs/Avfs.h"
+
 #define MEMORY_POOL_SIZE 1024
 static char memory_pool[MEMORY_POOL_SIZE];
 static size_t allocated_size = 0;
 
+
 typedef struct Block {
-    size_t size;
-    struct Block* next;
+    size_t size;        // Size of usable memory (not including header)
+    int is_free;        // 1 = free, 0 = allocated
+    struct Block* next; // Next block in memory (NOT free list)
 } Block;
 
 static Block* free_list = NULL;
 
-char* strstr(const char* h, const char* n) {
+char* strstr(const char* h, const char* n) { 
     if (!*n) return (char*)h;
     for (; *h; h++) {
         const char* hh = h, *nn = n;
@@ -74,105 +79,108 @@ int parse_int(const char* str) {
 }
 
 
+
+static Block* heap_start = NULL;
+
 void* malloc(size_t size) {
-    if (!size) return NULL;
-    
-    // Align size to pointer boundary (typically 8 bytes on 32-bit systems)
-    size = (size + 7) & ~7;
-    
-    Block* current = free_list;
+
+    Block* current = heap_start;
     Block* prev = NULL;
+
     
-    // Search for a suitable free block
+    if (!size) {
+        print("malloc: size is 0, returning NULL\n");
+        return NULL;
+    }
+    
+    size = (size + 7) & ~7;
+
+    
+    // First-fit search through ALL blocks
     while (current) {
-        if (current->size >= size) {
-            // Found a suitable block
+        if (current->is_free && current->size >= size) {
+            // Found suitable block
             if (current->size >= size + sizeof(Block) + 8) {
-                // Split the block if there's enough space for another block
+                // Split block
                 Block* new_block = (Block*)((char*)current + sizeof(Block) + size);
                 new_block->size = current->size - size - sizeof(Block);
+                new_block->is_free = 1;
                 new_block->next = current->next;
                 
                 current->size = size;
-                current->next = NULL; // Mark as allocated
-                
-                // Update free list
-                if (prev) {
-                    prev->next = new_block;
-                } else {
-                    free_list = new_block;
-                }
-            } else {
-                // Use the entire block
-                if (prev) {
-                    prev->next = current->next;
-                } else {
-                    free_list = current->next;
-                }
-                current->next = NULL; // Mark as allocated
+                current->next = new_block;
             }
             
-            // Clear the allocated memory
+            current->is_free = 0;
             memset((char*)current + sizeof(Block), 0, current->size);
-            return (void*)((char*)current + sizeof(Block));
+            return (char*)current + sizeof(Block);
         }
+        
         prev = current;
         current = current->next;
     }
     
-    // No suitable free block found, allocate from the end of the pool
-    size_t total_used = 0;
-    
-    // Calculate how much memory is actually used
-    char* pool_end = memory_pool;
-    Block* scan = (Block*)memory_pool;
-    
-    while ((char*)scan < memory_pool + MEMORY_POOL_SIZE) {
-        if ((char*)scan + sizeof(Block) + scan->size > memory_pool + MEMORY_POOL_SIZE) {
-            break; // Prevent overflow
+    // No suitable block, allocate at end
+    if (!heap_start) {
+        heap_start = (Block*)memory_pool;
+        current = heap_start;
+    } else {
+        // Find last block
+        current = heap_start;
+        while (current->next) {
+            current = current->next;
         }
         
-        pool_end = (char*)scan + sizeof(Block) + scan->size;
-        
-        // Find next block
-        Block* next_block = (Block*)pool_end;
-        if ((char*)next_block >= memory_pool + MEMORY_POOL_SIZE) {
-            break;
+        // Check if we have space
+        char* new_block_pos = (char*)current + sizeof(Block) + current->size;
+        if (new_block_pos + sizeof(Block) + size > memory_pool + MEMORY_POOL_SIZE) {
+            return NULL; // Out of memory
         }
         
-        // Check if this looks like a valid block
-        if (next_block->size == 0 || next_block->size > MEMORY_POOL_SIZE) {
-            break;
-        }
-        
-        scan = next_block;
+        Block* new_block = (Block*)new_block_pos;
+        current->next = new_block;
+        current = new_block;
     }
     
-    total_used = pool_end - memory_pool;
-    
-    // Check if we have enough space
-    if (total_used + sizeof(Block) + size > MEMORY_POOL_SIZE) {
-        return NULL; // Out of memory
+    // Initialize new block
+    char* end_check = (char*)current + sizeof(Block) + size;
+    if (end_check > memory_pool + MEMORY_POOL_SIZE) {
+        return NULL;
     }
     
-    // Allocate new block at the end
-    Block* new_block = (Block*)pool_end;
-    new_block->size = size;
-    new_block->next = NULL; // Mark as allocated
+    current->size = size;
+    current->is_free = 0;
+    current->next = NULL;
     
-    // Clear the allocated memory
-    memset((char*)new_block + sizeof(Block), 0, size);
-    
-    return (void*)((char*)new_block + sizeof(Block));
+    memset((char*)current + sizeof(Block), 0, size);
+    return (char*)current + sizeof(Block);
 }
-
 
 void free(void* ptr) {
     if (!ptr) return;
+    
     Block* block = (Block*)((char*)ptr - sizeof(Block));
-    block->next = free_list;
-    free_list = block;
+    block->is_free = 1;
+    
+    // Coalesce with next block if free
+    if (block->next && block->next->is_free) {
+        block->size += sizeof(Block) + block->next->size;
+        block->next = block->next->next;
+    }
+    
+    // Coalesce with previous block (requires linear scan)
+    Block* current = heap_start;
+    while (current && current->next != block) {
+        current = current->next;
+    }
+    
+    if (current && current->is_free) {
+        current->size += sizeof(Block) + block->size;
+        current->next = block->next;
+    }
 }
+
+
 
 char* strchr(const char* str, int c) {
     while (*str) if (*str++ == (char)c) return (char*)(str - 1);
@@ -368,6 +376,7 @@ inline uint16_t htons(uint16_t hostshort) {
 inline uint16_t ntohs(uint16_t netshort) {
     return (netshort << 8) | (netshort >> 8);
 }
+
 
 inline uint32_t htonl(uint32_t hostlong) {
     return ((hostlong & 0x000000FF) << 24) | ((hostlong & 0x0000FF00) << 8) | ((hostlong & 0x00FF0000) >> 8) | ((hostlong & 0xFF000000) >> 24);
@@ -702,69 +711,218 @@ void warn(const char* message, const char* file) {
  * @param message The success message to display
  * @param file The source file name where the completion occurred
  */
+
+// Global log file name (NULL = no logging to file)
+static const char* g_log_file = NULL;
+
+void set_log_file(const char* filename) {
+    g_log_file = filename;
+    
+    // Create the log file if it doesn't exist
+    if (filename && !avfs_file_exists(filename)) {
+        avfs_create_file(filename, 0);
+    }
+}
+
+void clear_log_file(void) {
+    g_log_file = NULL;
+}
+
+// Helper function to append to log file
+static void append_to_log(const char* message) {
+    if (!g_log_file || !message) {
+        return;
+    }
+    
+    uint32_t len = strlen(message);
+    if (len == 0) {
+        return;
+    }
+    
+    // Check if file exists first
+    if (!avfs_file_exists(g_log_file)) {
+        // Create the log file if it doesn't exist
+        // Create with initial size (will grow as needed)
+        if (avfs_create_file(g_log_file, 4096) != 0) {
+            return; // Failed to create
+        }
+    }
+    
+    // Try to append
+    int result = avfs_append_file(g_log_file, message, len);
+    
+    if (result != 0) {
+        // Append failed - try alternative method
+        // Read current content
+        int current_size = avfs_get_filesize(g_log_file);
+        if (current_size < 0) {
+            return;
+        }
+        
+        static char temp_buffer[4096];
+        if (current_size >= 4096) {
+            return; // Log too large
+        }
+        
+        // Read existing content
+        if (avfs_read_file(g_log_file, temp_buffer, current_size, 0) != 0) {
+            return;
+        }
+        
+        // Append new message to buffer
+        uint32_t new_size = current_size + len;
+        if (new_size >= 4096) {
+            return; // Would overflow
+        }
+        
+        for (uint32_t i = 0; i < len; i++) {
+            temp_buffer[current_size + i] = message[i];
+        }
+        
+        // Delete old file
+        avfs_remove_file(g_log_file);
+        
+        // Create new file with combined content
+        if (avfs_create_file(g_log_file, new_size) == 0) {
+            avfs_write_file(g_log_file, temp_buffer, new_size, 0);
+        }
+    }
+}
+
 void done(const char* message, const char* file) {
     if (!message) return;
     
-    // Set color to green for success messages
+    // Build log message
+    char log_buffer[512];
+    int pos = 0;
+    
+    // "[DONE"
+    log_buffer[pos++] = '[';
+    log_buffer[pos++] = 'D';
+    log_buffer[pos++] = 'O';
+    log_buffer[pos++] = 'N';
+    log_buffer[pos++] = 'E';
+    
+    if (file) {
+        log_buffer[pos++] = ':';
+        int i = 0;
+        while (file[i] && pos < 510) {
+            log_buffer[pos++] = file[i++];
+        }
+    }
+    
+    log_buffer[pos++] = ']';
+    log_buffer[pos++] = ' ';
+    
+    // Copy message
+    int i = 0;
+    while (message[i] && pos < 510) {
+        log_buffer[pos++] = message[i++];
+    }
+    
+    log_buffer[pos++] = '\n';
+    log_buffer[pos] = '\0';
+    
+    // Output to file first
+    append_to_log(log_buffer);
+    
+    // Then output to terminal with colors
     terminal_setcolor(VGA_COLOR_GREEN);
     print("[DONE");
-    
     if (file) {
         print(":");
         print(file);
     }
-    
     print("] ");
     terminal_setcolor(VGA_COLOR_WHITE);
     print(message);
     print("\n");
-    
-    // Reset to default color
     terminal_setcolor(VGA_COLOR_LIGHT_GREY);
 }
 
 void info(const char* message, const char* file) {
     if (!message) return;
     
-    // Set color to cyan for info messages
+    // Build log message
+    char log_buffer[512];
+    int pos = 0;
+    
+    strcpy(log_buffer, "[INFO");
+    pos += 5;
+    
+    if (file) {
+        log_buffer[pos++] = ':';
+        strcpy(log_buffer + pos, file);
+        pos += strlen(file);
+    }
+    
+    strcpy(log_buffer + pos, "] ");
+    pos += 2;
+    
+    strcpy(log_buffer + pos, message);
+    pos += strlen(message);
+    
+    log_buffer[pos++] = '\n';
+    log_buffer[pos] = '\0';
+    
+    // Output to file
+    append_to_log(log_buffer);
+    
+    // Output to terminal with colors
     terminal_setcolor(VGA_COLOR_CYAN);
     print("[INFO");
-    
     if (file) {
         print(":");
         print(file);
     }
-    
     print("] ");
     terminal_setcolor(VGA_COLOR_WHITE);
     print(message);
     print("\n");
-    
-    // Reset to default color
     terminal_setcolor(VGA_COLOR_LIGHT_GREY);
 }
 
 void error(const char* message, const char* file) {
     if (!message) return;
     
-    // Set color to red for error messages
+    // Build log message
+    char log_buffer[512];
+    int pos = 0;
+    
+    strcpy(log_buffer, "[ERROR");
+    pos += 6;
+    
+    if (file) {
+        log_buffer[pos++] = ':';
+        strcpy(log_buffer + pos, file);
+        pos += strlen(file);
+    }
+    
+    strcpy(log_buffer + pos, "] ");
+    pos += 2;
+    
+    strcpy(log_buffer + pos, message);
+    pos += strlen(message);
+    
+    log_buffer[pos++] = '\n';
+    log_buffer[pos] = '\0';
+    
+    // Output to file
+    append_to_log(log_buffer);
+    
+    // Output to terminal with colors
     terminal_setcolor(VGA_COLOR_RED);
     print("[ERROR");
-    
     if (file) {
         print(":");
         print(file);
     }
-    
     print("] ");
     terminal_setcolor(VGA_COLOR_WHITE);
     print(message);
     print("\n");
-    
-    // Reset to default color
     terminal_setcolor(VGA_COLOR_LIGHT_GREY);
 }
-
 // Add this function to debug memory issues
 void debug_memory_status() {
     info("Checking memory status...", __FILE__);
@@ -834,4 +992,102 @@ void* calloc(size_t nmemb, size_t size) {
         p[i] = 0;
     }
     return ptr;
+}
+
+bool parse_ip(const char *ip_str, uint8_t ip_out[4]) {
+    int octet = 0;
+    int octet_index = 0;
+    int value = 0;
+    if (!ip_str) return false;
+    while (*ip_str) {
+        char c = *ip_str;
+        if (c >= '0seperate' && c <= '9') {
+            value = value * 10 + (c - '0');
+            if (value > 255) return false; // octet out of range
+        } else if (c == '.') {
+            if (octet_index >= 3) return false; // too many dots
+            ip_out[octet_index++] = (uint8_t)value;
+            value = 0;
+        } else {
+            return false; // invalid character
+        }
+        ip_str++;
+    }
+    // Last octet
+    if (octet_index != 3) return false; // not enough octets
+    ip_out[octet_index] = (uint8_t)value;
+    return true;
+}
+
+void* memmove(void* dest, const void* src, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+    if (d == s || n == 0) {
+        return dest;
+    }
+    if (d < s) {
+        // Copy forward
+        for (size_t i = 0; i < n; i++) {
+            d[i] = s[i];
+        }
+    } else {
+        // Copy backward to handle overlap
+        for (size_t i = n; i != 0; i--) {
+            d[i - 1] = s[i - 1];
+        }
+    }
+    return dest;
+}
+
+// Custom implementations of isalpha and isalnum (freestanding, ASCII-only)
+static int isalpha(int c) {
+    // Returns non-zero if c is a letter (a-z or A-Z)
+    unsigned char uc = (unsigned char)c;  // Handle signed chars
+    return ((uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z')) ? 1 : 0;
+}
+
+static int isalnum(int c) {
+    // Returns non-zero if c is alphanumeric (a-z, A-Z, 0-9)
+    unsigned char uc = (unsigned char)c;  // Handle signed chars
+    return (isalpha(c) || (uc >= '0' && uc <= '9')) ? 1 : 0;
+}
+
+uint32_t strtoul(const char *str, char **endptr, int base) {
+    if (str == NULL || base != 10) {  // Only support base 10 for simplicity
+        if (endptr) *endptr = (char*)str;  // Indicate no conversion
+        return 0;  // Return 0 on error
+    }
+    
+    uint32_t result = 0;
+    while (*str >= '0' && *str <= '9') {  // Process digits
+        result = result * 10 + (*str - '0');
+        str++;
+    }
+    
+    if (endptr) *endptr = (char*)str;  // Set the end pointer
+    return result;
+}
+
+char* strncat(char* dest, const char* src, size_t n) {
+    if (!dest || !src) {
+        return dest;
+    }
+    
+    // Find the end of dest
+    char* dest_end = dest;
+    while (*dest_end != '\0') {
+        dest_end++;
+    }
+    
+    // Append up to n characters from src
+    size_t i = 0;
+    while (i < n && src[i] != '\0') {
+        dest_end[i] = src[i];
+        i++;
+    }
+    
+    // Always null-terminate
+    dest_end[i] = '\0';
+    
+    return dest;
 }

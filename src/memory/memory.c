@@ -1,11 +1,10 @@
 #include "memory.h"
 #include "../terminal/terminal.h"
 #include "../errors/error.h"
-
+#include "../io/io.h"
 // Memory pool for kernel allocations
 uint8_t memory_pool[MEMORY_POOL_SIZE]; 
 size_t used_memory = 0; 
-size_t total_memory = 10000;
 static Block* free_list = NULL;
 
 // Page directory and page table structures for memory mapping
@@ -26,8 +25,6 @@ static uint32_t next_virtual_addr = 0xC0000000; // Start virtual addresses at 3G
 #define MEMORY_TYPE_ACPI_NVS 4
 #define MEMORY_TYPE_BAD 5
 
-
-
 // Global variables for physical memory tracking
 static MemoryMap system_memory_map;
 static uint64_t total_physical_memory = 0;
@@ -39,33 +36,92 @@ static uint8_t* page_bitmap = NULL;
 static uint32_t total_pages = 0;
 static uint32_t allocated_pages = 0;
 
-// Function to detect memory using BIOS E820 (simplified for kernel mode)
+
+// Function to detect memory using BIOS E820 (placeholder - implement in bootloader!)
 int detect_memory_e820(MemoryMap* memory_map) {
-    // Since we're in protected mode, we'll simulate or use bootloader-provided info
-    // This is a placeholder - in real implementation, you'd get this from bootloader
-    memory_map->entry_count = 3; // Example entries
-    
-    // Example memory map (adjust based on your system)
-    memory_map->entries[0].base_addr = 0x0;
-    memory_map->entries[0].length = 0x9FC00; // ~640KB
-    memory_map->entries[0].type = MEMORY_TYPE_AVAILABLE;
-    
-    memory_map->entries[1].base_addr = 0x9FC00;
-    memory_map->entries[1].length = 0x400; // BIOS area
-    memory_map->entries[1].type = MEMORY_TYPE_RESERVED;
-    
-    memory_map->entries[2].base_addr = 0x100000; // 1MB
-    memory_map->entries[2].length = 0x7F00000; // 127MB (example)
-    memory_map->entries[2].type = MEMORY_TYPE_AVAILABLE;
-    
-    return memory_map->entry_count;
+    // TODO: In real implementation, get this from bootloader (e.g., Multiboot tag).
+    // For now, return 0 to trigger fallback detection.
+    // If bootloader provides it, call set_memory_map_from_bootloader() in kernel_main.
+    print("E820 detection: Use bootloader to populate MemoryMap and call set_memory_map_from_bootloader.\n");
+    memory_map->entry_count = 0;
+    return 0;
 }
 
-// Alternative: Simple memory detection
-uint32_t detect_memory_simple(void) {
-    // For now, return a reasonable default
-    // In real implementation, you might read from CMOS or use other methods
-    return 128 * 1024 * 1024; // 128MB default
+// Set memory map from bootloader (call this from kernel entry point)
+void set_memory_map_from_bootloader(MemoryMap* map) {
+    if (!map || map->entry_count <= 0 || map->entry_count > MEMORY_MAP_MAX_ENTRIES) {
+        print("Invalid memory map from bootloader.\n");
+        return;
+    }
+    system_memory_map = *map;
+    print("Memory map set from bootloader (");
+    print_decimal(map->entry_count);
+    print(" entries).\n");
+}
+
+// CMOS-based memory detection (real detection for low/extended memory)
+uint64_t detect_memory_cmos(void) {
+    print("Detecting memory via CMOS...\n");
+    
+    // Disable NMI for safe CMOS read
+    outb(0x70, 0x80 | 0x15); // Low memory KB (0-640KB + 640-1024KB)
+    uint8_t low_low = inb(0x71);
+    outb(0x70, 0x80 | 0x16);
+    uint8_t low_high = inb(0x71);
+    uint16_t low_kb = (low_high << 8) | low_low;
+    uint64_t low_mem = (uint64_t)low_kb * 1024;
+    
+    // Extended memory (1MB - 16MB)
+    outb(0x70, 0x80 | 0x30);
+    uint8_t ext_low = inb(0x71);
+    outb(0x70, 0x80 | 0x31);
+    uint8_t ext_high = inb(0x71);
+    uint16_t ext_kb = (ext_high << 8) | ext_low;
+    uint64_t ext_mem = (uint64_t)ext_kb * 1024;
+    
+    // Total (low includes up to 1MB; ext is above 1MB)
+    uint64_t total = low_mem + ext_mem;
+    
+    // CMOS unreliable >16MB; cap at reasonable default if too small
+    if (total < 16 * 1024 * 1024) {
+        total = 64 * 1024 * 1024; // Safe fallback for large systems
+        print("CMOS detected low value; assuming 64MB minimum.\n");
+    }
+    
+    print("CMOS: Low memory = ");
+    print_decimal(low_mem / 1024);
+    print(" KB, Extended = ");
+    print_decimal(ext_mem / 1024);
+    print(" KB, Total = ");
+    print_decimal(total / (1024 * 1024));
+    print(" MB\n");
+    
+    return total;
+}
+
+// Build a basic memory map from CMOS detection (fallback)
+void build_cmos_memory_map(MemoryMap* map, uint64_t total_mem) {
+    map->entry_count = 3;
+    
+    // Entry 0: Conventional memory (0 - 640KB available)
+    map->entries[0].base_addr = 0x0;
+    map->entries[0].length = 640 * 1024;
+    map->entries[0].type = MEMORY_TYPE_AVAILABLE;
+    
+    // Entry 1: Reserved (640KB - 1MB, e.g., BIOS, video RAM)
+    map->entries[1].base_addr = 640 * 1024;
+    map->entries[1].length = 384 * 1024; // Up to 1MB
+    map->entries[1].type = MEMORY_TYPE_RESERVED;
+    
+    // Entry 2: Extended memory (1MB - total, available; adjust for holes if known)
+    map->entries[2].base_addr = 1024 * 1024;
+    map->entries[2].length = total_mem - 1024 * 1024;
+    map->entries[2].type = MEMORY_TYPE_AVAILABLE;
+    
+    // Reserve 1MB at top for kernel/BIOS if needed
+    if (map->entries[2].length > 1024 * 1024) {
+        map->entries[2].length -= 1024 * 1024;
+    }
 }
 
 // Set a page as allocated in the bitmap
@@ -130,11 +186,11 @@ void free_physical_page(uint32_t physical_addr) {
 void init_physical_memory(void) {
     print("Detecting physical memory...\n");
     
-    // Try E820 first (more accurate)
+    // Try E820 first (expects bootloader to have set it via set_memory_map_from_bootloader)
     int entries = detect_memory_e820(&system_memory_map);
     
     if (entries > 0) {
-        print("Memory map detected using E820:\n");
+        print("Memory map from bootloader/E820:\n");
         
         total_physical_memory = 0;
         available_physical_memory = 0;
@@ -159,10 +215,29 @@ void init_physical_memory(void) {
             }
         }
     } else {
-        // Fallback to simple detection
-        print("Using simple memory detection...\n");
-        total_physical_memory = detect_memory_simple();
-        available_physical_memory = total_physical_memory - (1024 * 1024); // Reserve 1MB for system
+        // Fallback to CMOS detection
+        print("No E820 map; falling back to CMOS detection...\n");
+        total_physical_memory = detect_memory_cmos();
+        
+        // Build basic map from CMOS
+        build_cmos_memory_map(&system_memory_map, total_physical_memory);
+        
+        // Calculate available (subtract reserved, e.g., 1MB for system)
+        available_physical_memory = total_physical_memory - (1024 * 1024);
+        
+        // Log the fallback map
+        for (int i = 0; i < system_memory_map.entry_count; i++) {
+            MemoryMapEntry* entry = &system_memory_map.entries[i];
+            print("  Fallback Region ");
+            print_decimal(i);
+            print(": Base=0x");
+            print_hex((uint32_t)entry->base_addr);
+            print(", Length=0x");
+            print_hex((uint32_t)entry->length);
+            print(", Type=");
+            print_decimal(entry->type);
+            print("\n");
+        }
     }
     
     print("Total physical memory: ");
@@ -238,7 +313,7 @@ void* memory_alloc(size_t size) {
     print_capacity(size);
     print("\n");
 
-    while (c) {
+        while (c) {
         if (c->size >= size) {
             if (c->size > size + sizeof(Block)) {
                 Block *n = (Block*)((uint8_t*)c + size + sizeof(Block));

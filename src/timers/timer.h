@@ -5,7 +5,6 @@
 #include <stdbool.h>
 
 // Timer constants
-#define VGA_MEMORY ((volatile uint16_t*)0xB8000)
 
 // Global tick counter
 extern volatile uint32_t ticks;
@@ -16,8 +15,6 @@ void init_timer(void);
 void delay(int milliseconds);
 void precise_delay(uint32_t milliseconds);
 
-// Delay functions
-void delay_ms(uint32_t ms);
 void delay_us(uint32_t us);
 void delay_us_precise(uint32_t us);
 

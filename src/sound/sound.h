@@ -55,7 +55,7 @@ void speaker_play_notification_sound(void);
 // Musical scale functions
 void speaker_play_scale(void);
 void speaker_play_chord(uint32_t* frequencies, uint32_t count, uint32_t duration_ms);
-
+void speaker_play_mario_theme_full();
 // Advanced functions
 void speaker_sweep(uint32_t start_freq, uint32_t end_freq, uint32_t duration_ms);
 void speaker_play_mario_theme(void);

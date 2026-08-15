@@ -5,5 +5,5 @@
 
 // Function prototype for rebooting the system
 void reboot_command(int argc, char* argv[]);
-
+void reboot();
 #endif // REBOOT_H

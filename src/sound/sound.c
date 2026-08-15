@@ -11,11 +11,55 @@ void speaker_delay(uint32_t ms) {
         // Just wait
     }
 }
-
+void speaker_play_mario_theme_full(void) {
+    // Main melody notes
+    uint32_t melody[] = {
+        NOTE_E5, NOTE_E5, 0, NOTE_E5, 0, NOTE_C5, NOTE_E5, 0,
+        NOTE_G5, 0, 0, 0, NOTE_G4, 0, 0, 0,
+        
+        NOTE_C5, 0, 0, NOTE_G4, 0, 0, NOTE_E4, 0,
+        0, NOTE_A4, 0, NOTE_B4, 0, NOTE_AS4, NOTE_A4, 0,
+        
+        NOTE_G4, NOTE_E5, NOTE_G5, NOTE_A5, 0, NOTE_F5, NOTE_G5,
+        0, NOTE_E5, 0, NOTE_C5, NOTE_D5, NOTE_B4, 0, 0,
+        
+        NOTE_C5, 0, 0, NOTE_G4, 0, 0, NOTE_E4, 0,
+        0, NOTE_A4, 0, NOTE_B4, 0, NOTE_AS4, NOTE_A4, 0,
+        
+        NOTE_G4, NOTE_E5, NOTE_G5, NOTE_A5, 0, NOTE_F5, NOTE_G5,
+        0, NOTE_E5, 0, NOTE_C5, NOTE_D5, NOTE_B4, 0, 0
+    };
+    
+    // Note durations (in milliseconds)
+    uint32_t durations[] = {
+        150, 150, 150, 150, 150, 150, 150, 150,
+        150, 150, 150, 150, 150, 150, 150, 150,
+        
+        150, 150, 150, 150, 150, 150, 150, 150,
+        150, 150, 150, 150, 150, 150, 150, 150,
+        
+        120, 120, 120, 150, 150, 150, 150,
+        150, 150, 150, 150, 150, 150, 150, 150,
+        
+        150, 150, 150, 150, 150, 150, 150, 150,
+        150, 150, 150, 150, 150, 150, 150, 150,
+        
+        120, 120, 120, 150, 150, 150, 150,
+        150, 150, 150, 150, 150, 150, 150, 150
+    };
+    
+    int note_count = sizeof(melody) / sizeof(melody[0]);
+    
+    for (int i = 0; i < note_count; i++) {
+        speaker_play_tone(melody[i], durations[i]);
+        sleep_seconds(2); // Small gap between notes
+    }
+}
 // Initialize the PC speaker
 void speaker_init(void) {
     // Configure PIT channel 2 for square wave generation
     port_byte_out(PIT_COMMAND_PORT, 0xB6);
+    
     speaker_disable();
 }
 

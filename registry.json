@@ -1,0 +1,26 @@
+{
+  "version": "1.0",
+  "packages": [
+    {
+      "name": "hello-world",
+      "version": "1.0",
+      "size": 46,
+      "url": "http://localhost:8080/packages/hello.bin",
+      "description": "Simple hello world script"
+    },
+    {
+      "name": "sample-text",
+      "version": "1.0",
+      "size": 82,
+      "url": "http://localhost:8080/packages/sample.txt",
+      "description": "Sample text file"
+    },
+    {
+      "name": "binary-data",
+      "version": "1.0",
+      "size": 4096,
+      "url": "http://localhost:8080/packages/data.bin",
+      "description": "Sample binary data file"
+    }
+  ]
+}

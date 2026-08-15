@@ -1,104 +1,159 @@
 ; ----- Multiboot Header -----
-
 section .multiboot
-	MB_MAGIC    equ 0x1BADB002
-	MB_FLAGS    equ 0
-	MB_CHECKSUM equ -(MB_MAGIC + MB_FLAGS)
+MB_MAGIC    equ 0x1BADB002
+MB_FLAGS    equ 0
+MB_CHECKSUM equ -(MB_MAGIC + MB_FLAGS)
+dd MB_MAGIC
+dd MB_FLAGS
+dd MB_CHECKSUM
 
-	dd MB_MAGIC
-	dd MB_FLAGS
-	dd MB_CHECKSUM
-
-; ----- Initial Stack -----
-
+; ----- Initial Stack ----- FIXED!
 section .bss
-stack_max:
-	resb 16384 ; reserve 16 KiB for the initial kernel stack
-stack_bottom:
+align 16
+stack_bottom:           ; Low address
+    resb 16384          ; 16 KiB stack space
+stack_top:              ; High address - stack grows DOWN from here
+
+align 4096
+global bpd
+bpd:
+    resb 4096
+
+global bptl
+bptl:
+    resb 4096
 
 ; ----- Boot -----
-
 section .text
 global _start
 _start:
-    mov esp, stack_bottom
-    mov ebx, [esp + 4]  ; multiboot info pointer passed by bootloader
+    cli                         ; Disable interrupts during boot
+    mov esp, stack_top          ; FIXED: Point to TOP of stack
+    
+
+    
+    ; Now call kernel
+    mov ebx, [esp + 4]         ; multiboot info pointer
     push ebx
-	extern kernel_main
+    extern kernel_main
     call kernel_main
+    
     cli
 .hang:
     hlt
     jmp .hang
+; ----- Setup Paging -----
+setup_paging:
+    ; Step 1: Setup page table for first 4MB (kernel + stack)
+    mov edi, bptl
+    mov eax, 0x00000003         ; Present + RW
+    mov ecx, 1024               ; 1024 entries * 4KB = 4MB
+.fill_low_table:
+    stosd
+    add eax, 0x1000             ; Next 4KB page
+    loop .fill_low_table
+    
+    ; Step 2: Clear page directory
+    mov edi, bpd
+    xor eax, eax
+    mov ecx, 1024
+    rep stosd
+    
+    ; Step 3: First PDE points to our page table
+    mov dword [bpd], bptl
+    or dword [bpd], 0x003    ; Present + RW
+    
+    ; Step 4: Map framebuffer 0xE0000000-0xF0000000 (256MB) using 4MB pages
+    mov edi, bpd
+    add edi, (0xE0000000 >> 22) * 4  ; edi = &page_directory[896]
+    
+    mov eax, 0xE0000000
+    or eax, 0x83                ; Present + RW + 4MB page
+    mov ecx, 64                 ; Map 64 * 4MB = 256MB
+.map_fb:
+    stosd
+    add eax, 0x400000           ; Next 4MB
+    loop .map_fb
+    
+    ; Step 5: Also map 0xF0000000-0xFF000000 (backup addresses)
+    mov eax, 0xF0000000
+    or eax, 0x83
+    mov ecx, 60
+.map_fb2:
+    stosd
+    add eax, 0x400000
+    loop .map_fb2
+    
+    ; Step 6: Load page directory into CR3
+    mov eax, bpd
+    mov cr3, eax
+    
+    ; Step 7: Enable PSE (Page Size Extension) for 4MB pages
+    mov eax, cr4
+    or eax, 0x10                ; Set PSE bit
+    mov cr4, eax
+    
+    ; Step 8: Enable paging
+    mov eax, cr0
+    or eax, 0x80000000          ; Set PG bit
+    mov cr0, eax
+    
+    ret
 
 ; ----- GDT -----
-
 global load_gdt
 load_gdt:
-	mov eax, [esp + 4]
-	lgdt [eax]
-
-	mov ax, 0x10
-	mov ds, ax
-	mov es, ax
-	mov fs, ax
-	mov gs, ax
-	mov ss, ax
-
-	; do a long jump to load CS with correct value
-	jmp 0x08:.load_cs
+    mov eax, [esp + 4]
+    lgdt [eax]
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:.load_cs
 .load_cs:
-	ret
+    ret
 
 ; ----- Interrupts -----
-
-; gets called for ALL interrupts
-isr_common:
-	; push registers to match struct TrapFrame (in reverse order)
-	pushad
-	push ds
-	push es
-	push fs
-	push gs
-
-	; load kernel data segment
-	push ebx
-	mov bx, 0x10
-	mov ds, bx
-	mov es, bx
-	mov fs, bx
-	mov gs, bx
-	pop ebx
-
-	extern handle_interrupt
-	call handle_interrupt
-
-	pop gs
-	pop fs
-	pop es
-	pop ds
-	popad
-	add esp, 8      ; pop error code and interrupt number
-	iret            ; pops (CS, EIP, EFLAGS) and also (SS, ESP) if privilege change occurs
-
-; generate isr stubs that jump to isr_common, in order to get a consistent stack frame
+%macro ISR_NO_ERROR_CODE 1
+global isr%1
+isr%1:
+    push dword 0
+    push dword %1
+    jmp isr_common
+%endmacro
 
 %macro ISR_ERROR_CODE 1
 global isr%1
 isr%1:
-	push dword %1   ; interrupt number
-	jmp isr_common
+    push dword %1
+    jmp isr_common
 %endmacro
 
-%macro ISR_NO_ERROR_CODE 1
-global isr%1
-isr%1:
-	push dword 0    ; dummy error code to align with TrapFrame
-	push dword %1   ; interrupt number
-	jmp isr_common
-%endmacro
+isr_common:
+    pushad
+    push ds
+    push es
+    push fs
+    push gs
+    push ebx
+    mov bx, 0x10
+    mov ds, bx
+    mov es, bx
+    mov fs, bx
+    mov gs, bx
+    pop ebx
+    extern handle_interrupt
+    call handle_interrupt
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popad
+    add esp, 8
+    iret
 
-; exceptions and CPU reserved interrupts 0 - 31
 ISR_NO_ERROR_CODE 0
 ISR_NO_ERROR_CODE 1
 ISR_NO_ERROR_CODE 2
@@ -132,8 +187,7 @@ ISR_NO_ERROR_CODE 29
 ISR_NO_ERROR_CODE 30
 ISR_NO_ERROR_CODE 31
 
-; IRQs 0 - 15 are mapped to 32 - 47
-ISR_NO_ERROR_CODE 32 ; PIT
+ISR_NO_ERROR_CODE 32
 ISR_NO_ERROR_CODE 33
 ISR_NO_ERROR_CODE 34
 ISR_NO_ERROR_CODE 35
@@ -150,70 +204,69 @@ ISR_NO_ERROR_CODE 45
 ISR_NO_ERROR_CODE 46
 ISR_NO_ERROR_CODE 47
 
-; syscall 0x80
-global isr128
 ISR_NO_ERROR_CODE 128
+global isr128
 
 global isr_redirect_table
 isr_redirect_table:
 %assign i 0
 %rep 48
-	dd isr%+i
+dd isr%+i
 %assign i i+1
 %endrep
 
 ; ----- Tasks -----
-
-; void switch_context(Task* from, Task* to);
-; swaps stack pointer to next task's kernel stack
 global switch_context
+
+TASK_ID_OFFSET          equ 0
+TASK_PID_OFFSET         equ 4
+TASK_KESP_OFFSET        equ 8
+TASK_KESP_BOTTOM_OFFSET equ 12
+
 switch_context:
-	mov eax, [esp + 4] ; eax = from
-	mov edx, [esp + 8] ; edx = to
-	
-	; these are the callee-saved registers on x86 according to cdecl
-	; they will change once we go off and execute the other task
-	; so we need to preserve them for when we get back
-	
-	; think of it from the perspective of the calling function,
-	; it wont notice that we go off and execute some other code
-	; but when we return to it, suddenly the registers it
-	; expected to remain unchanged has changed
-	push ebx
-	push esi
-	push edi
-	push ebp
-
-	; swap kernel stack pointer and store them
-	mov [eax + 4], esp ; from->kesp = esp
-	mov esp, [edx + 4] ; esp = to->kesp
-	
-	; NewTaskKernelStack will match the stack from here on out.
-
-	pop ebp
-	pop edi
-	pop esi
-	pop ebx
-
-	ret ; new tasks hijack the return address to new_task_setup
+    mov eax, [esp + 4]
+    mov edx, [esp + 8]
+    
+    push ebx
+    push esi
+    push edi
+    push ebp
+    
+    mov [eax + TASK_KESP_OFFSET], esp
+    mov esp, [edx + TASK_KESP_OFFSET]
+    
+    pop ebp
+    pop edi
+    pop esi
+    pop ebx
+    
+    ret
 
 global new_task_setup
 new_task_setup:
-	; update the segment registers
-	pop ebx
-	mov ds, bx
-	mov es, bx
-	mov fs, bx
-	mov gs, bx
-	
-	; zero out registers so they dont leak to userspace
-	xor eax, eax
-	xor ebx, ebx
-	xor ecx, ecx
-	xor edx, edx
-	xor esi, esi
-	xor edi, edi
-	xor ebp, ebp
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    iret
 
-	; exit the interrupt, placing us in the real task entry function
-	iret
+global set_vga_mode13h
+set_vga_mode13h:
+    push eax
+    push edx
+    
+    mov dx, 0x3C2
+    mov al, 0x63
+    out dx, al
+    
+    mov dx, 0x3C4
+    mov al, 0x00
+    out dx, al
+    inc dx
+    mov al, 0x01
+    out dx, al
+    
+    pop edx
+    pop eax
+    ret

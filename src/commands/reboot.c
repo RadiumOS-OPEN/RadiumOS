@@ -15,6 +15,26 @@
 /* Check if bit n in flags is set */
 #define check_flag(flags, n) ((flags) & bit(n))
 
+void reboot() {
+        uint8_t temp;
+
+
+    /* Clear all keyboard buffers (output and command buffers) */
+    do {
+        temp = inb(KBRD_INTRFC); /* Read status from keyboard interface */
+        if (check_flag(temp, KBRD_BIT_KDATA)) {
+            inb(KBRD_IO); /* Read keyboard data to clear it */
+        }
+    } while (check_flag(temp, KBRD_BIT_UDATA)); /* Continue until command buffer is empty */
+
+    outb(KBRD_INTRFC, KBRD_RESET); /* Pulse CPU reset line */
+
+    /* If that didn't work, halt the CPU */
+    while (1) {
+        asm volatile ("hlt"); /* Halt the CPU */
+    }
+}
+
 void reboot_command(int argc, char* argv[]) {
     uint8_t temp;
 

@@ -4,13 +4,13 @@
 #include "../utility/utility.h"
 #include "../io/io.h"
 
-volatile uint32_t ticks = 0; // Global tick counter
+volatile uint32_t ticks = 0; // Global tick counter (1 tick = 1ms)
 
 void timer_interrupt_handler() {
     ticks++;
     
-    // Handle scheduling every timer tick
-    if (ticks % 10 == 0) {  // Schedule every 10ms (adjust as needed)
+    // Handle scheduling every 10ms
+    if (ticks % 10 == 0) {
         schedule();
     }
     
@@ -21,78 +21,152 @@ void init_timer() {
     setup_pit(1000); // Initialize PIT at 1000 Hz (1ms per tick)
 }
 
+// Basic delay using timer ticks
 void delay(int milliseconds) {
-    uint32_t start_ticks = ticks;
-    uint32_t target_ticks = start_ticks + milliseconds;
+    if (milliseconds <= 0) return;
     
-    // Wait until enough ticks have passed
+    uint32_t start_ticks = ticks;
+    uint32_t target_ticks = start_ticks + (uint32_t)milliseconds;
+    
+    // Safety: Check if timer is running
+    uint32_t check = ticks;
+    for (volatile int i = 0; i < 100000; i++);
+    if (ticks == check) {
+        // Timer not incrementing, use busy wait fallback
+        for (volatile uint32_t i = 0; i < (uint32_t)milliseconds * 100000UL; i++);
+        return;
+    }
+    
+    // Handle wraparound case
+    if (target_ticks < start_ticks) {
+        // Wait for wraparound
+        while (ticks >= start_ticks) {
+            asm volatile("hlt");
+        }
+    }
+    
+    // Wait until target reached
     while (ticks < target_ticks) {
-        // Yield to other tasks while waiting
         asm volatile("hlt");
     }
 }
 
-// More accurate delay using timer ticks
+// More accurate delay using subtraction (handles wraparound automatically)
 void precise_delay(uint32_t milliseconds) {
+    if (milliseconds == 0) return;
+    
     uint32_t start = ticks;
-    while ((ticks - start) < milliseconds) {
+    uint32_t elapsed = 0;
+    
+    // Safety check: ensure ticks is actually incrementing
+    uint32_t safety_check = ticks;
+    for (volatile int i = 0; i < 100000; i++);
+    if (ticks == safety_check) {
+        // Timer not running! Fall back to busy wait (not ideal but better than nothing)
+        for (volatile uint32_t i = 0; i < milliseconds * 100000UL; i++);
+        return;
+    }
+    
+    while (elapsed < milliseconds) {
         asm volatile("hlt");
+        elapsed = ticks - start;
     }
 }
 
-// Delay in milliseconds (alias for delay function)
+// Delay in milliseconds
 void delay_ms(uint32_t ms) {
     precise_delay(ms);
 }
 
-// Delay in microseconds (approximate - limited by timer resolution)
+// High-resolution delay using PIT channel 2
+void delay_us_precise(uint32_t us) {
+    if (us == 0) return;
+    
+    // For delays >= 1ms, use regular delay for better accuracy
+    if (us >= 1000) {
+        uint32_t ms = us / 1000;
+        uint32_t us_remainder = us % 1000;
+        if (ms > 0) delay_ms(ms);
+        if (us_remainder > 0) delay_us_precise(us_remainder);
+        return;
+    }
+    
+    // Calculate PIT ticks needed (PIT base frequency: 1193182 Hz)
+    uint32_t pit_ticks = (us * 1193182UL + 500000UL) / 1000000UL;
+    if (pit_ticks == 0) pit_ticks = 1;
+    if (pit_ticks > 65535) pit_ticks = 65535;
+    
+    // Disable interrupts during critical section
+    asm volatile("cli");
+    
+    // Save original port 0x61 state
+    uint8_t speaker_state = inb(0x61);
+    
+    // Configure PIT channel 2 for one-shot mode (mode 0)
+    // Command byte: 10110000b = Channel 2, Low/High byte access, Mode 0, Binary
+    outb(0x43, 0xB0);
+    
+    // Write counter value (low byte first, then high byte)
+    outb(0x42, (uint8_t)(pit_ticks & 0xFF));
+    outb(0x42, (uint8_t)((pit_ticks >> 8) & 0xFF));
+    
+    // Start counter by enabling gate
+    outb(0x61, (speaker_state & 0xFC) | 0x01);
+    
+    // Re-enable interrupts
+    asm volatile("sti");
+    
+    // Poll for completion (bit 5 goes high when count reaches zero)
+    // Add timeout to prevent infinite loop
+    uint32_t timeout = 1000000;
+    while (!(inb(0x61) & 0x20) && timeout > 0) {
+        timeout--;
+        asm volatile("pause"); // CPU hint for spin-wait loop
+    }
+    
+    // Restore original speaker state
+    outb(0x61, speaker_state);
+}
+
+// Delay in microseconds
 void delay_us(uint32_t us) {
-    if (us < 1000) {
-        // For microsecond delays less than 1ms, use busy waiting
-        // This is approximate and depends on CPU speed
-        volatile uint32_t count = us * 1000; // Rough calibration needed
-        while (count--) {
-            asm volatile("nop");
+    if (us == 0) return;
+    
+    if (us >= 1000) {
+        // For larger delays, use millisecond delay for better accuracy
+        delay_ms(us / 1000);
+        uint32_t us_remainder = us % 1000;
+        if (us_remainder > 0) {
+            delay_us_precise(us_remainder);
         }
     } else {
-        // For delays >= 1ms, use the millisecond delay
-        delay_ms(us / 1000);
+        // For sub-millisecond delays, use precise PIT method
+        delay_us_precise(us);
     }
 }
 
 // Get current time in milliseconds since boot
 uint32_t get_time_ms(void) {
-    return ticks; // Direct tick count = milliseconds at 1000 Hz
+    return ticks;
 }
 
-// The uptime_task displays uptime periodically
-void uptime_task(uint32_t id) {
-    uint8_t display_counter = 0;
-    uint32_t last_display_time = 0;
-    
-    while (true) {
-        uint32_t current_time = ticks;
-        
-        // Update display every second (1000 ticks at 1000 Hz)
-        if (current_time - last_display_time >= 1000) {
-            // Visual indicator that uptime task is running
-            *(VGA_MEMORY + 160 + id) = 0x0A00 | (display_counter++ % 10) + '0';
-            last_display_time = current_time;
-        }
-        
-        // Sleep for a short time to avoid consuming too much CPU
-        precise_delay(100); // 100ms delay
-    }
+// Get system time in different formats
+uint64_t get_time_us(void) {
+    return (uint64_t)ticks * 1000ULL;
+}
+
+uint64_t get_time_ns(void) {
+    return (uint64_t)ticks * 1000000ULL;
 }
 
 // Function to get the current uptime in seconds
 int get_uptime() {
-    return ticks / 1000; // Convert ticks to seconds (1000 ticks = 1 second)
+    return ticks / 1000;
 }
 
 // Function to get uptime in milliseconds
 uint32_t get_uptime_ms() {
-    return ticks; // Direct tick count = milliseconds at 1000 Hz
+    return ticks;
 }
 
 // Function to get raw tick count
@@ -101,7 +175,10 @@ uint32_t get_ticks() {
 }
 
 // Function to get uptime with more precision
-void get_uptime_precise(uint32_t* days, uint32_t* hours, uint32_t* minutes, uint32_t* seconds, uint32_t* milliseconds) {
+void get_uptime_precise(uint32_t* days, uint32_t* hours, uint32_t* minutes, 
+                        uint32_t* seconds, uint32_t* milliseconds) {
+    if (!days || !hours || !minutes || !seconds || !milliseconds) return;
+    
     uint32_t total_ms = ticks;
     uint32_t total_seconds = total_ms / 1000;
     
@@ -112,67 +189,7 @@ void get_uptime_precise(uint32_t* days, uint32_t* hours, uint32_t* minutes, uint
     *days = total_seconds / 86400;
 }
 
-// Debug function to check timer frequency
-void debug_timer_frequency() {
-    static uint32_t last_check = 0;
-    static uint32_t check_count = 0;
-    
-    uint32_t current = ticks;
-    if (last_check != 0) {
-        uint32_t delta = current - last_check;
-        print("Timer delta: ");
-        print_decimal(delta);
-        print(" ticks\n");
-    }
-    
-    last_check = current;
-    check_count++;
-}
-
-// High-resolution delay using PIT directly (for very precise timing)
-void delay_us_precise(uint32_t us) {
-    // For very precise microsecond delays, we can use the PIT counter directly
-    // This is more accurate than the busy-wait method above
-    
-    if (us == 0) return;
-    
-    // Calculate PIT ticks needed (PIT runs at ~1.193182 MHz)
-    uint32_t pit_ticks = (us * 1193182) / 1000000;
-    
-    if (pit_ticks < 65536) {
-        // Use PIT channel 2 for precise timing
-        outb(0x43, 0xB2); // Configure PIT channel 2
-        outb(0x42, pit_ticks & 0xFF);
-        outb(0x42, (pit_ticks >> 8) & 0xFF);
-        
-        // Enable speaker gate to start counting
-        uint8_t speaker = inb(0x61);
-        outb(0x61, speaker | 0x03);
-        
-        // Wait for counting to complete
-        while (!(inb(0x61) & 0x20));
-        
-        // Disable speaker gate
-        outb(0x61, speaker);
-    } else {
-        // For longer delays, fall back to millisecond delay
-        delay_ms(us / 1000);
-        if (us % 1000) {
-            delay_us_precise(us % 1000);
-        }
-    }
-}
-
-// Get system time in different formats
-uint64_t get_time_us(void) {
-    return (uint64_t)ticks * 1000; // Convert ms to us
-}
-
-uint64_t get_time_ns(void) {
-    return (uint64_t)ticks * 1000000; // Convert ms to ns
-}
-
-// Sleep functions (aliases for delay functions)
+// Sleep functions (aliases)
 void sleep_ms(uint32_t ms) {
     delay_ms(ms);
 }
@@ -182,5 +199,69 @@ void sleep_us(uint32_t us) {
 }
 
 void sleep_seconds(uint32_t seconds) {
-    delay_ms(seconds * 1000);
+    if (seconds == 0) return;
+    
+    // Sleep one second at a time to avoid any overflow issues
+    for (uint32_t i = 0; i < seconds; i++) {
+        precise_delay(1000); // Sleep 1 second (1000ms)
+    }
+}
+
+// The uptime_task displays uptime periodically
+void uptime_task(uint32_t id) {
+    uint32_t last_display_time = 0;
+    
+    while (true) {
+        uint32_t current_time = get_time_ms();
+        
+        // Update display every second (1000 ms)
+        if (current_time - last_display_time >= 1000) {
+            uint32_t days, hours, mins, secs, ms;
+            get_uptime_precise(&days, &hours, &mins, &secs, &ms);
+            
+            print("Uptime: ");
+            if (days > 0) {
+                print_decimal(days);
+                print("d ");
+            }
+            print_decimal(hours);
+            print("h ");
+            print_decimal(mins);
+            print("m ");
+            print_decimal(secs);
+            print(".");
+            
+            // Print milliseconds with leading zeros
+            if (ms < 100) print("0");
+            if (ms < 10) print("0");
+            print_decimal(ms);
+            print("s\n");
+            
+            last_display_time = current_time;
+        }
+        
+        // Sleep for a short time to avoid consuming too much CPU
+        sleep_ms(100);
+    }
+}
+
+// Debug function to check timer frequency
+void debug_timer_frequency() {
+    static uint32_t last_check = 0;
+    static uint32_t check_count = 0;
+    
+    uint32_t current = ticks;
+    if (last_check != 0) {
+        uint32_t delta = current - last_check;
+        if (delta > 0) {
+            print("Timer delta: ");
+            print_decimal(delta);
+            print(" ms (check #");
+            print_decimal(check_count);
+            print(")\n");
+        }
+    }
+    
+    last_check = current;
+    check_count++;
 }

@@ -1,0 +1,59 @@
+# Border thickness
+border_thickness = 2
+
+# Space between windows
+border_gap = 4
+
+# Color of border around windows when active
+active_border = 0x56b6c2
+
+# Color of border around windows when inactive
+inactive_border = 0x4b5263
+
+# What modifier to switch workspace
+workspace_modifier = 0x0008 # key: l-alt
+
+# What modifier to move window to workspace
+workspace_move_window_modifier = 0x0009 # key: l-alt + shift
+
+# Autostart the following programs
+autostart = [
+    "statusbar"
+]
+
+# List of actions that the window manager handles
+[[actions]]
+modifier = 0x0009 # key: l-alt + shift
+keysym = 0x0063 # key: c
+action = "Close"
+
+[[actions]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x006b # key: k
+action = "SelectAbove"
+
+[[actions]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x006a # key: j
+action = "SelectBelow"
+
+[[actions]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x0068 # key: h
+action = "ShrinkFront"
+
+[[actions]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x006c # key: l
+action = "ExpandFront"
+
+# List of commands that are executed
+[[commands]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x0070 # key: p
+command = "selector_run"
+
+[[commands]]
+modifier = 0x0008 # key: l-alt
+keysym = 0x0073 # key: s
+command = "st"

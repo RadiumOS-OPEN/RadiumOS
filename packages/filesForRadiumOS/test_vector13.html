@@ -1,0 +1,1729 @@
+// =============================================================================
+// RADIUMOS DESKTOP ENVIRONMENT
+// Graphical desktop: taskbar, window manager, app launcher, terminal,
+// file browser, notepad, calculator, system monitor, easter eggs.
+// Matches existing RadiumOS code style — static alloc, FFI, VGA helpers.
+// Drop this block into your main .rs after the browser section.
+// =============================================================================
+
+//=============================================================================
+// DESKTOP CONSTANTS — Fiery dark palette (matches browser)
+//=============================================================================
+
+const DT_BG:           u32 = 0xFF120C06;   // near-black coal page bg
+const DT_PANEL:        u32 = 0xFF1A1008;   // charcoal-brown panel
+const DT_CHROME:       u32 = 0xFF2E1C0C;   // dark smoldering chrome
+const DT_TASKBAR:      u32 = 0xFF0F0A04;   // near-black taskbar
+const DT_ACCENT:       u32 = 0xFFFF5500;   // molten orange accent
+const DT_ACCENT2:      u32 = 0xFFFF4400;   // ember red-orange
+const DT_AMBER:        u32 = 0xFFFFAA33;   // warm amber
+const DT_TEXT:         u32 = 0xFFDDCCBB;   // warm ash body text
+const DT_TEXT_BRIGHT:  u32 = 0xFFFFEEDD;   // near-white
+const DT_TEXT_MUTED:   u32 = 0xFF997755;   // dim ember muted
+const DT_BORDER:       u32 = 0xFF3A1E0A;   // dark ember border
+const DT_BORDER_HI:    u32 = 0xFF7A3010;   // rust-red border highlight
+const DT_GREEN:        u32 = 0xFF44FF88;   // status green
+const DT_RED:          u32 = 0xFFFF4444;   // status red
+const DT_BLUE:         u32 = 0xFF44AAFF;   // info blue
+const DT_YELLOW:       u32 = 0xFFFFEE44;   // warning yellow
+const DT_WIN_SHADOW:   u32 = 0x88000000;   // translucent shadow
+const DT_SELECTION:    u32 = 0xFF5C2200;   // burnt orange selection bg
+
+const DT_W: u32 = 800;
+const DT_H: u32 = 600;
+const TASKBAR_H: u32 = 32;
+const TOPBAR_H:  u32 = 24;
+const CONTENT_Y: u32 = TOPBAR_H;
+const CONTENT_BOTTOM: u32 = DT_H - TASKBAR_H;
+
+//=============================================================================
+// WINDOW SYSTEM — static window pool
+//=============================================================================
+
+const MAX_WINDOWS: usize = 8;
+const WIN_TITLE_LEN: usize = 48;
+
+#[derive(Copy, Clone, PartialEq)]
+enum WinKind {
+None,
+Terminal,
+FileManager,
+Notepad,
+Calculator,
+AppLauncher,
+SysMonitor,
+About,
+}
+
+#[derive(Copy, Clone)]
+struct Window {
+kind:    WinKind,
+title:   [u8; WIN_TITLE_LEN],
+title_l: usize,
+x: i32, y: i32,
+w: u32,  h: u32,
+focused:  bool,
+minimized: bool,
+drag_ox:  i32,
+drag_oy:  i32,
+dragging: bool,
+}
+
+impl Window {
+const fn blank() -> Self {
+Self {
+kind: WinKind::None,
+title: [0; WIN_TITLE_LEN],
+title_l: 0,
+x: 60, y: 40, w: 520, h: 360,
+focused: false, minimized: false,
+drag_ox: 0, drag_oy: 0, dragging: false,
+}
+}
+}
+
+static mut WINDOWS:       [Window; MAX_WINDOWS] = [Window::blank(); MAX_WINDOWS];
+static mut WINDOW_COUNT:  usize = 0;
+static mut FOCUSED_WIN:   usize = 0;
+static mut DRAG_WIN:      Option<usize> = None;
+
+unsafe fn win_new(kind: WinKind, title: &[u8], x: i32, y: i32, w: u32, h: u32) -> usize {
+// If already open, refocus
+for i in 0..WINDOW_COUNT {
+if WINDOWS[i].kind == kind {
+FOCUSED_WIN = i;
+WINDOWS[i].focused = true;
+return i;
+}
+}
+if WINDOW_COUNT >= MAX_WINDOWS { return 0; }
+let idx = WINDOW_COUNT;
+WINDOW_COUNT += 1;
+let win = &mut WINDOWS[idx];
+*win = Window::blank();
+win.kind = kind;
+win.x = x; win.y = y; win.w = w; win.h = h;
+let l = title.len().min(WIN_TITLE_LEN - 1);
+win.title[..l].copy_from_slice(&title[..l]);
+win.title_l = l;
+for i in 0..WINDOW_COUNT { WINDOWS[i].focused = false; }
+win.focused = true;
+FOCUSED_WIN = idx;
+idx
+}
+
+unsafe fn win_close(idx: usize) {
+if idx >= WINDOW_COUNT { return; }
+for i in idx..WINDOW_COUNT.saturating_sub(1) {
+WINDOWS[i] = WINDOWS[i + 1];
+}
+WINDOW_COUNT = WINDOW_COUNT.saturating_sub(1);
+if WINDOW_COUNT > 0 {
+FOCUSED_WIN = WINDOW_COUNT - 1;
+WINDOWS[FOCUSED_WIN].focused = true;
+} else {
+FOCUSED_WIN = 0;
+}
+}
+
+unsafe fn win_focus(idx: usize) {
+for i in 0..WINDOW_COUNT { WINDOWS[i].focused = false; }
+if idx < WINDOW_COUNT {
+WINDOWS[idx].focused = true;
+FOCUSED_WIN = idx;
+}
+}
+
+//=============================================================================
+// AVFS POLL — live file list
+//=============================================================================
+
+const MAX_DT_FILES: usize = 32;
+const DT_FNAME_LEN: usize = 48;
+
+#[derive(Copy, Clone)]
+struct DtFile {
+name:   [u8; DT_FNAME_LEN],
+name_l: usize,
+size:   i32,
+}
+impl DtFile {
+const fn blank() -> Self { Self { name: [0; DT_FNAME_LEN], name_l: 0, size: 0 } }
+}
+
+static mut DT_FILES:     [DtFile; MAX_DT_FILES] = [DtFile::blank(); MAX_DT_FILES];
+static mut DT_FILE_COUNT: usize = 0;
+static mut DT_LAST_POLL:  u32 = 0;
+const DT_POLL_MS: u32 = 2000;   // re-poll AVFS every 2 s
+
+const KNOWN_FILES: &[&[u8]] = &[
+b"readme.txt\0",  b"hello.html\0",   b"watchdog.log\0",
+b"drawing.bmp\0", b"kernel.log\0",   b"network.cfg\0",
+b"notes.txt\0",   b"config.avfs\0",
+];
+
+unsafe fn dt_poll_files() {
+let now = get_ticks();
+if now.wrapping_sub(DT_LAST_POLL) < DT_POLL_MS && DT_FILE_COUNT > 0 { return; }
+DT_LAST_POLL = now;
+DT_FILE_COUNT = 0;
+
+for &name in KNOWN_FILES {
+    if avfs_file_exists(name.as_ptr()) {
+        if DT_FILE_COUNT < MAX_DT_FILES {
+            let e = &mut DT_FILES[DT_FILE_COUNT];
+            let mut l = 0usize;
+            while l < name.len() && name[l] != 0 { e.name[l] = name[l]; l += 1; }
+            e.name_l = l;
+            e.size    = avfs_get_filesize(name.as_ptr());
+            DT_FILE_COUNT += 1;
+        }
+    }
+}
+
+
+}
+
+//=============================================================================
+// TERMINAL APP STATE
+//=============================================================================
+
+const TERM_LINES:  usize = 20;
+const TERM_COLS:   usize = 64;
+const TERM_LINELEN: usize = 128;
+
+#[derive(Copy, Clone)]
+struct TermLine {
+buf: [u8; TERM_LINELEN],
+len: usize,
+col: u32,   // text color
+}
+impl TermLine {
+const fn blank() -> Self { Self { buf: [0; TERM_LINELEN], len: 0, col: DT_TEXT } }
+}
+
+static mut TERM_SCREEN: [TermLine; TERM_LINES] = [TermLine::blank(); TERM_LINES];
+static mut TERM_ROW:    usize = 0;
+static mut TERM_INPUT:  [u8; 128] = [0; 128];
+static mut TERM_ILEN:   usize = 0;
+static mut TERM_SHIFT:  bool  = false;
+static mut TERM_HIST:   [[u8; 128]; 16] = [[0; 128]; 16];
+static mut TERM_HISTL:  [usize; 16] = [0; 16];
+static mut TERM_HISTN:  usize = 0;
+static mut TERM_HISTP:  i32   = -1;
+static mut TERM_BLINK:  u32   = 0;
+
+unsafe fn term_push(text: &[u8], col: u32) {
+// Handle newlines by splitting
+let mut start = 0;
+for i in 0..=text.len() {
+let at_end = i == text.len();
+let is_nl  = !at_end && text[i] == b'\n';
+if is_nl || at_end {
+let chunk = &text[start..i];
+// Wrap at TERM_COLS
+let mut ci = 0;
+while ci <= chunk.len() {
+let end = (ci + TERM_COLS).min(chunk.len());
+let seg = &chunk[ci..end];
+// Scroll if needed
+if TERM_ROW >= TERM_LINES {
+for r in 0..TERM_LINES - 1 { TERM_SCREEN[r] = TERM_SCREEN[r + 1]; }
+TERM_ROW = TERM_LINES - 1;
+}
+let line = &mut TERM_SCREEN[TERM_ROW];
+let copy = seg.len().min(TERM_LINELEN - 1);
+line.buf[..copy].copy_from_slice(&seg[..copy]);
+line.len = copy;
+line.col = col;
+if ci + TERM_COLS < chunk.len() || is_nl || at_end {
+TERM_ROW += 1;
+}
+if ci + TERM_COLS >= chunk.len() { break; }
+ci += TERM_COLS;
+}
+start = i + 1;
+}
+}
+}
+
+unsafe fn term_clear() {
+for r in 0..TERM_LINES { TERM_SCREEN[r] = TermLine::blank(); }
+TERM_ROW = 0;
+TERM_ILEN = 0;
+}
+
+unsafe fn term_init() {
+term_clear();
+term_push(b"RadiumOS RSH v1.0 -- by scp_2801", DT_ACCENT);
+term_push(b"Kernel: i686 bare-metal | AVFS | RTL8139 | TCP/IP", DT_TEXT_MUTED);
+term_push(b"Type 'help' for commands. Easter eggs hidden inside.", DT_TEXT_MUTED);
+term_push(b"", DT_TEXT);
+}
+
+//=============================================================================
+// EASTER EGG TABLE
+//=============================================================================
+
+const EGG_COUNT: usize = 12;
+const EGG_CMDS: [&[u8]; EGG_COUNT] = [
+b"cowsay hello", b"sudo rm -rf /", b"matrix",      b"doom",
+b"hack",         b"the cake is a lie", b"cat /dev/urandom",
+b"ping discord.com", b"scp_2801",   b"htop",       b"uname -a",
+b"fortune",
+];
+const EGG_RESP: [&[u8]; EGG_COUNT] = [
+b" < hello >\n  \  ^^\n   \ (oo)\_______\n     ()\       )\/\\n         ||----w |\n         ||     ||",
+b"ERROR: Filesystem protected. Anti-stupidity module engaged.",
+b"Wake up, Thorne... the matrix has you.",
+b"E1M1: At Doom's Gate starts blasting at 120dB.",
+b"Hacking mainframe...\n[##########] 100%\nAccess GRANTED. You were already root.",
+b"ERROR: cake.avfs: No such file or directory",
+b"jK#@!mZ9&*qLpW2^vX8nRfYsT4dHoEuAbCiG...",
+b"PING discord.com via proxy 10.0.2.2:8080\n64 bytes: time=12ms\n64 bytes: time=11ms\nrtt min/avg/max = 11/11.5/12 ms",
+b"[SCP-2801 ACCESS LOG] Entity scp_2801 authenticated.\nContainment nominal. The eye is watching.",
+b"Tasks: heartbeat_task PID:1001 RUN\n       timed_message  PID:1002 RDY\n       watchdog_task  PID:1003 RDY\n       keyboard_hndlr PID:1004 RUN",
+b"RadiumOS 1.0 (i686) #1 PREEMPT Fri Jan 01 00:00:00 2025",
+b""The best time to write an OS was 20 years ago.\n The second best time is now." -- scp_2801",
+];
+
+const HELP_TEXT: &[u8] = b"Available commands:\n  ls / dir      - list AVFS files\n  cat <file>    - read file\n  rm <file>     - delete file\n  clear         - clear terminal\n  echo <text>   - print text\n  date          - show system time\n  uptime        - system uptime\n  ps            - list tasks\n  mem           - memory info\n  netstat       - network status\n  reboot        - restart (not really)\n  exit          - close terminal\n  help          - this help";
+
+unsafe fn term_run_cmd() {
+if TERM_ILEN == 0 { return; }
+
+// Save to history
+if TERM_HISTN < 16 {
+    TERM_HIST[TERM_HISTN][..TERM_ILEN].copy_from_slice(&TERM_INPUT[..TERM_ILEN]);
+    TERM_HISTL[TERM_HISTN] = TERM_ILEN;
+    TERM_HISTN += 1;
+}
+TERM_HISTP = -1;
+
+// Echo prompt
+let mut prompt_line = [0u8; 128];
+let pfx = b"root@radium:~$ ";
+let pl = pfx.len();
+prompt_line[..pl].copy_from_slice(pfx);
+let cl = TERM_ILEN.min(128 - pl - 1);
+prompt_line[pl..pl + cl].copy_from_slice(&TERM_INPUT[..cl]);
+term_push(&prompt_line[..pl + cl], DT_AMBER);
+
+let cmd = &TERM_INPUT[..TERM_ILEN];
+
+// Easter eggs — check exact match
+let mut was_egg = false;
+for i in 0..EGG_COUNT {
+    let egg = EGG_CMDS[i];
+    if cmd.len() == egg.len() {
+        let mut eq = true;
+        for j in 0..egg.len() { if cmd[j] != egg[j] { eq = false; break; } }
+        if eq {
+            term_push(EGG_RESP[i], DT_GREEN);
+            was_egg = true;
+            break;
+        }
+    }
+}
+
+if !was_egg {
+    // Built-in commands
+    if cmd == b"help" || cmd == b"?" {
+        term_push(HELP_TEXT, DT_TEXT);
+    } else if cmd == b"clear" || cmd == b"cls" {
+        term_clear();
+        term_push(b"RadiumOS RSH v1.0", DT_ACCENT);
+    } else if cmd == b"ls" || cmd == b"dir" {
+        dt_poll_files();
+        term_push(b"AVFS root:/", DT_TEXT_MUTED);
+        for i in 0..DT_FILE_COUNT {
+            let f = &DT_FILES[i];
+            let mut line = [0u8; 96];
+            let mut li = 0;
+            for &c in b"  " { line[li] = c; li += 1; }
+            for j in 0..f.name_l { line[li] = f.name[j]; li += 1; }
+            // Pad to col 24
+            while li < 26 { line[li] = b' '; li += 1; }
+            // Size
+            let mut sz = f.size.max(0) as u32;
+            let mut sb = [0u8; 10]; let mut si = 0;
+            if sz == 0 { sb[0] = b'0'; si = 1; }
+            else { while sz > 0 { sb[si] = (sz % 10) as u8 + b'0'; sz /= 10; si += 1; } }
+            for k in (0..si).rev() { line[li] = sb[k]; li += 1; }
+            for &c in b" B" { line[li] = c; li += 1; }
+            term_push(&line[..li], DT_TEXT);
+        }
+        let mut cnt = [0u8; 32]; let mut ci = 0;
+        for &c in b"  " { cnt[ci] = c; ci += 1; }
+        let mut n = DT_FILE_COUNT as u32;
+        let mut nb = [0u8; 4]; let mut ni = 0;
+        if n == 0 { nb[0] = b'0'; ni = 1; }
+        else { while n > 0 { nb[ni] = (n%10) as u8 + b'0'; n/=10; ni+=1; } }
+        for k in (0..ni).rev() { cnt[ci] = nb[k]; ci+=1; }
+        for &c in b" file(s)" { cnt[ci] = c; ci += 1; }
+        term_push(&cnt[..ci], DT_TEXT_MUTED);
+    } else if cmd == b"ps" {
+        term_push(b"PID   STATE  PRIO  NAME", DT_TEXT_MUTED);
+        term_push(b"0     RUN    10    idle_task", DT_TEXT);
+        term_push(b"1001  RUN    10    heartbeat_task", DT_TEXT);
+        term_push(b"1002  RDY    10    timed_message", DT_TEXT);
+        term_push(b"1003  RDY     5    watchdog_task", DT_TEXT);
+        term_push(b"1004  RUN    10    keyboard_handler", DT_TEXT);
+    } else if cmd == b"mem" {
+        term_push(b"Memory Map:", DT_TEXT_MUTED);
+        term_push(b"  Heap:       1 MB  (used: ~12%)", DT_TEXT);
+        term_push(b"  RX buffer:  8 KB  (RTL8139)", DT_TEXT);
+        term_push(b"  TX buffers: 16 KB (RTL8139 x4)", DT_TEXT);
+        term_push(b"  Back buffer:3.84MB (800x600x32)", DT_TEXT);
+        term_push(b"  AVFS:       dynamic blocks", DT_TEXT);
+    } else if cmd == b"netstat" {
+        term_push(b"Network status:", DT_TEXT_MUTED);
+        term_push(b"  IP:      10.0.2.15", DT_TEXT);
+        term_push(b"  Gateway: 10.0.2.2", DT_TEXT);
+        term_push(b"  DNS:     10.0.2.3", DT_TEXT);
+        term_push(b"  NIC:     RTL8139 OK", DT_GREEN);
+        term_push(b"  Proxy:   10.0.2.2:8080", DT_TEXT);
+    } else if cmd == b"date" {
+        let t = get_ticks();
+        let mut line = [0u8; 48]; let mut li = 0;
+        for &c in b"Uptime: " { line[li] = c; li += 1; }
+        let secs = t / 1000;
+        let mut sv = secs; let mut sb = [0u8; 8]; let mut si = 0;
+        if sv==0{sb[0]=b'0';si=1;}else{while sv>0{sb[si]=(sv%10)as u8+b'0';sv/=10;si+=1;}}
+        for k in (0..si).rev(){line[li]=sb[k];li+=1;}
+        for &c in b"s | Ticks: " { line[li]=c;li+=1; }
+        let mut tv=t; let mut tb=[0u8;10]; let mut ti=0;
+        if tv==0{tb[0]=b'0';ti=1;}else{while tv>0{tb[ti]=(tv%10)as u8+b'0';tv/=10;ti+=1;}}
+        for k in (0..ti).rev(){line[li]=tb[k];li+=1;}
+        term_push(&line[..li], DT_TEXT);
+    } else if cmd == b"uptime" {
+        let t = get_ticks() / 1000;
+        let mut line = [0u8; 48]; let mut li = 0;
+        for &c in b"up " { line[li]=c;li+=1; }
+        let mut sv=t; let mut sb=[0u8;8]; let mut si=0;
+        if sv==0{sb[0]=b'0';si=1;}else{while sv>0{sb[si]=(sv%10)as u8+b'0';sv/=10;si+=1;}}
+        for k in (0..si).rev(){line[li]=sb[k];li+=1;}
+        for &c in b" seconds, 4 tasks running" { line[li]=c;li+=1; }
+        term_push(&line[..li], DT_TEXT);
+    } else if cmd == b"reboot" {
+        term_push(b"Syncing AVFS...", DT_AMBER);
+        term_push(b"Sending FIN to all TCP connections...", DT_AMBER);
+        term_push(b"Joke! RadiumOS doesn't reboot that easily.", DT_GREEN);
+    } else if cmd == b"exit" {
+        term_push(b"Use the [x] button to close this window.", DT_TEXT_MUTED);
+    } else {
+        // cat <file>
+        let cat = b"cat ";
+        let rm  = b"rm ";
+        let echo= b"echo ";
+        if cmd.len() > cat.len() && &cmd[..cat.len()] == cat {
+            let fname = &cmd[cat.len()..];
+            // null-terminate
+            let mut fnb = [0u8; 64];
+            let fl = fname.len().min(63);
+            fnb[..fl].copy_from_slice(&fname[..fl]);
+            if avfs_file_exists(fnb.as_ptr()) {
+                let sz = avfs_get_filesize(fnb.as_ptr()).max(0) as u32;
+                let mut rbuf = [0u8; 1024];
+                let read_sz = sz.min(1024);
+                avfs_read_file(fnb.as_ptr(), rbuf.as_mut_ptr(), read_sz, 0);
+                term_push(&rbuf[..read_sz as usize], DT_TEXT);
+            } else {
+                let mut line = [0u8; 64]; let mut li = 0;
+                for &c in b"cat: " { line[li]=c;li+=1; }
+                for j in 0..fl { line[li]=fname[j];li+=1; }
+                for &c in b": No such file" { line[li]=c;li+=1; }
+                term_push(&line[..li], DT_RED);
+            }
+        } else if cmd.len() > rm.len() && &cmd[..rm.len()] == rm {
+            let fname = &cmd[rm.len()..];
+            let mut fnb = [0u8; 64];
+            let fl = fname.len().min(63);
+            fnb[..fl].copy_from_slice(&fname[..fl]);
+            let ret = avfs_remove_file(fnb.as_ptr());
+            if ret == 0 {
+                let mut line = [0u8; 64]; let mut li = 0;
+                for &c in b"Removed: " { line[li]=c;li+=1; }
+                for j in 0..fl { line[li]=fname[j];li+=1; }
+                term_push(&line[..li], DT_GREEN);
+                DT_LAST_POLL = 0; // force re-poll
+            } else {
+                term_push(b"rm: No such file or directory", DT_RED);
+            }
+        } else if cmd.len() > echo.len() && &cmd[..echo.len()] == echo {
+            term_push(&cmd[echo.len()..], DT_TEXT);
+        } else {
+            let mut line = [0u8; 96]; let mut li = 0;
+            for &c in b"rsh: " { line[li]=c;li+=1; }
+            let cl = cmd.len().min(64);
+            for j in 0..cl { line[li]=cmd[j];li+=1; }
+            for &c in b": command not found" { line[li]=c;li+=1; }
+            term_push(&line[..li], DT_RED);
+        }
+    }
+}
+
+TERM_INPUT = [0; 128];
+TERM_ILEN = 0;
+
+
+}
+
+//=============================================================================
+// NOTEPAD STATE
+//=============================================================================
+
+const NP_LINES:   usize = 24;
+const NP_LINELEN: usize = 80;
+const NP_FNAME:   usize = 48;
+
+static mut NP_BUF:     [[u8; NP_LINELEN]; NP_LINES] = [[0u8; NP_LINELEN]; NP_LINES];
+static mut NP_LINELEN2: [usize; NP_LINES] = [0; NP_LINES];
+static mut NP_CX:      usize = 0;   // cursor col
+static mut NP_CY:      usize = 0;   // cursor row
+static mut NP_ROWS:    usize = 1;
+static mut NP_DIRTY:   bool  = false;
+static mut NP_FNAME2:  [u8; NP_FNAME] = [0; NP_FNAME];
+static mut NP_FLEN:    usize = 0;
+static mut NP_SHIFT:   bool = false;
+static mut NP_SCROLL:  usize = 0;
+
+unsafe fn np_insert_char(ch: u8) {
+if NP_CY >= NP_LINES { return; }
+let row = NP_CY;
+let col = NP_CX;
+let old_len = NP_LINELEN2[row];
+if old_len >= NP_LINELEN - 1 { return; }
+// Shift right
+for i in (col..old_len).rev() { NP_BUF[row][i + 1] = NP_BUF[row][i]; }
+NP_BUF[row][col] = ch;
+NP_LINELEN2[row] += 1;
+NP_CX += 1;
+NP_DIRTY = true;
+}
+
+unsafe fn np_backspace() {
+if NP_CX > 0 {
+let row = NP_CY;
+let col = NP_CX - 1;
+let old_len = NP_LINELEN2[row];
+for i in col..old_len - 1 { NP_BUF[row][i] = NP_BUF[row][i + 1]; }
+if old_len > 0 { NP_LINELEN2[row] -= 1; }
+NP_CX -= 1;
+NP_DIRTY = true;
+} else if NP_CY > 0 {
+// Merge with previous line
+let prev_len = NP_LINELEN2[NP_CY - 1];
+let cur_len  = NP_LINELEN2[NP_CY];
+if prev_len + cur_len < NP_LINELEN {
+for i in 0..cur_len {
+NP_BUF[NP_CY - 1][prev_len + i] = NP_BUF[NP_CY][i];
+}
+NP_LINELEN2[NP_CY - 1] += cur_len;
+// Shift lines up
+for r in NP_CY..NP_ROWS.saturating_sub(1) {
+NP_BUF[r]      = NP_BUF[r + 1];
+NP_LINELEN2[r] = NP_LINELEN2[r + 1];
+}
+NP_ROWS = NP_ROWS.saturating_sub(1).max(1);
+NP_CY  -= 1;
+NP_CX   = prev_len;
+}
+NP_DIRTY = true;
+}
+}
+
+unsafe fn np_newline() {
+if NP_ROWS >= NP_LINES { return; }
+let row = NP_CY;
+let col = NP_CX;
+let old_len = NP_LINELEN2[row];
+// Shift lines down
+for r in (row + 1..NP_ROWS).rev() {
+NP_BUF[r + 1]      = NP_BUF[r];
+NP_LINELEN2[r + 1] = NP_LINELEN2[r];
+}
+// Split
+NP_LINELEN2[row + 1] = old_len - col;
+for i in 0..old_len - col { NP_BUF[row + 1][i] = NP_BUF[row][col + i]; }
+NP_LINELEN2[row] = col;
+for i in col..NP_LINELEN { NP_BUF[row][i] = 0; }
+NP_ROWS += 1;
+NP_CY += 1;
+NP_CX  = 0;
+NP_DIRTY = true;
+}
+
+unsafe fn np_save() {
+if NP_FLEN == 0 {
+// Use a default filename
+let def = b"notes.txt\0";
+let l = def.len().min(NP_FNAME - 1);
+NP_FNAME2[..l].copy_from_slice(&def[..l]);
+NP_FLEN = l - 1; // strip null
+}
+// Flatten buffer to a single blob
+static mut NP_SAVE_BUF: [u8; 4096] = [0; 4096];
+let mut pos = 0usize;
+for r in 0..NP_ROWS {
+let l = NP_LINELEN2[r];
+for i in 0..l {
+if pos < 4095 { NP_SAVE_BUF[pos] = NP_BUF[r][i]; pos += 1; }
+}
+if r + 1 < NP_ROWS && pos < 4095 { NP_SAVE_BUF[pos] = b'\n'; pos += 1; }
+}
+// Include null terminator in the null-terminated filename copy
+let mut fn_cstr = [0u8; NP_FNAME];
+fn_cstr[..NP_FLEN].copy_from_slice(&NP_FNAME2[..NP_FLEN]);
+avfs_remove_file(fn_cstr.as_ptr());
+avfs_create_file(fn_cstr.as_ptr(), pos as u32);
+avfs_write_file(fn_cstr.as_ptr(), NP_SAVE_BUF.as_ptr(), pos as u32, 0);
+NP_DIRTY = false;
+DT_LAST_POLL = 0;
+}
+
+unsafe fn np_load(filename: &[u8]) {
+let mut fnb = [0u8; NP_FNAME];
+let fl = filename.len().min(NP_FNAME - 1);
+fnb[..fl].copy_from_slice(&filename[..fl]);
+if !avfs_file_exists(fnb.as_ptr()) { return; }
+let sz = avfs_get_filesize(fnb.as_ptr()).max(0) as u32;
+static mut NP_LOAD_BUF: [u8; 4096] = [0; 4096];
+let read_sz = sz.min(4096);
+avfs_read_file(fnb.as_ptr(), NP_LOAD_BUF.as_mut_ptr(), read_sz, 0);
+// Clear
+for r in 0..NP_LINES { NP_BUF[r] = [0; NP_LINELEN]; NP_LINELEN2[r] = 0; }
+NP_ROWS = 1; NP_CX = 0; NP_CY = 0;
+let mut row = 0usize; let mut col = 0usize;
+for i in 0..read_sz as usize {
+let c = NP_LOAD_BUF[i];
+if c == b'\n' {
+row += 1; col = 0;
+if row >= NP_LINES { break; }
+NP_ROWS = row + 1;
+} else if col < NP_LINELEN - 1 && row < NP_LINES {
+NP_BUF[row][col] = c; col += 1;
+NP_LINELEN2[row] = col;
+if row + 1 > NP_ROWS { NP_ROWS = row + 1; }
+}
+}
+NP_FLEN = fl;
+NP_FNAME2[..fl].copy_from_slice(&filename[..fl]);
+NP_DIRTY = false;
+}
+
+//=============================================================================
+// CALCULATOR STATE
+//=============================================================================
+
+const CALC_DISP_LEN: usize = 20;
+
+static mut CALC_DISPLAY:  [u8; CALC_DISP_LEN] = [0; CALC_DISP_LEN];
+static mut CALC_DISP_L:   usize = 0;
+static mut CALC_ACCUM:    i64 = 0;
+static mut CALC_OP:       u8  = 0;   // b'+' b'-' b'*' b'/'
+static mut CALC_HAVE_OP:  bool = false;
+static mut CALC_NEW_NUM:  bool = true;
+static mut CALC_ERROR:    bool = false;
+static mut CALC_SHIFT:    bool = false;
+
+unsafe fn calc_set_display(val: i64) {
+CALC_DISPLAY = [0; CALC_DISP_LEN];
+let mut buf = [0u8; 24]; let mut bi = 0;
+let neg = val < 0;
+let mut v = if neg { -(val as i128) as u64 } else { val as u64 };
+if v == 0 { buf[0] = b'0'; bi = 1; }
+else { while v > 0 { buf[bi] = (v % 10) as u8 + b'0'; v /= 10; bi += 1; } }
+let mut di = 0;
+if neg && di < CALC_DISP_LEN { CALC_DISPLAY[di] = b'-'; di += 1; }
+for k in (0..bi).rev() {
+if di < CALC_DISP_LEN { CALC_DISPLAY[di] = buf[k]; di += 1; }
+}
+CALC_DISP_L = di;
+}
+
+unsafe fn calc_get_val() -> i64 {
+let mut val: i64 = 0;
+let mut neg = false;
+for i in 0..CALC_DISP_L {
+if CALC_DISPLAY[i] == b'-' { neg = true; }
+else if CALC_DISPLAY[i] >= b'0' && CALC_DISPLAY[i] <= b'9' {
+val = val * 10 + (CALC_DISPLAY[i] - b'0') as i64;
+}
+}
+if neg { -val } else { val }
+}
+
+unsafe fn calc_digit(d: u8) {
+if CALC_ERROR { return; }
+if CALC_NEW_NUM { CALC_DISPLAY = [0; CALC_DISP_LEN]; CALC_DISP_L = 0; CALC_NEW_NUM = false; }
+if CALC_DISP_L < CALC_DISP_LEN - 1 {
+CALC_DISPLAY[CALC_DISP_L] = d + b'0';
+CALC_DISP_L += 1;
+}
+}
+
+unsafe fn calc_op(op: u8) {
+if CALC_ERROR { return; }
+if CALC_HAVE_OP { calc_equals(); }
+CALC_ACCUM   = calc_get_val();
+CALC_OP      = op;
+CALC_HAVE_OP = true;
+CALC_NEW_NUM = true;
+}
+
+unsafe fn calc_equals() {
+if !CALC_HAVE_OP || CALC_ERROR { return; }
+let rhs = calc_get_val();
+let result = match CALC_OP {
+b'+' => CALC_ACCUM.saturating_add(rhs),
+b'-' => CALC_ACCUM.saturating_sub(rhs),
+b'*' => CALC_ACCUM.saturating_mul(rhs),
+b'/' => {
+if rhs == 0 { CALC_ERROR = true; CALC_DISPLAY = [0; CALC_DISP_LEN]; let e = b"ERR:DIV0"; for i in 0..e.len(){CALC_DISPLAY[i]=e[i];} CALC_DISP_L = e.len(); return; }
+CALC_ACCUM / rhs
+}
+_ => rhs,
+};
+calc_set_display(result);
+CALC_HAVE_OP = false;
+CALC_NEW_NUM = true;
+}
+
+unsafe fn calc_clear() {
+CALC_DISPLAY = [0; CALC_DISP_LEN];
+CALC_DISPLAY[0] = b'0'; CALC_DISP_L = 1;
+CALC_ACCUM = 0; CALC_OP = 0;
+CALC_HAVE_OP = false; CALC_NEW_NUM = true; CALC_ERROR = false;
+}
+
+unsafe fn calc_negate() {
+if CALC_DISP_L == 0 || CALC_ERROR { return; }
+let v = calc_get_val();
+calc_set_display(-v);
+}
+
+unsafe fn calc_backspace() {
+if CALC_DISP_L > 0 { CALC_DISP_L -= 1; CALC_DISPLAY[CALC_DISP_L] = 0; }
+if CALC_DISP_L == 0 { CALC_DISPLAY[0] = b'0'; CALC_DISP_L = 1; }
+}
+
+//=============================================================================
+// APP LAUNCHER STATE
+//=============================================================================
+
+const LAUNCHER_APPS: usize = 8;
+const LAUNCHER_NAMES: [&[u8]; LAUNCHER_APPS] = [
+b"Terminal",  b"File Mgr",  b"Notepad",   b"Calculator",
+b"Browser",   b"SysMon",    b"About",      b"Radium Toys",
+];
+const LAUNCHER_DESCS: [&[u8]; LAUNCHER_APPS] = [
+b"RSH command shell",     b"AVFS file browser",
+b"Plain-text editor",     b"Integer calculator",
+b"HTTP/HTTPS browser",    b"System monitor",
+b"About RadiumOS",        b"VBE demos & games",
+];
+const LAUNCHER_ICONS: [u8; LAUNCHER_APPS] = [b'>', b'F', b'N', b'#', b'@', b'%', b'i', b'*'];
+
+static mut LAUNCHER_SEL:    usize = 0;
+static mut LAUNCHER_SEARCH: [u8; 32] = [0; 32];
+static mut LAUNCHER_SEARCHL: usize = 0;
+static mut LAUNCHER_SHIFT:  bool = false;
+
+//=============================================================================
+// SYSMON STATE
+//=============================================================================
+
+const SYSMON_HIST: usize = 40;
+static mut SYSMON_CPU_HIST:  [u8; SYSMON_HIST] = [0; SYSMON_HIST];
+static mut SYSMON_MEM_HIST:  [u8; SYSMON_HIST] = [0; SYSMON_HIST];
+static mut SYSMON_NETB_HIST: [u8; SYSMON_HIST] = [0; SYSMON_HIST];
+static mut SYSMON_PTR:       usize = 0;
+static mut SYSMON_LAST_UPD:  u32   = 0;
+static mut SYSMON_HEAP_USED: u32   = 0;
+
+//=============================================================================
+// DESKTOP DRAW HELPERS
+//=============================================================================
+
+unsafe fn dt_px(x: u32, y: u32, c: u32) {
+if x < DT_W && y < DT_H {
+BACK_BUFFER[(y * DT_W + x) as usize] = c;
+}
+}
+unsafe fn dt_hline(x: u32, y: u32, w: u32, c: u32) {
+for i in 0..w { dt_px(x + i, y, c); }
+}
+unsafe fn dt_vline(x: u32, y: u32, h: u32, c: u32) {
+for i in 0..h { dt_px(x, y + i, c); }
+}
+unsafe fn dt_rect(x: u32, y: u32, w: u32, h: u32, c: u32) {
+graphics_fill_rect(x, y, w, h, c);
+}
+unsafe fn dt_border(x: u32, y: u32, w: u32, h: u32, c: u32) {
+dt_hline(x, y, w, c); dt_hline(x, y + h - 1, w, c);
+dt_vline(x, y, h, c); dt_vline(x + w - 1, y, h, c);
+}
+unsafe fn dt_str(x: u32, y: u32, s: *const u8, c: u32) {
+graphics_draw_string(x, y, s, c);
+}
+unsafe fn dt_str_sl(x: u32, y: u32, s: &[u8], c: u32) {
+if s.is_empty() { return; }
+let mut tmp = [0u8; 256];
+let l = s.len().min(255);
+tmp[..l].copy_from_slice(&s[..l]);
+tmp[l] = 0;
+graphics_draw_string(x, y, tmp.as_ptr(), c);
+}
+
+// Draw a number (i64) at position — returns end x
+unsafe fn dt_num_i64(x: u32, y: u32, val: i64, c: u32) -> u32 {
+let mut buf = [0u8; 24]; let mut bi = 0;
+let neg = val < 0;
+let mut v = if neg { -(val as i128) as u64 } else { val as u64 };
+if v == 0 { buf[0] = b'0'; bi = 1; }
+else { while v > 0 { buf[bi] = (v % 10) as u8 + b'0'; v /= 10; bi += 1; } }
+let mut out = [0u8; 26]; let mut oi = 0;
+if neg { out[oi] = b'-'; oi += 1; }
+for k in (0..bi).rev() { out[oi] = buf[k]; oi += 1; }
+out[oi] = 0;
+dt_str(x, y, out.as_ptr(), c);
+x + oi as u32 * 8
+}
+
+//=============================================================================
+// WINDOW CHROME DRAW
+//=============================================================================
+
+unsafe fn draw_win_chrome(win: &Window, content_draw: unsafe fn(&Window, u32, u32, u32, u32)) {
+if win.minimized { return; }
+let x = win.x.max(0) as u32;
+let y = win.y.max(0) as u32;
+let w = win.w;
+let h = win.h;
+let focused = win.focused;
+
+// Shadow
+dt_rect(x + 4, y + 4, w, h, 0x44000000);
+// Body
+dt_rect(x, y, w, h, DT_PANEL);
+// Titlebar
+let tb_h = 22u32;
+dt_rect(x, y, w, tb_h, if focused { DT_CHROME } else { DT_TASKBAR });
+dt_hline(x, y + tb_h - 1, w, if focused { DT_BORDER_HI } else { DT_BORDER });
+
+// Title text
+dt_str_sl(x + 8, y + 6, &win.title[..win.title_l], if focused { DT_AMBER } else { DT_TEXT_MUTED });
+
+// Close button
+let cx = x + w - 22;
+let cy = y + 4;
+dt_rect(cx, cy, 16, 14, DT_RED.wrapping_sub(0x00330000));
+dt_str(cx + 4, cy + 3, b"x\0".as_ptr(), DT_TEXT_BRIGHT);
+
+// Outer border
+dt_border(x, y, w, h, if focused { DT_BORDER_HI } else { DT_BORDER });
+
+// Content area
+let cx2 = x + 1;
+let cy2 = y + tb_h;
+let cw  = w.saturating_sub(2);
+let ch  = h.saturating_sub(tb_h + 1);
+
+// Clip content
+dt_rect(cx2, cy2, cw, ch, DT_BG);
+content_draw(win, cx2, cy2, cw, ch);
+
+
+}
+
+//=============================================================================
+// CONTENT DRAWERS — one per app kind
+//=============================================================================
+
+unsafe fn draw_terminal(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+// Green scanlines feel
+for r in 0..TERM_LINES {
+let ry = y + r as u32 * 12;
+if ry + 12 > y + h.saturating_sub(20) { break; }
+let line = &TERM_SCREEN[r];
+if line.len > 0 {
+dt_str_sl(x + 4, ry + 2, &line.buf[..line.len], line.col);
+}
+}
+
+// Input line
+let iy = y + h - 18;
+dt_hline(x, iy - 1, w, DT_BORDER);
+dt_rect(x, iy, w, 18, DT_PANEL);
+// Prompt
+dt_str(x + 4, iy + 4, b"root@radium:~$ \0".as_ptr(), DT_AMBER);
+// Input text
+if TERM_ILEN > 0 {
+    dt_str_sl(x + 4 + 15 * 8, iy + 4, &TERM_INPUT[..TERM_ILEN], DT_TEXT_BRIGHT);
+}
+// Blink cursor
+TERM_BLINK = TERM_BLINK.wrapping_add(1);
+if (TERM_BLINK / 30) % 2 == 0 {
+    let cur_x = x + 4 + 15 * 8 + TERM_ILEN as u32 * 8;
+    dt_vline(cur_x, iy + 3, 11, DT_ACCENT);
+}
+
+
+}
+
+unsafe fn draw_filemanager(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+dt_poll_files();
+
+// Header bar
+dt_rect(x, y, w, 20, DT_CHROME);
+dt_str(x + 8, y + 4, b"AVFS root:/\0".as_ptr(), DT_AMBER);
+let cnt_x = x + w - 80;
+let mut cnt_buf = [0u8; 24]; let mut ci = 0;
+let mut n = DT_FILE_COUNT as u32;
+let mut nb = [0u8; 4]; let mut ni = 0;
+if n==0{nb[0]=b'0';ni=1;}else{while n>0{nb[ni]=(n%10)as u8+b'0';n/=10;ni+=1;}}
+for k in (0..ni).rev(){cnt_buf[ci]=nb[k];ci+=1;}
+for &c in b" files\0" { cnt_buf[ci]=c;ci+=1; }
+dt_str(cnt_x, y + 4, cnt_buf.as_ptr(), DT_TEXT_MUTED);
+dt_hline(x, y + 20, w, DT_BORDER);
+
+// Column headers
+dt_rect(x, y + 21, w, 16, DT_PANEL);
+dt_str(x + 6,       y + 25, b"Name\0".as_ptr(),  DT_TEXT_MUTED);
+dt_str(x + w - 80,  y + 25, b"Size\0".as_ptr(),  DT_TEXT_MUTED);
+dt_hline(x, y + 37, w, DT_BORDER);
+
+// File rows
+static mut FM_SEL: usize = 0;
+for i in 0..DT_FILE_COUNT {
+    let fy = y + 38 + i as u32 * 18;
+    if fy + 18 > y + h { break; }
+    let f = &DT_FILES[i];
+    let row_bg = if i == FM_SEL { DT_SELECTION } else if i % 2 == 0 { DT_BG } else { 0xFF0F0B05 };
+    dt_rect(x, fy, w, 18, row_bg);
+
+    // File icon (based on extension)
+    let ext_col = if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"txt" { DT_TEXT_MUTED }
+                  else if f.name_l >= 5 && f.name[f.name_l-4..f.name_l] == *b"html" { DT_BLUE }
+                  else if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"bmp" { DT_AMBER }
+                  else if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"log" { DT_GREEN }
+                  else { DT_TEXT };
+    dt_str(x + 6, fy + 4, b"[\0".as_ptr(), DT_TEXT_MUTED);
+    let icon = if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"txt" { b'T' }
+               else if f.name_l >= 5 && f.name[f.name_l-4..f.name_l] == *b"html" { b'H' }
+               else if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"bmp" { b'I' }
+               else if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"log" { b'L' }
+               else if f.name_l >= 4 && f.name[f.name_l-3..f.name_l] == *b"cfg" { b'C' }
+               else { b'F' };
+    let mut ic = [icon, b']', 0u8];
+    dt_str(x + 14, fy + 4, ic.as_ptr(), ext_col);
+    dt_str_sl(x + 32, fy + 4, &f.name[..f.name_l], DT_TEXT);
+
+    // Size
+    let mut szb = [0u8; 16]; let mut szi = 0;
+    let mut sv = f.size.max(0) as u32;
+    if sv==0{szb[0]=b'0';szi=1;}else{while sv>0{szb[szi]=(sv%10)as u8+b'0';sv/=10;szi+=1;}}
+    let mut szo = [0u8; 16]; let mut szoi = 0;
+    for k in (0..szi).rev(){szo[szoi]=szb[k];szoi+=1;}
+    for &c in b"B\0" { szo[szoi]=c;szoi+=1; }
+    dt_str(x + w - 70, fy + 4, szo.as_ptr(), DT_TEXT_MUTED);
+}
+
+// Status bar
+let sb_y = y + h - 16;
+dt_hline(x, sb_y, w, DT_BORDER);
+dt_rect(x, sb_y, w, 16, DT_TASKBAR);
+dt_str(x + 8, sb_y + 3, b"Up/Down:select  Enter:open in Notepad  Del:delete\0".as_ptr(), DT_TEXT_MUTED);
+
+
+}
+
+unsafe fn draw_notepad(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+// Toolbar
+dt_rect(x, y, w, 20, DT_CHROME);
+dt_str(x + 8, y + 4, b"[Ctrl+S=Save] [Ctrl+O=Open]\0".as_ptr(), DT_TEXT_MUTED);
+if NP_DIRTY {
+dt_str(x + w - 64, y + 4, b"*unsaved\0".as_ptr(), DT_AMBER);
+} else {
+dt_str(x + w - 48, y + 4, b"saved\0".as_ptr(), DT_GREEN);
+}
+dt_hline(x, y + 20, w, DT_BORDER);
+
+// Filename bar
+dt_rect(x, y + 21, w, 14, DT_PANEL);
+dt_str(x + 4, y + 24, b"File: \0".as_ptr(), DT_TEXT_MUTED);
+if NP_FLEN > 0 {
+    dt_str_sl(x + 52, y + 24, &NP_FNAME2[..NP_FLEN], DT_AMBER);
+} else {
+    dt_str(x + 52, y + 24, b"(untitled)\0".as_ptr(), DT_TEXT_MUTED);
+}
+dt_hline(x, y + 35, w, DT_BORDER);
+
+// Text area — visible rows
+let text_y  = y + 36;
+let row_h   = 12u32;
+let visible = ((h.saturating_sub(36 + 16)) / row_h) as usize;
+
+for r in NP_SCROLL..NP_ROWS.min(NP_SCROLL + visible) {
+    let ry = text_y + (r - NP_SCROLL) as u32 * row_h;
+    // Line number gutter
+    dt_rect(x, ry, 28, row_h, DT_PANEL);
+    let mut lnb = [0u8; 6]; let mut lni = 0;
+    let mut lv = (r + 1) as u32;
+    if lv==0{lnb[0]=b'0';lni=1;}else{while lv>0{lnb[lni]=(lv%10)as u8+b'0';lv/=10;lni+=1;}}
+    let mut lno = [0u8; 6]; let mut lnoi = 0;
+    for k in (0..lni).rev(){lno[lnoi]=lnb[k];lnoi+=1;}
+    lno[lnoi] = 0;
+    dt_str(x + 2, ry + 2, lno.as_ptr(), DT_TEXT_MUTED);
+    dt_vline(x + 28, ry, row_h, DT_BORDER);
+
+    // Text
+    let l = NP_LINELEN2[r];
+    if l > 0 {
+        dt_str_sl(x + 32, ry + 2, &NP_BUF[r][..l], DT_TEXT);
+    }
+
+    // Cursor on current row
+    if r == NP_CY && (get_ticks() / 500) % 2 == 0 {
+        let cur_x = x + 32 + NP_CX as u32 * 8;
+        dt_vline(cur_x, ry + 1, row_h - 2, DT_ACCENT);
+    }
+}
+
+// Status bar
+let sb_y = y + h - 15;
+dt_hline(x, sb_y, w, DT_BORDER);
+dt_rect(x, sb_y, w, 15, DT_TASKBAR);
+let mut sb = [0u8; 64]; let mut si = 0;
+for &c in b"Ln " { sb[si]=c;si+=1; }
+let mut lv=(NP_CY+1)as u32; let mut lb=[0u8;4]; let mut li=0;
+if lv==0{lb[0]=b'0';li=1;}else{while lv>0{lb[li]=(lv%10)as u8+b'0';lv/=10;li+=1;}}
+for k in (0..li).rev(){sb[si]=lb[k];si+=1;}
+for &c in b", Col " { sb[si]=c;si+=1; }
+let mut cv=(NP_CX+1)as u32; let mut cb=[0u8;4]; let mut ci=0;
+if cv==0{cb[0]=b'0';ci=1;}else{while cv>0{cb[ci]=(cv%10)as u8+b'0';cv/=10;ci+=1;}}
+for k in (0..ci).rev(){sb[si]=cb[k];si+=1;}
+for &c in b"  |  " { sb[si]=c;si+=1; }
+let mut rv=(NP_ROWS)as u32; let mut rb=[0u8;4]; let mut ri=0;
+if rv==0{rb[0]=b'0';ri=1;}else{while rv>0{rb[ri]=(rv%10)as u8+b'0';rv/=10;ri+=1;}}
+for k in (0..ri).rev(){sb[si]=rb[k];si+=1;}
+for &c in b" lines\0" { sb[si]=c;si+=1; }
+dt_str(x + 8, sb_y + 2, sb.as_ptr(), DT_TEXT_MUTED);
+
+
+}
+
+// Calculator button layout: [text, action_byte]
+// action_byte: 0-9=digit, '+''-''''/'='='C'='N'=negate, 'B'=backspace
+const CALC_BTNS: &[(&[u8], u8)] = &[
+(b"C",   b'C'), (b"+/-", b'N'), (b"Bsp", b'B'), (b"/",   b'/'),
+(b"7",   b'7'), (b"8",   b'8'), (b"9",   b'9'), (b"",   b'*'),
+(b"4",   b'4'), (b"5",   b'5'), (b"6",   b'6'), (b"-",   b'-'),
+(b"1",   b'1'), (b"2",   b'2'), (b"3",   b'3'), (b"+",   b'+'),
+(b"0",   b'0'), (b"00",  b'Z'), (b".",   b'.'), (b"=",   b'='),
+];
+
+unsafe fn draw_calculator(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+// Display
+dt_rect(x, y, w, 50, DT_TASKBAR);
+dt_border(x + 8, y + 8, w - 16, 34, DT_BORDER_HI);
+dt_rect(x + 9, y + 9, w - 18, 32, DT_BG);
+
+// Display text right-aligned
+let disp = &CALC_DISPLAY[..CALC_DISP_L.max(1)];
+let actual = if CALC_DISP_L == 0 { b"0" as &[u8] } else { disp };
+let pw = actual.len() as u32 * 8;
+let dx = (x + w - 16).saturating_sub(pw);
+dt_str_sl(dx, y + 17, actual, DT_TEXT_BRIGHT);
+
+// Op indicator
+if CALC_HAVE_OP {
+    let op_buf = [CALC_OP, 0u8];
+    dt_str(x + 12, y + 17, op_buf.as_ptr(), DT_AMBER);
+}
+
+// Buttons — 4 cols x 5 rows
+let btn_w = (w - 16) / 4;
+let btn_h = (h.saturating_sub(56)) / 5;
+let bx0 = x + 8;
+let by0 = y + 52;
+
+for (bi, &(label, action)) in CALC_BTNS.iter().enumerate() {
+    let col = (bi % 4) as u32;
+    let row = (bi / 4) as u32;
+    let bx = bx0 + col * btn_w;
+    let by = by0 + row * btn_h;
+
+    let bg = match action {
+        b'=' => DT_ACCENT2,
+        b'+' | b'-' | b'*' | b'/' => DT_btnOp(),
+        b'C' | b'N' | b'B' => DT_CHROME,
+        _ => DT_PANEL,
+    };
+    let fg = match action {
+        b'=' => DT_TEXT_BRIGHT,
+        b'+' | b'-' | b'*' | b'/' => DT_AMBER,
+        b'C' => DT_RED,
+        _ => DT_TEXT,
+    };
+
+    dt_rect(bx + 1, by + 1, btn_w - 2, btn_h - 2, bg);
+    dt_border(bx + 1, by + 1, btn_w - 2, btn_h - 2, DT_BORDER);
+
+    // Center label
+    let lw = label.len() as u32 * 8;
+    let lx = bx + 1 + (btn_w - 2).saturating_sub(lw) / 2;
+    let ly = by + 1 + (btn_h - 2).saturating_sub(8) / 2;
+    dt_str_sl(lx, ly, label, fg);
+}
+
+
+}
+// Helper so we can reference it inline
+fn DT_btnOp() -> u32 { 0xFF3A2010 }
+
+unsafe fn draw_launcher(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+// Search bar
+dt_rect(x, y, w, 28, DT_CHROME);
+dt_border(x + 8, y + 5, w - 16, 18, DT_BORDER_HI);
+dt_rect(x + 9, y + 6, w - 18, 16, DT_BG);
+dt_str(x + 12, y + 9, b"Search: \0".as_ptr(), DT_TEXT_MUTED);
+if LAUNCHER_SEARCHL > 0 {
+dt_str_sl(x + 76, y + 9, &LAUNCHER_SEARCH[..LAUNCHER_SEARCHL], DT_TEXT_BRIGHT);
+}
+dt_hline(x, y + 28, w, DT_BORDER);
+
+// App grid — 2 columns
+let cols = 2u32;
+let cell_w = (w - 16) / cols;
+let cell_h = 56u32;
+
+for i in 0..LAUNCHER_APPS {
+    // Filter by search
+    if LAUNCHER_SEARCHL > 0 {
+        let name = LAUNCHER_NAMES[i];
+        let mut found = false;
+        'outer: for si in 0..=name.len().saturating_sub(LAUNCHER_SEARCHL) {
+            let mut ok = true;
+            for sj in 0..LAUNCHER_SEARCHL {
+                let a = name[si + sj]; let b2 = LAUNCHER_SEARCH[sj];
+                let al = if a>=b'A'&&a<=b'Z'{a+32}else{a};
+                let bl = if b2>=b'A'&&b2<=b'Z'{b2+32}else{b2};
+                if al != bl { ok = false; break; }
+            }
+            if ok { found = true; break 'outer; }
+        }
+        if !found { continue; }
+    }
+
+    let col = (i as u32) % cols;
+    let row = (i as u32) / cols;
+    let cx2 = x + 8 + col * cell_w;
+    let cy2 = y + 30 + row * cell_h;
+
+    let bg = if i == LAUNCHER_SEL { DT_SELECTION } else { DT_PANEL };
+    dt_rect(cx2, cy2, cell_w - 4, cell_h - 4, bg);
+    dt_border(cx2, cy2, cell_w - 4, cell_h - 4, if i == LAUNCHER_SEL { DT_BORDER_HI } else { DT_BORDER });
+
+    // Icon
+    let icon_c = [LAUNCHER_ICONS[i], 0u8];
+    dt_rect(cx2 + 4, cy2 + 8, 24, 24, DT_ACCENT);
+    dt_str(cx2 + 8, cy2 + 14, icon_c.as_ptr(), DT_TEXT_BRIGHT);
+
+    // Name + desc
+    dt_str_sl(cx2 + 34, cy2 + 10, LAUNCHER_NAMES[i], DT_TEXT_BRIGHT);
+    dt_str_sl(cx2 + 34, cy2 + 24, LAUNCHER_DESCS[i], DT_TEXT_MUTED);
+}
+
+// Footer
+let fy = y + h - 16;
+dt_hline(x, fy, w, DT_BORDER);
+dt_rect(x, fy, w, 16, DT_TASKBAR);
+dt_str(x + 8, fy + 3, b"Up/Down:navigate  Enter:open  Esc:close\0".as_ptr(), DT_TEXT_MUTED);
+
+
+}
+
+unsafe fn draw_sysmon(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+// Update data periodically
+let now = get_ticks();
+if now.wrapping_sub(SYSMON_LAST_UPD) > 500 {
+SYSMON_LAST_UPD = now;
+SYSMON_HEAP_USED = (HEAP_OFFSET as u32 * 100) / (HEAP.len() as u32);
+let cpu = ((now / 7) % 80 + 5) as u8;
+let mem = SYSMON_HEAP_USED as u8;
+let net = ((now / 13) % 40) as u8;
+SYSMON_CPU_HIST[SYSMON_PTR]  = cpu;
+SYSMON_MEM_HIST[SYSMON_PTR]  = mem;
+SYSMON_NETB_HIST[SYSMON_PTR] = net;
+SYSMON_PTR = (SYSMON_PTR + 1) % SYSMON_HIST;
+}
+
+let graph_h = (h.saturating_sub(80)) / 3;
+let graph_w = w.saturating_sub(16);
+
+// Draw three graphs: CPU, MEM, NET
+let labels: [&[u8]; 3] = [b"CPU %\0", b"MEM %\0", b"NET rx/s\0"];
+let colors:  [u32; 3]  = [DT_ACCENT, DT_AMBER, DT_BLUE];
+let hists = [
+    &SYSMON_CPU_HIST  as *const [u8; SYSMON_HIST],
+    &SYSMON_MEM_HIST  as *const [u8; SYSMON_HIST],
+    &SYSMON_NETB_HIST as *const [u8; SYSMON_HIST],
+];
+
+for gi in 0..3usize {
+    let gy = y + 4 + gi as u32 * (graph_h + 4);
+    dt_rect(x + 8, gy, graph_w, graph_h, DT_BG);
+    dt_border(x + 8, gy, graph_w, graph_h, DT_BORDER);
+    dt_str(x + 12, gy + 2, labels[gi].as_ptr(), colors[gi]);
+
+    // Graph bars
+    let hist = &*hists[gi];
+    let bar_w = (graph_w.saturating_sub(4)) / SYSMON_HIST as u32;
+    for pi in 0..SYSMON_HIST {
+        let idx = (SYSMON_PTR + pi) % SYSMON_HIST;
+        let val = hist[idx] as u32;
+        let bar_h = (val * (graph_h - 14)) / 100;
+        if bar_h == 0 { continue; }
+        let bx = x + 10 + pi as u32 * bar_w;
+        let by = gy + graph_h - 2 - bar_h;
+        let col = if val > 80 { DT_RED } else if val > 50 { DT_AMBER } else { colors[gi] };
+        dt_rect(bx, by, bar_w.saturating_sub(1).max(1), bar_h, col);
+    }
+
+    // Current value
+    let cur_idx = if SYSMON_PTR == 0 { SYSMON_HIST - 1 } else { SYSMON_PTR - 1 };
+    let cur = hist[cur_idx] as i64;
+    let vx = x + graph_w - 24;
+    dt_num_i64(vx, gy + 2, cur, colors[gi]);
+}
+
+// Task list
+let ty = y + 4 + 3 * (graph_h + 4);
+dt_rect(x + 8, ty, graph_w, 60, DT_PANEL);
+dt_border(x + 8, ty, graph_w, 60, DT_BORDER);
+dt_str(x + 12, ty + 2, b"Tasks\0".as_ptr(), DT_TEXT_MUTED);
+let tasks: [(&[u8], &[u8]); 4] = [
+    (b"heartbeat_task", b"RUN"),
+    (b"timed_message ", b"RDY"),
+    (b"watchdog_task ", b"RDY"),
+    (b"keyboard_hndlr", b"RUN"),
+];
+for (ti, &(tname, tstate)) in tasks.iter().enumerate() {
+    let trow = ty + 14 + ti as u32 * 11;
+    dt_str_sl(x + 12, trow, tname, DT_TEXT);
+    let sc = if tstate == b"RUN" { DT_GREEN } else { DT_TEXT_MUTED };
+    dt_str_sl(x + graph_w - 32, trow, tstate, sc);
+}
+
+
+}
+
+unsafe fn draw_about(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+let cx = x + w / 2;
+// Logo
+graphics_draw_string_scaled(x + 20, y + 16, b"RadiumOS\0".as_ptr(), DT_ACCENT, 2);
+dt_hline(x + 8, y + 38, w - 16, DT_BORDER_HI);
+dt_str(x + 20, y + 46, b"Version:    1.0.0 (i686 bare-metal)\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 60, b"Kernel:     Rust + C hybrid\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 74, b"Author:     scp_2801\0".as_ptr(), DT_AMBER);
+dt_str(x + 20, y + 88, b"Platform:   QEMU i686 / bare-metal x86\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 102, b"Subsystems: RTL8139 NIC, TCP/IP stack\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 116, b"            AVFS filesystem, VBE graphics\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 130, b"            HTML parser, Discord client\0".as_ptr(), DT_TEXT);
+dt_str(x + 20, y + 144, b"            RSH shell, NES emulator\0".as_ptr(), DT_TEXT);
+dt_hline(x + 8, y + 158, w - 16, DT_BORDER);
+dt_str(x + 20, y + 166, b"Heap:       1 MB static\0".as_ptr(), DT_TEXT_MUTED);
+dt_str(x + 20, y + 180, b"No stdlib:  #![no_std]\0".as_ptr(), DT_TEXT_MUTED);
+dt_str(x + 20, y + 194, b"No alloc:   static allocation everywhere\0".as_ptr(), DT_TEXT_MUTED);
+dt_hline(x + 8, y + 212, w - 16, DT_BORDER);
+// Easter egg hint
+let blink = if (get_ticks() / 700) % 2 == 0 { DT_ACCENT } else { DT_TEXT_MUTED };
+dt_str(x + 20, y + 220, b"[Hint: try 'scp_2801' in the terminal]\0".as_ptr(), blink);
+// ASCII art mini-dragon
+dt_str(x + 20, y + 240, b"  ,---.\0".as_ptr(), DT_AMBER);
+dt_str(x + 20, y + 252, b" /  \\     `\\0".as_ptr(), DT_AMBER);
+dt_str(x + 20, y + 264, b"| ,--'\  /\  /\\0".as_ptr(), DT_AMBER);
+dt_str(x + 20, y + 276, b" \D    Y--//--/\0".as_ptr(), DT_ACCENT);
+dt_str(x + 20, y + 288, b"  |===o===o===|\0".as_ptr(), DT_ACCENT);
+}
+
+//=============================================================================
+// DISPATCH — call the right content drawer
+//=============================================================================
+
+unsafe fn dispatch_content(win: &Window, x: u32, y: u32, w: u32, h: u32) {
+match win.kind {
+WinKind::Terminal   => draw_terminal(win, x, y, w, h),
+WinKind::FileManager=> draw_filemanager(win, x, y, w, h),
+WinKind::Notepad    => draw_notepad(win, x, y, w, h),
+WinKind::Calculator => draw_calculator(win, x, y, w, h),
+WinKind::AppLauncher=> draw_launcher(win, x, y, w, h),
+WinKind::SysMonitor => draw_sysmon(win, x, y, w, h),
+WinKind::About      => draw_about(win, x, y, w, h),
+WinKind::None       => {}
+}
+}
+
+//=============================================================================
+// DESKTOP CHROME — wallpaper, taskbar, top bar
+//=============================================================================
+
+static mut DT_TICK: u32 = 0;
+
+unsafe fn draw_wallpaper() {
+// Dark gradient-ish scanlines
+for row in 0..DT_H {
+let shade: u32 = if row < TOPBAR_H || row >= CONTENT_BOTTOM { 0 } else {
+let t = row - TOPBAR_H;
+let v = 8 + (t * 4 / DT_H) as u8;
+(v as u32)
+};
+let base: u32 = DT_BG;
+let r = ((base >> 16) & 0xFF).saturating_add(shade);
+let g = ((base >> 8)  & 0xFF).saturating_add(shade / 2);
+let b2= (base          & 0xFF).saturating_add(0);
+let col = 0xFF000000 | (r << 16) | (g << 8) | b2;
+dt_hline(0, row, DT_W, col);
+}
+
+// Subtle grid pattern
+for gx in (0..DT_W).step_by(40) {
+    dt_vline(gx, TOPBAR_H, CONTENT_BOTTOM - TOPBAR_H, 0xFF150E07);
+}
+for gy in (TOPBAR_H..CONTENT_BOTTOM).step_by(40) {
+    dt_hline(0, gy, DT_W, 0xFF150E07);
+}
+
+// Corner branding
+graphics_draw_string_scaled(DT_W - 120, CONTENT_BOTTOM - 32,
+    b"RadiumOS\0".as_ptr(), 0xFF2E1C0C, 1);
+
+
+}
+
+unsafe fn draw_topbar() {
+dt_rect(0, 0, DT_W, TOPBAR_H, DT_TASKBAR);
+dt_hline(0, TOPBAR_H - 1, DT_W, DT_BORDER_HI);
+
+// Left: logo
+dt_str(6, 7, b"[RDM]\0".as_ptr(), DT_ACCENT);
+
+// Center: click-to-open apps
+let apps: [(&[u8], &[u8]); 6] = [
+    (b"Terminal\0", b"T"),
+    (b"Files\0",    b"F"),
+    (b"Notepad\0",  b"N"),
+    (b"Calc\0",     b"#"),
+    (b"SysMon\0",   b"%"),
+    (b"About\0",    b"i"),
+];
+let mut ax = 60u32;
+for &(label, _icon) in &apps {
+    dt_str(ax, 7, label.as_ptr(), DT_TEXT_MUTED);
+    // Null term already included above
+    let l = label.len().saturating_sub(1); // strip the null
+    ax += l as u32 * 8 + 12;
+}
+
+// Right: clock + tick counter
+let t = get_ticks();
+let secs = t / 1000;
+let mins = secs / 60;
+let s2   = secs % 60;
+let m2   = mins % 60;
+
+// MM:SS display
+let mut clk = [0u8; 10]; let mut ci = 0;
+clk[ci] = b'0' + (m2 / 10) as u8; ci += 1;
+clk[ci] = b'0' + (m2 % 10) as u8; ci += 1;
+clk[ci] = b':'; ci += 1;
+clk[ci] = b'0' + (s2 / 10) as u8; ci += 1;
+clk[ci] = b'0' + (s2 % 10) as u8; ci += 1;
+clk[ci] = 0;
+dt_str(DT_W - 60, 7, clk.as_ptr(), DT_AMBER);
+
+// Heartbeat blink
+let beat = if (DT_TICK / 30) % 2 == 0 { b'*' } else { b'-' };
+let bk = [beat, 0u8];
+dt_str(DT_W - 76, 7, bk.as_ptr(), DT_ACCENT);
+
+
+}
+
+unsafe fn draw_taskbar() {
+let ty = DT_H - TASKBAR_H;
+dt_rect(0, ty, DT_W, TASKBAR_H, DT_TASKBAR);
+dt_hline(0, ty, DT_W, DT_BORDER_HI);
+
+// Window buttons
+let mut bx = 4u32;
+for i in 0..WINDOW_COUNT {
+    let win = &WINDOWS[i];
+    let bg  = if win.focused { DT_SELECTION } else { DT_PANEL };
+    let fg  = if win.focused { DT_TEXT_BRIGHT } else { DT_TEXT_MUTED };
+    dt_rect(bx, ty + 3, 90, TASKBAR_H - 6, bg);
+    dt_border(bx, ty + 3, 90, TASKBAR_H - 6, if win.focused { DT_BORDER_HI } else { DT_BORDER });
+    dt_str_sl(bx + 4, ty + 8, &win.title[..win.title_l.min(10)], fg);
+    bx += 94;
+}
+
+// Right side: AVFS file count + net status
+let t = get_ticks();
+let mut rb = [0u8; 64]; let mut ri = 0;
+for &c in b"AVFS:" { rb[ri]=c;ri+=1; }
+dt_poll_files();
+let mut fv = DT_FILE_COUNT as u32;
+let mut fb = [0u8; 4]; let mut fi = 0;
+if fv==0{fb[0]=b'0';fi=1;}else{while fv>0{fb[fi]=(fv%10)as u8+b'0';fv/=10;fi+=1;}}
+for k in (0..fi).rev(){rb[ri]=fb[k];ri+=1;}
+for &c in b"f | NET:OK | T:" { rb[ri]=c;ri+=1; }
+let mut tv = t; let mut tb2 = [0u8; 10]; let mut ti = 0;
+if tv==0{tb2[0]=b'0';ti=1;}else{while tv>0{tb2[ti]=(tv%10)as u8+b'0';tv/=10;ti+=1;}}
+for k in (0..ti).rev(){rb[ri]=tb2[k];ri+=1;}
+rb[ri] = 0;
+dt_str(DT_W - (ri as u32 * 8) - 8, ty + 9, rb.as_ptr(), DT_TEXT_MUTED);
+
+
+}
+
+//=============================================================================
+// FULL FRAME RENDER
+//=============================================================================
+
+unsafe fn dt_render() {
+DT_TICK = DT_TICK.wrapping_add(1);
+graphics_clear(DT_BG);
+draw_wallpaper();
+draw_topbar();
+draw_taskbar();
+
+// Draw windows back-to-front (focused last)
+for i in 0..WINDOW_COUNT {
+    if WINDOWS[i].focused { continue; }
+    let win = WINDOWS[i];
+    draw_win_chrome(&win, dispatch_content);
+}
+if WINDOW_COUNT > 0 && FOCUSED_WIN < WINDOW_COUNT {
+    let win = WINDOWS[FOCUSED_WIN];
+    draw_win_chrome(&win, dispatch_content);
+}
+
+graphics_swap_buffers();
+
+
+}
+
+//=============================================================================
+// INPUT DISPATCH
+//=============================================================================
+
+static mut DT_CTRL: bool = false;
+
+unsafe fn dt_open_app(kind: WinKind) {
+match kind {
+WinKind::Terminal    => { win_new(WinKind::Terminal,    b"Terminal -- RSH v1.0\0", 40, 40, 560, 360); term_init(); }
+WinKind::FileManager => { win_new(WinKind::FileManager, b"File Manager -- AVFS\0", 80, 50, 500, 340); }
+WinKind::Notepad     => { win_new(WinKind::Notepad,     b"Notepad\0",             120, 60, 520, 380); }
+WinKind::Calculator  => { win_new(WinKind::Calculator,  b"Calculator\0",           200, 80, 220, 320); calc_clear(); }
+WinKind::AppLauncher => { win_new(WinKind::AppLauncher, b"App Launcher\0",          60, 44, 480, 300); LAUNCHER_SEARCHL = 0; }
+WinKind::SysMonitor  => { win_new(WinKind::SysMonitor,  b"System Monitor\0",        50, 44, 500, 370); }
+WinKind::About       => { win_new(WinKind::About,       b"About RadiumOS\0",        160, 70, 420, 320); }
+WinKind::None        => {}
+}
+}
+
+unsafe fn dt_input_terminal(scan: u8) {
+if scan == 0x0E {
+if TERM_ILEN > 0 { TERM_ILEN -= 1; TERM_INPUT[TERM_ILEN] = 0; }
+return;
+}
+if scan == 0x1C { term_run_cmd(); return; }
+// History navigation
+if scan == 0x48 { // up
+if TERM_HISTN > 0 {
+if TERM_HISTP < 0 { TERM_HISTP = TERM_HISTN as i32 - 1; }
+else if TERM_HISTP > 0 { TERM_HISTP -= 1; }
+let hi = TERM_HISTP as usize;
+TERM_ILEN = TERM_HISTL[hi];
+TERM_INPUT[..TERM_ILEN].copy_from_slice(&TERM_HIST[hi][..TERM_ILEN]);
+}
+return;
+}
+if scan == 0x50 { // down
+if TERM_HISTP >= 0 {
+TERM_HISTP += 1;
+if TERM_HISTP >= TERM_HISTN as i32 {
+TERM_HISTP = -1; TERM_ILEN = 0; TERM_INPUT = [0; 128];
+} else {
+let hi = TERM_HISTP as usize;
+TERM_ILEN = TERM_HISTL[hi];
+TERM_INPUT[..TERM_ILEN].copy_from_slice(&TERM_HIST[hi][..TERM_ILEN]);
+}
+}
+return;
+}
+if scan == 0x2A || scan == 0x36 { TERM_SHIFT = true;  return; }
+if scan == 0xAA || scan == 0xB6 { TERM_SHIFT = false; return; }
+let ch = scancode_to_ascii(scan, TERM_SHIFT);
+if ch != 0 && TERM_ILEN < 127 { TERM_INPUT[TERM_ILEN] = ch; TERM_ILEN += 1; }
+}
+
+unsafe fn dt_input_notepad(scan: u8) {
+if scan == 0x2A || scan == 0x36 { NP_SHIFT = true;  return; }
+if scan == 0xAA || scan == 0xB6 { NP_SHIFT = false; return; }
+if scan == 0x1D { DT_CTRL = true;  return; }
+if scan == 0x9D { DT_CTRL = false; return; }
+
+if DT_CTRL {
+    match scan {
+        0x1F => np_save(),                  // Ctrl+S
+        0x12 => { /* Ctrl+E — reserved */ } // no-op
+        _ => {}
+    }
+    return;
+}
+
+match scan {
+    0x0E => np_backspace(),
+    0x1C => np_newline(),
+    0x48 => { if NP_CY > 0 { NP_CY -= 1; NP_CX = NP_CX.min(NP_LINELEN2[NP_CY]); } }
+    0x50 => { if NP_CY + 1 < NP_ROWS { NP_CY += 1; NP_CX = NP_CX.min(NP_LINELEN2[NP_CY]); } }
+    0x4B => { if NP_CX > 0 { NP_CX -= 1; } else if NP_CY > 0 { NP_CY -= 1; NP_CX = NP_LINELEN2[NP_CY]; } }
+    0x4D => { if NP_CX < NP_LINELEN2[NP_CY] { NP_CX += 1; } else if NP_CY + 1 < NP_ROWS { NP_CY += 1; NP_CX = 0; } }
+    0x47 => { NP_CY = 0; NP_CX = 0; }  // Home (Ctrl+Home via 0x47)
+    0x4F => { NP_CY = NP_ROWS.saturating_sub(1); NP_CX = NP_LINELEN2[NP_CY]; } // End
+    _ => {
+        let ch = scancode_to_ascii(scan, NP_SHIFT);
+        if ch >= 32 && ch < 127 { np_insert_char(ch); }
+    }
+}
+// Scroll to keep cursor visible
+if NP_CY < NP_SCROLL { NP_SCROLL = NP_CY; }
+else if NP_CY >= NP_SCROLL + 18 { NP_SCROLL = NP_CY.saturating_sub(17); }
+
+
+}
+
+unsafe fn dt_input_calculator(scan: u8) {
+if scan == 0x2A || scan == 0x36 { CALC_SHIFT = true;  return; }
+if scan == 0xAA || scan == 0xB6 { CALC_SHIFT = false; return; }
+
+// Map scancodes to calc actions
+let action: u8 = match scan {
+    0x02 => b'1', 0x03 => b'2', 0x04 => b'3', 0x05 => b'4',
+    0x06 => b'5', 0x07 => b'6', 0x08 => b'7', 0x09 => b'8',
+    0x0A => b'9', 0x0B => b'0',
+    // Numpad
+    0x4F => b'1', 0x50 => b'2', 0x51 => b'3', 0x4B => b'4',
+    0x4C => b'5', 0x4D => b'6', 0x47 => b'7', 0x48 => b'8',
+    0x49 => b'9', 0x52 => b'0',
+    // Operators
+    0x0D => if CALC_SHIFT { b'+' } else { b'=' },  // = / +
+    0x0C => b'-',
+    0x37 => b'*',
+    0x35 => b'/',
+    0x1C => b'=',   // Enter
+    0x53 => b'C',   // Delete = clear
+    0x0E => b'B',   // Backspace
+    0x29 => b'N',   // ` = negate
+    _ => 0,
+};
+if action == 0 { return; }
+
+match action {
+    b'0'..=b'9' => calc_digit(action - b'0'),
+    b'+' => calc_op(b'+'),
+    b'-' => calc_op(b'-'),
+    b'*' => calc_op(b'*'),
+    b'/' => calc_op(b'/'),
+    b'=' => calc_equals(),
+    b'C' => calc_clear(),
+    b'N' => calc_negate(),
+    b'B' => calc_backspace(),
+    _ => {}
+}
+
+
+}
+
+unsafe fn dt_input_launcher(scan: u8) {
+if scan == 0x2A || scan == 0x36 { LAUNCHER_SHIFT = true;  return; }
+if scan == 0xAA || scan == 0xB6 { LAUNCHER_SHIFT = false; return; }
+match scan {
+0x48 => { if LAUNCHER_SEL > 0 { LAUNCHER_SEL -= 1; } }
+0x50 => { if LAUNCHER_SEL + 1 < LAUNCHER_APPS { LAUNCHER_SEL += 1; } }
+0x0E => { if LAUNCHER_SEARCHL > 0 { LAUNCHER_SEARCHL -= 1; LAUNCHER_SEARCH[LAUNCHER_SEARCHL] = 0; } }
+0x1C => {
+// Open selected app
+let kind = match LAUNCHER_SEL {
+0 => WinKind::Terminal,   1 => WinKind::FileManager,
+2 => WinKind::Notepad,    3 => WinKind::Calculator,
+4 => WinKind::None,       // Browser — use existing graphical_browser()
+5 => WinKind::SysMonitor, 6 => WinKind::About,
+_ => WinKind::None,
+};
+if kind != WinKind::None { dt_open_app(kind); }
+// Close launcher
+for i in 0..WINDOW_COUNT {
+if WINDOWS[i].kind == WinKind::AppLauncher { win_close(i); break; }
+}
+}
+_ => {
+let ch = scancode_to_ascii(scan, LAUNCHER_SHIFT);
+if ch >= 32 && ch < 127 && LAUNCHER_SEARCHL < 31 {
+LAUNCHER_SEARCH[LAUNCHER_SEARCHL] = ch;
+LAUNCHER_SEARCHL += 1;
+}
+}
+}
+}
+
+unsafe fn dt_input_filemanager(scan: u8) {
+static mut FM_SEL_STATE: usize = 0;
+match scan {
+0x48 => { if FM_SEL_STATE > 0 { FM_SEL_STATE -= 1; } }
+0x50 => { if FM_SEL_STATE + 1 < DT_FILE_COUNT { FM_SEL_STATE += 1; } }
+0x1C => {
+// Open in Notepad
+if FM_SEL_STATE < DT_FILE_COUNT {
+let fname = &DT_FILES[FM_SEL_STATE].name[..DT_FILES[FM_SEL_STATE].name_l];
+dt_open_app(WinKind::Notepad);
+np_load(fname);
+}
+}
+0x53 => {
+// Delete
+if FM_SEL_STATE < DT_FILE_COUNT {
+let mut fnb = [0u8; DT_FNAME_LEN];
+let fl = DT_FILES[FM_SEL_STATE].name_l;
+fnb[..fl].copy_from_slice(&DT_FILES[FM_SEL_STATE].name[..fl]);
+avfs_remove_file(fnb.as_ptr());
+DT_LAST_POLL = 0;
+}
+}
+_ => {}
+}
+}
+
+unsafe fn dt_dispatch_input(scan: u8) {
+// Global hotkeys
+if scan == 0x1D { DT_CTRL = true;  return; }
+if scan == 0x9D { DT_CTRL = false; return; }
+
+if DT_CTRL {
+    match scan {
+        0x32 => { dt_open_app(WinKind::AppLauncher); return; } // Ctrl+M
+        0x14 => { dt_open_app(WinKind::Terminal);   return; } // Ctrl+T
+        0x26 => { dt_open_app(WinKind::FileManager);return; } // Ctrl+L
+        _ => {}
+    }
+}
+
+// Super key (right Alt) = launcher
+if scan == 0x38 { dt_open_app(WinKind::AppLauncher); return; }
+
+// F-key shortcuts (no focused window needed)
+match scan {
+    0x3B => { dt_open_app(WinKind::Terminal);    return; } // F1
+    0x3C => { dt_open_app(WinKind::FileManager); return; } // F2
+    0x3D => { dt_open_app(WinKind::Notepad);     return; } // F3
+    0x3E => { dt_open_app(WinKind::Calculator);  return; } // F4
+    0x3F => { dt_open_app(WinKind::SysMonitor);  return; } // F5
+    0x40 => { dt_open_app(WinKind::About);       return; } // F6
+    _ => {}
+}
+
+// Escape closes focused window
+if scan == 0x01 {
+    if WINDOW_COUNT > 0 { win_close(FOCUSED_WIN); }
+    return;
+}
+
+// Tab cycles focus
+if scan == 0x0F && WINDOW_COUNT > 1 {
+    let next = (FOCUSED_WIN + 1) % WINDOW_COUNT;
+    win_focus(next);
+    return;
+}
+
+// Route to focused window
+if WINDOW_COUNT == 0 { return; }
+let kind = WINDOWS[FOCUSED_WIN].kind;
+match kind {
+    WinKind::Terminal    => dt_input_terminal(scan),
+    WinKind::FileManager => dt_input_filemanager(scan),
+    WinKind::Notepad     => dt_input_notepad(scan),
+    WinKind::Calculator  => dt_input_calculator(scan),
+    WinKind::AppLauncher => dt_input_launcher(scan),
+    _ => {}
+}
+
+
+}
+
+//=============================================================================
+// MAIN DESKTOP ENTRY POINT
+//=============================================================================
+
+#[no_mangle]
+pub extern "C" fn radium_desktop() -> i32 {
+unsafe {
+rust_print(b"\n=== RadiumOS Desktop Environment ===\n");
+rust_print(b"F1=Terminal F2=Files F3=Notepad F4=Calc\n");
+rust_print(b"F5=SysMon F6=About  Alt=Launcher Esc=Close\n\n");
+
+    if graphics_init(DT_W, DT_H, 32) != 0 {
+        rust_print(b"ERROR: Could not initialise VBE graphics\n");
+        return -1;
+    }
+
+    // Boot splash — 1 second
+    graphics_clear(DT_BG);
+    graphics_draw_string_scaled(DT_W / 2 - 88, DT_H / 2 - 20,
+        b"RadiumOS\0".as_ptr(), DT_ACCENT, 2);
+    graphics_draw_string(DT_W / 2 - 72, DT_H / 2 + 12,
+        b"Desktop Environment v1.0\0".as_ptr(), DT_TEXT_MUTED);
+    graphics_draw_string(DT_W / 2 - 56, DT_H / 2 + 26,
+        b"by scp_2801\0".as_ptr(), DT_AMBER);
+    graphics_swap_buffers();
+    sleep_ms(1200);
+
+    // Open terminal by default
+    dt_open_app(WinKind::Terminal);
+    dt_render();
+
+    // Main event loop
+    loop {
+        // Drain keyboard port — non-blocking poll
+        if is_key_pressed() {
+            let scan = port_byte_in(0x60);
+            if scan == 0x58 { // F12 = quit
+                rust_print(b"Desktop: F12 pressed, exiting.\n");
+                break;
+            }
+            // Only dispatch key-press events (< 0x80)
+            if scan < 0x80 {
+                dt_dispatch_input(scan);
+            } else {
+                // Key release — propagate shift/ctrl releases
+                dt_dispatch_input(scan);
+            }
+        }
+
+        dt_render();
+
+        // ~60 fps cap
+        for _ in 0..60_000u32 { core::hint::spin_loop(); }
+    }
+
+    graphics_shutdown();
+    terminal_clear();
+    rust_print(b"\nDesktop closed. Back to RSH.\n");
+    0
+}
+
+
+}
+ + enhance the OS desktop + make sure this is a non mouse usable desktop everything is navigated with arrow keys and tab to switch on navigation + switch between SHIFT and non SHIFT + caps lock and caps lock activated next to heartbeat

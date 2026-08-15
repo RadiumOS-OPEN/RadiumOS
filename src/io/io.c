@@ -132,11 +132,7 @@ void pci_write_config_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_
     outl(PCI_CONFIG_DATA, data);
 }
 
-// Check if a PCI device exists at the specified location
-bool pci_device_exists(uint8_t bus, uint8_t device, uint8_t function) {
-    uint16_t vendor_id = pci_read_config_word(bus, device, function, 0x00);
-    return (vendor_id != 0xFFFF);
-}
+
 
 // Get PCI device vendor and device IDs
 void pci_get_device_info(uint8_t bus, uint8_t device, uint8_t function, uint16_t *vendor_id, uint16_t *device_id) {

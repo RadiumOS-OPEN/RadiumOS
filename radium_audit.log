@@ -1,0 +1,188 @@
+{"ts": "2026-04-18T19:24:51.310827+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:24:58.095465+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:25:31.638426+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:25:38.121423+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:26:06.544028+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:26:07.238694+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:26:07.591012+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:26:07.936955+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:29:21.675428+00:00", "ip": "127.0.0.1", "action": "2FA_FAIL", "detail": ""}
+{"ts": "2026-04-18T19:29:48.479208+00:00", "ip": "127.0.0.1", "action": "2FA_FAIL", "detail": ""}
+{"ts": "2026-04-18T19:30:34.245884+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:31:15.606388+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T19:31:37.819965+00:00", "ip": "127.0.0.1", "action": "DRAIN_ON", "detail": ""}
+{"ts": "2026-04-18T19:32:45.388544+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T19:45:25.618929+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T19:45:52.276506+00:00", "ip": "127.0.0.1", "action": "IP_BLOCK", "detail": "127.0.0.1"}
+{"ts": "2026-04-18T19:46:29.010656+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T20:05:00.366637+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T20:05:16.377788+00:00", "ip": "127.0.0.1", "action": "DRAIN_OFF", "detail": ""}
+{"ts": "2026-04-18T20:05:19.088953+00:00", "ip": "127.0.0.1", "action": "DRAIN_OFF", "detail": ""}
+{"ts": "2026-04-18T20:05:31.809158+00:00", "ip": "127.0.0.1", "action": "DRAIN_ON", "detail": ""}
+{"ts": "2026-04-18T20:08:02.016377+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T20:08:27.788200+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T20:08:30.509410+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T20:33:46.382381+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T20:39:22.418513+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:39:34.128723+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T20:46:55.331069+00:00", "ip": "127.0.0.1", "action": "SESSION_KILL", "detail": "8a9293f26a6198c7"}
+{"ts": "2026-04-18T20:46:57.975465+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:48:23.652592+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T20:48:27.155818+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T20:49:42.632069+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:50:21.137293+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:51:02.923286+00:00", "ip": "127.0.0.1", "action": "USER_ADD", "detail": "username=radium2 role=readonly"}
+{"ts": "2026-04-18T20:51:15.134023+00:00", "ip": "127.0.0.1", "action": "LOGIN_FAIL", "detail": "user=radium2"}
+{"ts": "2026-04-18T20:51:17.883753+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:52:02.335073+00:00", "ip": "127.0.0.1", "action": "OVERRIDE_ADD", "detail": "path=/pop status=200"}
+{"ts": "2026-04-18T20:52:24.689030+00:00", "ip": "127.0.0.1", "action": "OVERRIDE_ADD", "detail": "path=/pop status=200"}
+{"ts": "2026-04-18T20:52:33.802213+00:00", "ip": "127.0.0.1", "action": "OVERRIDE_DEL", "detail": "/pop"}
+{"ts": "2026-04-18T20:53:09.370865+00:00", "ip": "127.0.0.1", "action": "DRAIN_ON", "detail": ""}
+{"ts": "2026-04-18T20:54:49.889887+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T20:54:59.637264+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T20:55:00.995129+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "fmt=json"}
+{"ts": "2026-04-18T20:58:55.332834+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:01:35.213808+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-18T21:01:36.288006+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:03:17.100418+00:00", "ip": "127.0.0.1", "action": "USER_ADD", "detail": "username=radiumBasic role=readonly"}
+{"ts": "2026-04-18T21:03:22.039035+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-18T21:03:24.983398+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radiumBasic role=readonly"}
+{"ts": "2026-04-18T21:03:40.364104+00:00", "ip": "127.0.0.1", "action": "DRAIN_OFF", "detail": ""}
+{"ts": "2026-04-18T21:03:41.682097+00:00", "ip": "127.0.0.1", "action": "DRAIN_ON", "detail": ""}
+{"ts": "2026-04-18T21:06:17.026219+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:06:21.252047+00:00", "ip": "127.0.0.1", "action": "2FA_FAIL", "detail": ""}
+{"ts": "2026-04-18T21:06:42.988401+00:00", "ip": "127.0.0.1", "action": "2FA_FAIL", "detail": ""}
+{"ts": "2026-04-18T21:06:49.403397+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:06:50.697409+00:00", "ip": "127.0.0.1", "action": "2FA_FAIL", "detail": ""}
+{"ts": "2026-04-18T21:07:21.753673+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:10:31.488873+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:14:58.597750+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium role=superadmin"}
+{"ts": "2026-04-18T21:43:46.979637+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T21:47:47.324625+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T21:53:12.558375+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T21:54:18.746323+00:00", "ip": "127.0.0.1", "action": "QUOTA_SET", "detail": "127.0.0.1=1024MB"}
+{"ts": "2026-04-18T21:56:24.879452+00:00", "ip": "127.0.0.1", "action": "REP_RESET", "detail": ""}
+{"ts": "2026-04-18T21:56:27.849610+00:00", "ip": "127.0.0.1", "action": "REP_RESET", "detail": ""}
+{"ts": "2026-04-18T21:56:28.808347+00:00", "ip": "127.0.0.1", "action": "REP_RESET", "detail": ""}
+{"ts": "2026-04-18T21:56:45.944064+00:00", "ip": "127.0.0.1", "action": "GEOBLOCK_ADD", "detail": "US"}
+{"ts": "2026-04-18T21:56:47.554372+00:00", "ip": "127.0.0.1", "action": "GEOBLOCK_ADD", "detail": "US"}
+{"ts": "2026-04-18T22:06:52.314591+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:09:41.929416+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "json"}
+{"ts": "2026-04-18T22:10:29.062590+00:00", "ip": "127.0.0.1", "action": "GEO_LOOKUP", "detail": "172.59.212.198"}
+{"ts": "2026-04-18T22:10:44.805440+00:00", "ip": "127.0.0.1", "action": "IP_BLOCK", "detail": "172.59.212.198"}
+{"ts": "2026-04-18T22:10:46.626424+00:00", "ip": "127.0.0.1", "action": "IP_UNBLOCK", "detail": "172.59.212.198"}
+{"ts": "2026-04-18T22:14:04.708803+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:14:43.774286+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-18T22:14:44.812511+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:14:49.659851+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "json"}
+{"ts": "2026-04-18T22:40:04.991632+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:40:33.668422+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T22:40:43.312293+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:41:20.117741+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-18T22:45:57.234832+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-18T22:49:13.581379+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T00:25:25.508756+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T00:56:53.361565+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T01:09:32.309488+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T01:11:07.803727+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T01:11:17.838816+00:00", "ip": "127.0.0.1", "action": "EXPORT", "detail": "json"}
+{"ts": "2026-04-19T01:11:35.667759+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "test"}
+{"ts": "2026-04-19T02:15:30.927143+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:15:50.134032+00:00", "ip": "127.0.0.1", "action": "MAINTENANCE_ON", "detail": ""}
+{"ts": "2026-04-19T02:16:02.911829+00:00", "ip": "127.0.0.1", "action": "MAINTENANCE_ON", "detail": ""}
+{"ts": "2026-04-19T02:16:13.225453+00:00", "ip": "127.0.0.1", "action": "USER_ADD", "detail": "radium2"}
+{"ts": "2026-04-19T02:16:17.701467+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T02:16:19.729794+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium2"}
+{"ts": "2026-04-19T02:17:53.388868+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:19:34.767296+00:00", "ip": "127.0.0.1", "action": "CACHE_FLUSH", "detail": ""}
+{"ts": "2026-04-19T02:27:11.724013+00:00", "ip": "127.0.0.1", "action": "NOTES_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:27:22.816053+00:00", "ip": "127.0.0.1", "action": "NOTES_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:28:39.970706+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:28:44.245588+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T02:28:47.146924+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:28:54.834107+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:29:03.937750+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:29:05.432078+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T02:29:08.048255+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:29:41.348865+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "test"}
+{"ts": "2026-04-19T02:38:24.458471+00:00", "ip": "192.168.49.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:38:30.859931+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T02:38:32.226261+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:39:54.008628+00:00", "ip": "127.0.0.1", "action": "BAN_ADD", "detail": "192.168.49.1 dur=999999"}
+{"ts": "2026-04-19T02:40:04.681911+00:00", "ip": "127.0.0.1", "action": "BAN_REMOVE", "detail": "192.168.49.1"}
+{"ts": "2026-04-19T02:43:27.447387+00:00", "ip": "127.0.0.1", "action": "GEO_LOOKUP", "detail": "87.31.83.24"}
+{"ts": "2026-04-19T02:43:39.372520+00:00", "ip": "127.0.0.1", "action": "IP_BLOCK", "detail": "87.31.83.24"}
+{"ts": "2026-04-19T02:43:52.355787+00:00", "ip": "127.0.0.1", "action": "IP_BLOCK", "detail": "14.161.237.50"}
+{"ts": "2026-04-19T02:44:58.089145+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T02:44:59.232913+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:45:03.963069+00:00", "ip": "127.0.0.1", "action": "IP_UNBLOCK", "detail": "14.161.237.50"}
+{"ts": "2026-04-19T02:45:04.746805+00:00", "ip": "127.0.0.1", "action": "IP_UNBLOCK", "detail": "87.31.83.24"}
+{"ts": "2026-04-19T02:45:15.621358+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:45:22.298698+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:45:42.094699+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:46:23.519921+00:00", "ip": "127.0.0.1", "action": "ERROR_PAGE_DEL", "detail": "503"}
+{"ts": "2026-04-19T02:46:25.905152+00:00", "ip": "127.0.0.1", "action": "ERROR_PAGE_SAVE", "detail": "404"}
+{"ts": "2026-04-19T02:48:11.274089+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T02:48:19.005326+00:00", "ip": "127.0.0.1", "action": "NOTES_SAVE", "detail": ""}
+{"ts": "2026-04-19T02:59:29.169427+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T03:04:00.544266+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T03:05:56.819348+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T03:06:28.527344+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T03:07:04.443894+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T03:07:51.295801+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T03:08:03.962445+00:00", "ip": "127.0.0.1", "action": "SETTINGS_SAVE", "detail": ""}
+{"ts": "2026-04-19T14:11:01.793885+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T16:37:20.862005+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T16:37:49.712342+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T16:39:14.789487+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T16:49:38.991483+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T16:56:16.943688+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T17:02:41.488747+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T17:21:26.976781+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T17:21:49.913435+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:11:26.914640+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:23:34.930528+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:24:46.428034+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:27:17.212962+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:27:21.061095+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:27:28.039085+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:32:52.168445+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:32:56.252785+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:36:56.054109+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:37:01.742754+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:38:48.358966+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T18:40:38.664241+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:40:42.274014+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:53:27.156610+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T18:53:33.245208+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "content"}
+{"ts": "2026-04-19T18:56:11.183658+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T18:56:20.350061+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "1"}
+{"ts": "2026-04-19T18:56:21.979057+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "2"}
+{"ts": "2026-04-19T18:56:23.932552+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "3"}
+{"ts": "2026-04-19T18:56:25.513698+00:00", "ip": "127.0.0.1", "action": "TOKEN_CREATE", "detail": "4"}
+{"ts": "2026-04-19T18:56:31.891974+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T18:56:34.062445+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T18:56:34.353687+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T18:56:34.605011+00:00", "ip": "127.0.0.1", "action": "TOKEN_REVOKE", "detail": ""}
+{"ts": "2026-04-19T19:00:19.856506+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T19:00:22.326464+00:00", "ip": "127.0.0.1", "action": "LOGIN_FAIL", "detail": "user=radium9"}
+{"ts": "2026-04-19T19:00:24.234218+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T19:00:36.011504+00:00", "ip": "127.0.0.1", "action": "USER_ADD", "detail": "radium2"}
+{"ts": "2026-04-19T19:00:38.563232+00:00", "ip": "127.0.0.1", "action": "LOGOUT", "detail": ""}
+{"ts": "2026-04-19T19:00:39.621418+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium2"}
+{"ts": "2026-04-19T19:01:02.770375+00:00", "ip": "127.0.0.1", "action": "NOTES_SAVE", "detail": ""}
+{"ts": "2026-04-19T19:01:14.211500+00:00", "ip": "127.0.0.1", "action": "DRAIN_ON", "detail": ""}
+{"ts": "2026-04-19T19:01:44.998541+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T19:08:37.682408+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T19:10:06.119807+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T19:12:40.294556+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-19T20:13:43.507268+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:45:24.355465+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:50:47.123460+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:52:46.447090+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:53:11.868454+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:53:52.878435+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:54:27.259777+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:56:19.229728+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-20T03:57:31.342223+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}
+{"ts": "2026-04-21T00:33:41.405718+00:00", "ip": "127.0.0.1", "action": "LOGIN", "detail": "user=radium"}

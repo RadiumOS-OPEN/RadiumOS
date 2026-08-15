@@ -49,6 +49,7 @@ int copy_string(char *dest, const char *src);
 extern inline uint16_t htons(uint16_t hostshort);
 extern inline uint16_t ntohs(uint16_t netshort);
 extern inline uint32_t htonl(uint32_t hostlong);
+
 // Memory management prototypes
 void* malloc(size_t size);
 void free(void* ptr);
@@ -57,7 +58,7 @@ char* strcat(char* dest, const char* src);
 char* strcpy(char* dest, const char* src);
 uint16_t calculate_checksum(uint16_t *buf, size_t length);
 int atoi(const char *str);
-
+uint32_t strtoul(const char *str, char **endptr, int base);
 uint64_t __umoddi3(uint64_t dividend, uint64_t divisor);
 // sizeof function declarations
 size_t sizeof_char(void);
@@ -96,9 +97,17 @@ void done(const char* message, const char* file);
 void warn(const char* message, const char* file);
 void info(const char* message, const char* file);
 void error(const char* message, const char* file);
+void set_log_file(const char* filename);
+void clear_log_file(void);
+
 void* calloc(size_t nmemb, size_t size);
 void debug_memory_status();
 int abs(int x);
 void qsort(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*));
 void* memmove(void* dest, const void* src, size_t n);
+bool parse_ip(const char *ip_str, uint8_t ip_out[4]);
+void* memmove(void* dest, const void* src, size_t n);
+char* strncat(char* dest, const char* src, size_t n);
+static int isalnum(int c);
+static int isalpha(int c);
 #endif // UTILITY_H

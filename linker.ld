@@ -1,69 +1,59 @@
-/* The bootloader will look at this image and start execution at the symbol
-   designated as the entry point. */
 ENTRY(_start)
-
-/* Define memory regions */
-MEMORY
-{
-    RAM (rw) : ORIGIN = 0x00100000, LENGTH = 64M  /* 1 MiB to 65 MiB */
-    ROM (rx) : ORIGIN = 0x00000000, LENGTH = 1M    /* Bootloader area */
-}
-
-/* Tell where the various sections of the object files will be put in the final
-   kernel image. */
 SECTIONS
 {
-    /* Begin putting sections at 1 MiB, a conventional place for kernels to be
-       loaded at by the bootloader. */
     . = 1M;
 
-    /* Multiboot header, required for bootloader recognition */
     .multiboot ALIGN(4K) : {
         *(.multiboot)
     }
 
-    /* Kernel text section */
     .text ALIGN(4K) : {
         *(.text)
-        *(.text.*)  /* Include all text sections */
+        *(.text.*)
     }
 
-    /* Read-only data section */
     .rodata ALIGN(4K) : {
-        *(.rodata*)
-        *(.rodata.*)  /* Include all read-only data sections */
+        *(.rodata)
+        *(.rodata.*)
     }
 
-    /* Initialized data section */
     .data ALIGN(4K) : {
         *(.data)
-        *(.data.*)  /* Include all initialized data sections */
+        *(.data.*)
     }
 
-    /* Uninitialized data section (BSS) */
-    .bss ALIGN(4K) : {
+    .bss ALIGN(4K) (NOLOAD) : {
+        _bss_start = .;
         *(COMMON)
         *(.bss)
-        *(.bss.*)  /* Include all uninitialized data sections */
-    }
-
-    /* Stack section */
-    .stack ALIGN(4K) : {
+        *(.bss.*)
         . = ALIGN(4K);
-        . = . + 8K;  /* Reserve 8 KiB for the stack */
+        _bss_end = .;
     }
 
-    /* Heap section */
-    .heap ALIGN(4K) : {
-        . = ALIGN(4K);
-        . = . + 32M;  /* Reserve 32 MiB for the heap */
+    .heap ALIGN(4K) (NOLOAD) : {
+        _heap_start = .;
+        . += 128M;
+        _heap_end = .;
     }
 
-    /* Debugging information (optional) */
-    .debug ALIGN(4K) : {
-        *(.debug*)
+    .stack ALIGN(4K) (NOLOAD) : {
+        _stack_bottom = .;
+        . += 8M;
+        _stack_top = .;
     }
 
-    /* Other sections can be added as needed */
-    . = ALIGN(4K);
+    .stack_guard ALIGN(4K) (NOLOAD) : {
+        _stack_guard_start = .;
+        . += 4K;
+        _stack_guard_end = .;
+    }
+
+    _kernel_end = .;
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.eh_frame)
+        *(.note*)
+    }
 }

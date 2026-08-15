@@ -23,7 +23,7 @@ const char* MPOP_TESTr =
     "PRINTC 114\n"          // 'r'
     "PRINTC 105\n"          // 'i'
     "PRINTC 116\n"          // 't'
-    "PRINTC 104\n"          // 'h'
+    "PRINTC 104\1n"          // 'h'
     "PRINTC 58\n"           // ':' 
     "PRINTC 32\n"           // ' '
     "PRINT R2\n"            // 15
