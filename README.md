@@ -7,9 +7,9 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 - **Kernel**: Preemptive multitasking scheduler with watchdog
 - **Graphics**: VBE 800×600 framebuffer + VGA text mode (80×25)
 - **Networking**: RTL8139 NIC with custom TCP/IP stack, DNS, HTTPS proxy
-- **Filesystem**: AVFS (Autonomous Virtual FileSystem) RAM disk
+- **Filesystem**: AVFS (Actual Virtual FileSystem) RAM disk
 - **Scripting**: RSH v2.3 (RadiumOS Shell Language)
-- **Hardware**: PS4 DualShock 4 USB HID driver (UHCI + OHCI)
+- **Hardware**: Keyboard Driver (most keybinds working !)
 - **Security**: AES-128 CBC encryption/decryption
 - **Tools**: Radium Geiger hex viewer, desktop environment, 15+ apps
 
