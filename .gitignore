@@ -1,4 +1,3 @@
-# Build outputs, ISOs, and binaries
 *.iso
 *.bin
 *.o
@@ -7,6 +6,4 @@
 os.bin
 os.iso
 packages/iso/boot/os.bin
-
-# Rust build artifacts
 rust_lib/target/
