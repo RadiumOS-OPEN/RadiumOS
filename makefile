@@ -3,9 +3,9 @@
 NASM = nasm
 CC = clang
 CARGO = cargo
-LD = ld.lld
+LD = $(shell command -v ld.lld 2>/dev/null || command -v ld.lld-19 2>/dev/null || printf '%s' ld.lld)
 QEMU = qemu-system-i386
-NM = llvm-nm
+NM = $(shell command -v llvm-nm 2>/dev/null || command -v llvm-nm-19 2>/dev/null || printf '%s' llvm-nm)
 
 # Compiler flags
 # Added -MMD -MP for automatic header dependency tracking
@@ -151,7 +151,7 @@ $(GRUB_OBJ): $(GRUB_ASM)
 ifeq ($(USE_RUST),yes)
 $(RUST_LIB): $(wildcard $(RUST_LIB_DIR)/src/*.rs) i686-radiumos.json .cargo/config.toml
 	@echo "Building Rust library with Cargo..."
-	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem
+	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zjson-target-spec -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem
 	@echo "✓ Rust library built"
 endif
 
