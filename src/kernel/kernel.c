@@ -550,24 +550,6 @@ void kernel_main(void) {
     rust_init_multitasking();
     rust_setup_pit(1000);  
     rust_start_demo_tasks();
-    
-    // Build a useful notification message with system info
-    char notification_msg[256];
-    uint8_t mac[6] = {0};
-    bool network_ready = (rust_rtl8139_get_mac(mac) == 0);
-    
-    // Format the message using snprintr for safety
-    int offset = 0;
-    offset += snprintf(notification_msg + offset, sizeof(notification_msg) - offset, "Networking Module Created by Thorne (scp_2801)\nRadiumOS:network:driver [OK]!\n");
-    
-    if (network_ready) {
-        offset += snprintf(notification_msg + offset, sizeof(notification_msg) - offset, "MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-                           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    } else {
-        offset += snprintf(notification_msg + offset, sizeof(notification_msg) - offset, "Network: Not available\n");
-    }
-    
-    rust_send_ntfy_notification(notification_msg);
     init_serial_port(0x3F8);
 init_keyboard();
     enable_paging_from_c();
@@ -613,54 +595,7 @@ keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to c
         printr("Proof Addr: 0x%08x\n", (unsigned int)proof_addr);
     }
         set_flashy_net_info();
-        /*
-int32_t rbr_run(const uint8_t *start_url);
-//rbr_run((const uint8_t *)"https://google.com/");
-extern int radium_register_device(
-    const uint8_t *hostname,
-    size_t        hostname_len,
-    float         lat,
-    float         lon,
-    const uint8_t *model,
-    size_t        model_len,
-    const uint8_t *psca_ip,
-    uint16_t      psca_port,
-    uint8_t       *out,
-    size_t        out_len,
-    uint32_t      retry
-);
-const char *host = "radium-node-01";
-    const char *model = "RadiumOS-7.3";
-    
-    // Server IP (192.168.1.100) and Port
-    uint8_t ip[4] = {72, 14, 176, 144};
-    uint16_t port = 8080;
 
-    // Buffer for the function to write its response into
-    uint8_t out_buf[4096];
-    memset(out_buf, 0, sizeof(out_buf));
-
-    // Call it exactly like your discord function, just with more args
-    int res = radium_register_device(
-        (const uint8_t *)host, strlen(host),
-        39.7392f,
-        -104.9903f,
-        (const uint8_t *)model, strlen(model),
-        ip,
-        port,
-        out_buf,
-        sizeof(out_buf),
-        3  // retries
-    );
-
-    if (res > 0) {
-        // Null-terminate the output so we can print it as a string
-        out_buf[res] = '\0'; 
-        printr("OK (%d bytes): %s\n", res, (char *)out_buf);
-    } else {
-        printr("Error code: %d\n", res);
-    }*/
-//httpShit();
        //outb(0x21, inb(0x21) | 0x01); 
     enable_interrupts();
     while(1) {
