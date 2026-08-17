@@ -535,10 +535,6 @@ void kernel_main(void) {
             print("\n=== TEST 2: ARP Request ===\n");
             rust_test_network_simple();
             
-            // Test 3: DNS query (if ARP works)
-            print("\n=== TEST 3: Full Notification ===\n");
-            print("Sending notification:\n");
-            
         } else {
             print("RTL8139 not initialized!\n");
         }
