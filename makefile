@@ -151,7 +151,7 @@ $(GRUB_OBJ): $(GRUB_ASM)
 ifeq ($(USE_RUST),yes)
 $(RUST_LIB): $(wildcard $(RUST_LIB_DIR)/src/*.rs) i686-radiumos.json .cargo/config.toml
 	@echo "Building Rust library with Cargo..."
-	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -json-target-spec --target ../i686-radiumos.json
+	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Z json-target-spec --target ../i686-radiumos.json
 	@echo "✓ Rust library built"
 endif
 
