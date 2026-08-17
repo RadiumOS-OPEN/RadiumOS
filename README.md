@@ -109,8 +109,8 @@ Run `make help` for the full list. Highlights:
 
 ## Project Structure
 
-- `src/` — Kernel and core OS code (Rust + C)
-- `rust_lib/` — Rust standard library components
+- `src/` — Kernel and core OS code (C)
+- `rust_lib/` — Rust standard library components (With Rust SRC)
 - `packages/` — RSH scripts and modules
 - `makefile` — Build system
 - `linker.ld` — Linker configuration for i686
