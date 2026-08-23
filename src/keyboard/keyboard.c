@@ -898,9 +898,77 @@ void execute_command(const char *command) {
         argv[argc++] = token;
         token = strtok(NULL, " ");
     }
+    if (argc == 0) return;
+
+    // "> file" sends a command's output to a file, ">> file" appends
+    // (echo handles its own redirection)
+    int redirect_index = -1;
+    int append_mode = 0;
+    if (strcmp(argv[0], "echo") != 0) {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], ">") == 0) { redirect_index = i; break; }
+            if (strcmp(argv[i], ">>") == 0) { redirect_index = i; append_mode = 1; break; }
+        }
+    }
+
     for (size_t i = 0; i < command_count; i++) {
         if (strcmp(argv[0], commands[i].name) == 0) {
-            commands[i].execute(argc, argv);
+            if (redirect_index == -1) {
+                commands[i].execute(argc, argv);
+            } else {
+                if (redirect_index + 1 >= argc) {
+                    print("\n! missing filename after ");
+                    print(append_mode ? ">>" : ">");
+                    print(" !\n");
+                    return;
+                }
+
+                char *file = argv[redirect_index + 1];
+
+                if (avfs_is_directory(file)) {
+                    print("\n! ");
+                    print(file);
+                    print(" is a directory !\n");
+                    return;
+                }
+
+                if (append_mode) {
+                    // >> keeps existing contents; only create if missing
+                    if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) {
+                        print("\n! could not create ");
+                        print(file);
+                        print(" !\n");
+                        return;
+                    }
+                } else {
+                    if (avfs_file_exists(file) && avfs_remove_file(file) != 0) {
+                        print("\n! could not replace ");
+                        print(file);
+                        print(" !\n");
+                        return;
+                    }
+
+                    if (avfs_create_file(file, 0) != 0) {
+                        print("\n! could not create ");
+                        print(file);
+                        print(" !\n");
+                        return;
+                    }
+                }
+
+                if (terminal_begin_capture(file) != 0) {
+                    print("\n! could not start capture for ");
+                    print(file);
+                    print(" !\n");
+                    return;
+                }
+                commands[i].execute(redirect_index, argv);
+                if (terminal_end_capture() != 0) {
+                    print("\n! disk full while writing ");
+                    print(file);
+                    print(" !\n");
+                }
+            }
             return;
         }
     }
