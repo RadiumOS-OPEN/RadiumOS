@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+mod prp;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::ptr::read_volatile;
 use core::slice;
@@ -29,6 +31,7 @@ extern "C" {
     fn avfs_create_file(name: *const u8, size: u32) -> i32;
     fn avfs_write_file(name: *const u8, buffer: *const u8, size: u32, offset: u32) -> i32;
     fn avfs_read_file(name: *const u8, buffer: *mut u8, size: u32, offset: u32) -> i32;
+    fn avfs_append_file(name: *const u8, buffer: *const u8, size: u32) -> i32;
     fn avfs_remove_file(name: *const u8) -> i32;
     fn avfs_get_filesize(name: *const u8) -> i32;
     fn avfs_file_exists(name: *const u8) -> bool;
