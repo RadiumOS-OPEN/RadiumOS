@@ -302,6 +302,18 @@ pub(super) fn verify_commit(
     point_compress(&left) == point_compress(&right)
 }
 
+// Montgomery u-coordinate of the birationally equivalent Curve25519 point,
+// matching what x25519::x25519(priv, BASEPOINT) stores in .pub files
+pub(super) fn montgomery_u(public: &[u8; 32]) -> Option<[u8; 32]> {
+    let p = point_decompress(public)?;
+    let zinv = fe_invert(&p.z);
+    let y = fe_mul(&p.y, &zinv);
+    // u = (1 + y) / (1 - y)
+    let num = fe_add(&fe_one(), &y);
+    let den = fe_sub(&fe_one(), &y);
+    Some(fe_to_bytes(&fe_mul(&num, &fe_invert(&den))))
+}
+
 fn hex_decode(hex: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for i in 0..32 {

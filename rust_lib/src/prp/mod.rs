@@ -452,16 +452,18 @@ pub unsafe extern "C" fn rust_prp_sign(file: *const u8, private_key: *const u8) 
         }
     }
 
+    // signing scalar is the private bytes themselves (already X25519-clamped by
+    // keygen; clamp defensively), so the signature public matches the .pub file.
+    // sha512 expansion is used only for the deterministic nonce prefix.
     let h = sha512::sha512(&private);
-    let mut scalar = [0u8; 32];
-    scalar.copy_from_slice(&h[..32]);
+    let mut scalar = private;
     scalar[0] &= 248;
-    scalar[31] &= 63;
+    scalar[31] &= 127;
     scalar[31] |= 64;
     let mut prefix = [0u8; 32];
     prefix.copy_from_slice(&h[32..]);
 
-    let public = ed25519::public_key(&private);
+    let public = ed25519::compress_scalar_mul(&scalar);
 
     let mut hasher = Sha512::new();
     hasher.update(&prefix);
@@ -523,8 +525,11 @@ pub unsafe extern "C" fn rust_prp_verify(file: *const u8, expected_pub: *const u
     if !expected_pub.is_null() {
         let mut want = [0u8; 32];
         core::ptr::copy_nonoverlapping(expected_pub, want.as_mut_ptr(), 32);
-        if public != want {
-            return -8;
+        // .pub files hold the X25519 u-coordinate of the same group element the
+        // signature's compressed Edwards public encodes
+        match ed25519::montgomery_u(&public) {
+            Some(u) if u == want => {}
+            _ => return -8,
         }
     }
 

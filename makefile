@@ -54,6 +54,7 @@ QEMU_FLAGS = -display sdl \
   -cdrom $(ISO_FILE) \
   -boot order=d \
   -machine pc \
+  -cpu max \
   -smp 1 \
   -serial pty \
   -debugcon file:debug.log \
