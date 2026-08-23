@@ -173,6 +173,7 @@ char* get_cpu_vendor(void);
 char* get_cpu_brand_string(void);
 uint32_t get_cpu_frequency_mhz(void);
 uint64_t get_cpu_timestamp(void);
+int cpu_rdrand32(uint32_t *value);
 uint32_t get_cpu_temperature(void);
 
 void get_cpu_features(CPUFeatures* features);

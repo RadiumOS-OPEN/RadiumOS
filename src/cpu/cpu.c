@@ -286,6 +286,26 @@ uint64_t get_cpu_timestamp() {
     return ((uint64_t)high << 32) | low;
 }
 
+int cpu_rdrand32(uint32_t *value) {
+    if (!value) return 0;
+
+    CPUIDInfo info;
+    get_cpuid(1, &info);
+    if (!(info.ecx & CPUID_FEAT_ECX_RDRAND)) return 0;
+
+    for (int i = 0; i < 10; i++) {
+        uint32_t random;
+        uint8_t ok;
+        __asm__ volatile ("rdrand %0; setc %1" : "=r" (random), "=m" (ok));
+        if (ok) {
+            *value = random;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 uint32_t get_cpu_frequency_mhz() {
     CPUIDInfo info;
     
