@@ -4,6 +4,7 @@
 #include "../keyboard/keyboard.h"
 #include "../rawr/rawr.h"
 #include "../Avfs/Avfs.h"
+#include "../utility/utility.h"
 
 
 #include "../commands/mempop.h"
@@ -133,6 +134,20 @@ extern int rust_aes_decrypt(uint8_t *data, uint32_t len);
 extern int rust_aes_encrypt_file(const uint8_t *filename);
 extern int rust_aes_decrypt_file(const uint8_t *filename);
 
+// ===== PRP =====
+extern int rust_prp_selftest(void);
+extern int rust_prp_sha256_file(const uint8_t *filename, uint8_t *output);
+extern int rust_prp_random(uint8_t *output, uint32_t len);
+extern int rust_prp_seal_file(const uint8_t *input, const uint8_t *output, const uint8_t *key_hex);
+extern int rust_prp_open_file(const uint8_t *input, const uint8_t *output, const uint8_t *key_hex);
+extern int rust_prp_seal_text(const uint8_t *text, uint32_t len, const uint8_t *key_hex, const uint8_t *output);
+extern int rust_prp_seal_text_pub(const uint8_t *text, uint32_t len, const uint8_t *recipient_pub, const uint8_t *output);
+extern int rust_prp_seal_file_pub(const uint8_t *input, const uint8_t *output, const uint8_t *recipient_pub);
+extern int rust_prp_open_file_prv(const uint8_t *input, const uint8_t *output, const uint8_t *private_key);
+extern int rust_prp_keygen(const uint8_t *name);
+extern int rust_prp_sign(const uint8_t *file, const uint8_t *private_key);
+extern int rust_prp_verify(const uint8_t *file, const uint8_t *expected_pub);
+extern int rust_prp_fingerprint(const uint8_t *keyfile, uint8_t *output);
 
 #define DISCORD_BOT_TOKEN \
     "YouTHOUGHTT(add your token here then launch OS)-but server will start approx in 2 or 4 months :p"
@@ -164,6 +179,649 @@ static void join_args(char *dest, int dest_size, char **argv, int start, int arg
             dest[offset++] = argv[i][j];
     }
     dest[offset] = '\0';
+}
+
+// ===== PRP commands =====
+void cmd_prp_test(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    if (rust_prp_selftest() == 0) {
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        print("PRP self-test passed.\n");
+    } else {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("PRP self-test failed.\n");
+    }
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+static void prp_print_fingerprint(const char *keyfile)
+{
+    uint8_t digest[32];
+    if (rust_prp_fingerprint((const uint8_t *)keyfile, digest) != 0) {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("Unknown key format.\n");
+        terminal_setcolor(VGA_COLOR_WHITE);
+        return;
+    }
+
+    static const char digits[] = "0123456789abcdef";
+    terminal_setcolor(VGA_COLOR_LIGHT_BROWN);
+    for (int i = 0; i < 4; i++) {
+        if (i > 0) print(" ");
+        char group[5];
+        group[0] = digits[digest[i * 2] >> 4];
+        group[1] = digits[digest[i * 2] & 0x0f];
+        group[2] = digits[digest[i * 2 + 1] >> 4];
+        group[3] = digits[digest[i * 2 + 1] & 0x0f];
+        group[4] = '\0';
+        print(group);
+    }
+    print("\n");
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+void cmd_prp_fingerprint(int argc, char *argv[])
+{
+    if (argc != 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print("Usage: prp fingerprint <keyfile>\n");
+        return;
+    }
+
+    prp_print_fingerprint(argv[1]);
+}
+
+static int prp_derive_name(char *dest, int dest_size, const char *src, int encrypt)
+{
+    int len = 0;
+    while (src[len] != '\0') len++;
+
+    if (encrypt) {
+        if (len + 4 >= dest_size) return -1;
+        for (int i = 0; i < len; i++) dest[i] = src[i];
+        dest[len] = '.'; dest[len + 1] = 'p'; dest[len + 2] = 'r'; dest[len + 3] = 'p';
+        dest[len + 4] = '\0';
+        return 0;
+    }
+
+    if (len <= 4 || src[len - 4] != '.' || src[len - 3] != 'p' ||
+        src[len - 2] != 'r' || src[len - 1] != 'p') {
+        return -1;
+    }
+    if (len - 4 >= dest_size) return -1;
+    for (int i = 0; i < len - 4; i++) dest[i] = src[i];
+    dest[len - 4] = '\0';
+    return 0;
+}
+
+static int prp_load_key(const char *path, char *hex)
+{
+    int size = avfs_get_filesize((const char *)path);
+    if (size < 64 || size > 66) {
+        return -1;
+    }
+    if (avfs_read_file(path, hex, 64, 0) != 0) {
+        return -1;
+    }
+    hex[64] = '\0';
+
+    for (int i = 0; i < 64; i++) {
+        char c = hex[i];
+        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!ok) return -1;
+    }
+    return 0;
+}
+
+static int prp_read_raw_key(const char *path, const char *magic, uint8_t *key)
+{
+    char head[7];
+    if (avfs_get_filesize((const char *)path) < 39) return -1;
+    if (avfs_read_file(path, head, 7, 0) != 0) return -1;
+    if (memcmp(head, magic, 7) != 0) return -1;
+    if (avfs_read_file(path, key, 32, 7) != 0) return -1;
+    return 0;
+}
+
+static int prp_flag(int argc, char *argv[], const char *short_flag, const char *long_flag)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], short_flag) == 0 || strcmp(argv[i], long_flag) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int prp_input_arg(int argc, char *argv[])
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0 ||
+            strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            continue;
+        }
+        return i;
+    }
+    return -1;
+}
+
+static void prp_usage(int encrypt)
+{
+    if (encrypt) {
+        print("Usage: prp encrypt <file> <keyfile>\n");
+        print("       prp encrypt \"text\" <keyfile>\n");
+    } else {
+        print("Usage: prp decrypt <file.prp> <keyfile>\n");
+    }
+    print("       keyfile: 64 hex characters, a .pub key (encrypt),\n");
+    print("                or a .prv key (decrypt)\n");
+    print("       -v, --verbose   show what was detected and done\n");
+    print("       -h, --help      show this help\n");
+}
+
+static void prp_verbose_key_type(const char *path)
+{
+    int size = avfs_get_filesize((const char *)path);
+    char head[8];
+    int head_len = (size >= 7) ? 7 : size;
+    if (head_len > 0 && avfs_read_file(path, head, head_len, 0) != 0) head_len = 0;
+
+    print("  key type: ");
+    if (head_len == 7 && memcmp(head, "PRPPUB1", 7) == 0) {
+        print("public key");
+    } else if (head_len == 7 && memcmp(head, "PRPPRV1", 7) == 0) {
+        print("private key");
+    } else if (size >= 64 && size <= 66) {
+        print("symmetric key");
+    } else {
+        print("unknown");
+    }
+    print(" (");
+    print(path);
+    print(")\n");
+}
+
+static void prp_run_file_op(int encrypt, int argc, char *argv[])
+{
+    if (prp_flag(argc, argv, "-h", "--help")) {
+        prp_usage(encrypt);
+        return;
+    }
+    int verbose = prp_flag(argc, argv, "-v", "--verbose");
+
+    int in = prp_input_arg(argc, argv);
+    if (argc < 3 || in < 0 || in >= argc - 1) {
+        prp_usage(encrypt);
+        return;
+    }
+
+    char key_hex[65];
+    int symmetric = 1;
+    uint8_t raw_key[32];
+
+    if (prp_load_key(argv[argc - 1], key_hex) == 0) {
+        if (verbose) prp_verbose_key_type(argv[argc - 1]);
+    } else if (prp_read_raw_key(argv[argc - 1], "PRPPUB1", raw_key) == 0 && encrypt) {
+        symmetric = 0;
+        if (verbose) {
+            print("  key type: public key (");
+            print(argv[argc - 1]);
+            print(")\n");
+        }
+    } else if (prp_read_raw_key(argv[argc - 1], "PRPPRV1", raw_key) == 0 && !encrypt) {
+        symmetric = 0;
+        if (verbose) {
+            print("  key type: private key (");
+            print(argv[argc - 1]);
+            print(")\n");
+        }
+    } else {
+        print("Key file must be 64 hex characters or a PRP key file.\n");
+        prp_usage(encrypt);
+        return;
+    }
+
+    if (!encrypt) {
+        char derived[128];
+        if (prp_derive_name(derived, sizeof(derived), argv[in], 0) != 0) {
+            print("Not a .prp file.\n");
+            prp_usage(encrypt);
+            return;
+        }
+        int result;
+        if (symmetric) {
+            result = rust_prp_open_file((const uint8_t *)argv[in], (const uint8_t *)derived, (const uint8_t *)key_hex);
+        } else {
+            result = rust_prp_open_file_prv((const uint8_t *)argv[in], (const uint8_t *)derived, raw_key);
+        }
+        if (verbose) {
+            char head[4];
+            print("  input: ");
+            print(argv[in]);
+            if (avfs_get_filesize((const char *)argv[in]) >= 4 &&
+                avfs_read_file(argv[in], head, 4, 0) == 0 && memcmp(head, "PRP1", 4) == 0) {
+                print(" (PRP1, ChaCha20-Poly1305)");
+            }
+            print("\n  output: ");
+            print(derived);
+            print("\n");
+        }
+        switch (result) {
+        case 0:
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+            print("Decrypted to ");
+            print(derived);
+            print("\n");
+            break;
+        case -4:
+            print("Could not create output file. Does it already exist?\n");
+            break;
+        case -6:
+            print("Not a PRP file.\n");
+            break;
+        case -7:
+            print("Authentication failed. Wrong key or modified file.\n");
+            break;
+        default:
+            print("Could not process file.\n");
+            break;
+        }
+        terminal_setcolor(VGA_COLOR_WHITE);
+        return;
+    }
+
+    if (avfs_file_exists(argv[in])) {
+        char derived[128];
+        if (prp_derive_name(derived, sizeof(derived), argv[in], 1) != 0) {
+            print("File name too long.\n");
+            prp_usage(encrypt);
+            return;
+        }
+        if (avfs_file_exists(derived)) avfs_remove_file(derived);
+        if (verbose) {
+            print("  input: ");
+            print(argv[in]);
+            print("\n  output: ");
+            print(derived);
+            print("\n  cipher: ");
+            if (symmetric) {
+                print("ChaCha20-Poly1305\n");
+            } else {
+                print("X25519 + ChaCha20-Poly1305\n");
+            }
+        }
+        int result;
+        if (symmetric) {
+            result = rust_prp_seal_file((const uint8_t *)argv[in], (const uint8_t *)derived, (const uint8_t *)key_hex);
+        } else {
+            result = rust_prp_seal_file_pub((const uint8_t *)argv[in], (const uint8_t *)derived, raw_key);
+        }
+        if (result == 0) {
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+            print("Encrypted to ");
+            print(derived);
+            print("\n");
+        } else {
+            print("Could not process file.\n");
+        }
+        terminal_setcolor(VGA_COLOR_WHITE);
+    } else {
+        if (argv[in][0] != '"') {
+            print("File not found.\n");
+            prp_usage(encrypt);
+            return;
+        }
+
+        static char text[513];
+        int len = 0;
+        int too_long = 0;
+        for (int i = in; i < argc - 1 && !too_long; i++) {
+            const char *word = argv[i];
+            int start = (i == in) ? 1 : 0;
+            for (int j = start; word[j] != '\0' && word[j] != '"'; j++) {
+                if (len >= 512) { too_long = 1; break; }
+                text[len++] = word[j];
+            }
+            if (!too_long && i < argc - 2) {
+                if (len >= 512) { too_long = 1; break; }
+                text[len++] = ' ';
+            }
+        }
+        text[len] = '\0';
+
+        if (too_long) {
+            print("Input too long (max 512 bytes). Use a file instead.\n");
+            terminal_setcolor(VGA_COLOR_WHITE);
+            return;
+        }
+
+        if (verbose) {
+            char count[11];
+            int value = len;
+            int pos = 0;
+            do { count[pos++] = '0' + value % 10; value /= 10; } while (value > 0);
+            count[pos] = '\0';
+            for (int i = 0; i < pos / 2; i++) {
+                char t = count[i]; count[i] = count[pos - 1 - i]; count[pos - 1 - i] = t;
+            }
+            print("  input: ");
+            print(count);
+            print(" bytes of text\n  output: text.prp\n  cipher: ChaCha20-Poly1305\n");
+        }
+
+        if (avfs_file_exists("text.prp")) avfs_remove_file("text.prp");
+        int result;
+        if (symmetric) {
+            result = rust_prp_seal_text((const uint8_t *)text, len, (const uint8_t *)key_hex, (const uint8_t *)"text.prp");
+        } else {
+            result = rust_prp_seal_text_pub((const uint8_t *)text, len, raw_key, (const uint8_t *)"text.prp");
+        }
+        if (result == 0) {
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+            print("Encrypted to text.prp\n");
+        } else {
+            print("Could not encrypt text.\n");
+        }
+        terminal_setcolor(VGA_COLOR_WHITE);
+    }
+}
+
+void cmd_prp_encrypt(int argc, char *argv[])
+{
+    prp_run_file_op(1, argc, argv);
+}
+
+void cmd_prp_decrypt(int argc, char *argv[])
+{
+    prp_run_file_op(0, argc, argv);
+}
+
+void cmd_prp_keygen(int argc, char *argv[])
+{
+    if (argc != 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print("Usage: prp keygen <name>\n");
+        print("       creates <name>.prv (keep secret) and <name>.pub (share)\n");
+        return;
+    }
+
+    if (rust_prp_keygen((const uint8_t *)argv[1]) == 0) {
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        print("Keypair generated: ");
+        print(argv[1]);
+        print(".prv and ");
+        print(argv[1]);
+        print(".pub\n");
+    } else {
+        print("Could not generate keypair.\n");
+    }
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+void cmd_prp_sign(int argc, char *argv[])
+{
+    if (argc != 3 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print("Usage: prp sign <file> <key.prv>\n");
+        print("       appends a PRPSIG1 trailer to the file\n");
+        return;
+    }
+
+    uint8_t prv[32];
+    if (prp_read_raw_key(argv[2], "PRPPRV1", prv) != 0) {
+        print("Key file must be a .prv key.\n");
+        return;
+    }
+
+    int result = rust_prp_sign((const uint8_t *)argv[1], prv);
+    switch (result) {
+    case 0:
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        print("Signed ");
+        print(argv[1]);
+        print("\n");
+        break;
+    case -5:
+        print("File is already signed.\n");
+        break;
+    default:
+        print("Could not sign file (code ");
+        print_decimal(result);
+        print(").\n");
+        break;
+    }
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+void cmd_prp_verify(int argc, char *argv[])
+{
+    if (argc < 2 || argc > 3 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print("Usage: prp verify <file> [key.pub]\n");
+        return;
+    }
+
+    uint8_t want_pub[32];
+    const uint8_t *want_ptr = 0;
+    if (argc >= 3) {
+        if (prp_read_raw_key(argv[2], "PRPPUB1", want_pub) != 0) {
+            print("Key file must be a .pub key.\n");
+            return;
+        }
+        want_ptr = want_pub;
+    }
+
+    int result = rust_prp_verify((const uint8_t *)argv[1], want_ptr);
+    switch (result) {
+    case 0:
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        print("Signature valid.\n");
+        break;
+    case -6:
+        print("No signature found.\n");
+        break;
+    case -7:
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("Signature INVALID.\n");
+        break;
+    case -8:
+        print("Signed by a different key.\n");
+        break;
+    default:
+        print("Could not verify file.\n");
+        break;
+    }
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+void cmd_prp_hash(int argc, char *argv[])
+{
+    if (argc < 2) {
+        print("Usage: prp hash <file>\n");
+        return;
+    }
+
+    uint8_t digest[32];
+    int result = rust_prp_sha256_file((const uint8_t *)argv[1], digest);
+    if (result == -1) {
+        print("File not found.\n");
+        return;
+    }
+    if (result != 0) {
+        print("Could not read file.\n");
+        return;
+    }
+
+    static const char digits[] = "0123456789abcdef";
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2] = digits[digest[i] >> 4];
+        hex[i * 2 + 1] = digits[digest[i] & 0x0f];
+    }
+    hex[64] = '\0';
+
+    print(hex);
+    print("\n");
+}
+
+void cmd_prp_random(int argc, char *argv[])
+{
+    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        print("Usage: prp random [bytes]\n");
+        print("       1 to 256 bytes, default 32 (one PRP key)\n");
+        return;
+    }
+
+    static uint8_t random[256];
+    int len = 32;
+
+    if (argc > 2) {
+        print("Usage: prp random [bytes]\n");
+        print("       1 to 256 bytes, default 32 (one PRP key)\n");
+        return;
+    }
+    if (argc == 2) {
+        len = simple_atoi(argv[1]);
+        if (len < 1 || len > (int)sizeof(random)) {
+            print("Usage: prp random [bytes]\n");
+            print("       1 to 256 bytes, default 32 (one PRP key)\n");
+            return;
+        }
+    }
+
+    if (rust_prp_random(random, len) != 0) {
+        print("Secure randomness unavailable.\n");
+        return;
+    }
+
+    static const char digits[] = "0123456789abcdef";
+    char hex[513];
+    for (int i = 0; i < len; i++) {
+        hex[i * 2] = digits[random[i] >> 4];
+        hex[i * 2 + 1] = digits[random[i] & 0x0f];
+    }
+    hex[len * 2] = '\0';
+
+    print(hex);
+    print("\n");
+}
+
+void cmd_prp_keyinfo(int argc, char *argv[])
+{
+    if (argc != 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print("Usage: prp keyinfo <keyfile>\n");
+        return;
+    }
+
+    int size = avfs_get_filesize(argv[1]);
+    if (size < 0) {
+        print("File not found.\n");
+        return;
+    }
+
+    char head[7];
+    int head_len = (size >= 7) ? 7 : size;
+    if (head_len > 0 && avfs_read_file(argv[1], head, head_len, 0) != 0) {
+        print("Could not read file.\n");
+        return;
+    }
+
+    terminal_setcolor(VGA_COLOR_WHITE);
+    if (head_len == 7 && memcmp(head, "PRPPUB1", 7) == 0) {
+        print("Public key\n  fingerprint: ");
+        prp_print_fingerprint(argv[1]);
+    } else if (head_len == 7 && memcmp(head, "PRPPRV1", 7) == 0) {
+        print("Private key\n  fingerprint: ");
+        prp_print_fingerprint(argv[1]);
+    } else if (size >= 64 && size <= 66) {
+        char probe[65];
+        if (avfs_read_file(argv[1], probe, 64, 0) != 0) {
+            print("Could not read file.\n");
+            return;
+        }
+        probe[64] = '\0';
+        int hex_ok = 1;
+        for (int i = 0; i < 64; i++) {
+            char c = probe[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                hex_ok = 0;
+                break;
+            }
+        }
+        if (hex_ok) {
+            print("Symmetric key (64 hex characters)\n  fingerprint: ");
+            prp_print_fingerprint(argv[1]);
+        } else {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED);
+            print("Unknown key format.\n");
+        }
+    } else {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("Unknown key format.\n");
+    }
+    terminal_setcolor(VGA_COLOR_WHITE);
+}
+
+static void prp_banner(void)
+{
+    print(" .----------------.  .----------------.  .----------------. \n");
+    print("| .--------------. || .--------------. || .--------------. |\n");
+    print("| |   ______     | || |  _______     | || |   ______     | |\n");
+    print("| |  |_   __ \\   | || | |_   __ \\    | || |  |_   __ \\   | |\n");
+    print("| |    | |__) |  | || |   | |__) |   | || |    | |__) |  | |\n");
+    print("| |    |  ___/   | || |   |  __ /    | || |    |  ___/   | |\n");
+    print("| |   _| |_      | || |  _| |  \\ \\_  | || |   _| |_      | |\n");
+    print("| |  |_____|     | || | |____| |___| | || |  |_____|     | |\n");
+    print("| |              | || |              | || |              | |\n");
+    print("| '--------------' || '--------------' || '--------------' |\n");
+    print(" '----------------'  '----------------'  '----------------' \n");
+}
+
+void cmd_prp(int argc, char *argv[])
+{
+    const char *sub = (argc > 1) ? argv[1] : "";
+
+    if (argc < 2 || strcmp(sub, "-h") == 0 || strcmp(sub, "--help") == 0) {
+        prp_banner();
+        print("\nUsage: prp <command> [args]\n\nCommands:\n");
+        print("  encrypt <file|\"text\"> <keyfile>   Encrypt to <file>.prp or text.prp\n");
+        print("  decrypt <file.prp> <keyfile>      Decrypt a .prp file\n");
+        print("  keygen <name>                     Generate <name>.prv/.pub keypair\n");
+        print("  sign <file> <key.prv>             Sign a file in place\n");
+        print("  verify <file> [key.pub]           Verify a signed file\n");
+        print("  fingerprint <keyfile>             Show a key's fingerprint\n");
+        print("  keyinfo <keyfile>                 Identify a key file\n");
+        print("  hash <file>                       SHA-256 hash of a file\n");
+        print("  random [bytes]                    Print random bytes (default 32)\n");
+        print("  test                              Run PRP self-test\n");
+        return;
+    }
+
+    if (strcmp(sub, "encrypt") == 0) {
+        cmd_prp_encrypt(argc - 1, argv + 1);
+    } else if (strcmp(sub, "decrypt") == 0) {
+        cmd_prp_decrypt(argc - 1, argv + 1);
+    } else if (strcmp(sub, "keygen") == 0) {
+        cmd_prp_keygen(argc - 1, argv + 1);
+    } else if (strcmp(sub, "sign") == 0) {
+        cmd_prp_sign(argc - 1, argv + 1);
+    } else if (strcmp(sub, "verify") == 0) {
+        cmd_prp_verify(argc - 1, argv + 1);
+    } else if (strcmp(sub, "fingerprint") == 0) {
+        cmd_prp_fingerprint(argc - 1, argv + 1);
+    } else if (strcmp(sub, "keyinfo") == 0) {
+        cmd_prp_keyinfo(argc - 1, argv + 1);
+    } else if (strcmp(sub, "hash") == 0) {
+        cmd_prp_hash(argc - 1, argv + 1);
+    } else if (strcmp(sub, "random") == 0) {
+        cmd_prp_random(argc - 1, argv + 1);
+    } else if (strcmp(sub, "test") == 0) {
+        cmd_prp_test(argc - 1, argv + 1);
+    } else {
+        print("Unknown PRP command: ");
+        print(sub);
+        print("\nType 'prp' for usage.\n");
+        prp_banner();
+    }
 }
 
 // ============================================================
@@ -940,6 +1598,9 @@ void registerCommands(void)
     register_command("aes.key", "Set AES encryption key",              cmd_aes_key);
     register_command("aes.enc", "Encrypt a file",                      cmd_aes_enc);
     register_command("aes.dec", "Decrypt a file",                      cmd_aes_dec);
+
+    // ===== PRP =====
+    register_command("prp", "PRP crypto toolkit",           cmd_prp);
 
     // -- Misc -----------------------------------------------------------------
     register_command("cat.hex", "Print file as hex",                   cmd_cat_hex);

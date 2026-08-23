@@ -26,6 +26,7 @@ BACKUP_DIR = backups
 BOOT_ASM = $(BOOT_DIR)/boot.asm
 GRUB_ASM = $(GRUB_DIR)/grub.asm
 C_SOURCES = $(shell find $(SRC_DIR) -name '*.c')
+RUST_SOURCES = $(shell find $(RUST_LIB_DIR)/src -name '*.rs')
 
 # Object files and dependencies
 BOOT_OBJ = $(BOOT_DIR)/boot.o
@@ -149,7 +150,7 @@ $(GRUB_OBJ): $(GRUB_ASM)
 
 # Build Rust library with Cargo
 ifeq ($(USE_RUST),yes)
-$(RUST_LIB): $(wildcard $(RUST_LIB_DIR)/src/*.rs) i686-radiumos.json .cargo/config.toml
+$(RUST_LIB): $(RUST_SOURCES) i686-radiumos.json .cargo/config.toml
 	@echo "Building Rust library with Cargo..."
 	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Z json-target-spec --target ../i686-radiumos.json
 	@echo "✓ Rust library built"
