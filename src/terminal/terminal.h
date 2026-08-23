@@ -12,6 +12,8 @@ void terminal_setcolor(uint8_t color);
 void terminal_putchar(char c);
 void terminal_write(const char* data, size_t size);
 void print(const char* data);
+int terminal_begin_capture(const char* path);
+int terminal_end_capture(void);
 void print_decimal(int num);
 void print_hex(int num);
 void print_octal(int num);

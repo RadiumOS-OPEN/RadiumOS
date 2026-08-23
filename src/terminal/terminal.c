@@ -5,6 +5,7 @@
 #include "../io/io.h"
 #include "../commands/cowsay.h"
 #include "../keyboard/keyboard.h"
+#include "../Avfs/Avfs.h" // For avfs_append_file (capture streaming)
 #include <stdbool.h> // For bool type
 #include <stdarg.h>  // For va_list
 #include <limits.h> 
@@ -404,7 +405,61 @@ void history_append_line_from_terminal(int row) {
     // For now, we just pass the color of the first character as the "line color" to keep it simple.
     history_append_line(temp_line, temp_attrs[0]);
 }
+// output capture used by shell redirection ("cmd > file"):
+// output is streamed to the target file in chunks via avfs_append_file.
+// captures nest (each begin pushes a frame), so a command that runs a
+// sub-redirect can't clobber an outer one's buffered output.
+#define TERMINAL_CAPTURE_CHUNK 4096
+#define TERMINAL_CAPTURE_DEPTH 4
+
+typedef struct capture_frame {
+    char chunk[TERMINAL_CAPTURE_CHUNK];
+    size_t fill;
+    int error;
+    const char *path; // NULL after a flush error: rest is discarded silently
+} capture_frame_t;
+
+// static pool, not kmalloc — the kernel heap is only 1 KB (MEMORY_POOL_SIZE),
+// far too small for a 4 KB chunk
+static capture_frame_t capture_frames[TERMINAL_CAPTURE_DEPTH];
+static int capture_depth = 0;
+
+static void capture_flush(capture_frame_t *f) {
+    if (f->fill == 0) return;
+    int rc = avfs_append_file(f->path, f->chunk, (uint32_t)f->fill);
+    f->fill = 0;
+    if (rc != 0) {
+        f->error = 1;
+        f->path = NULL;
+    }
+}
+
+int terminal_begin_capture(const char *path) {
+    if (capture_depth == TERMINAL_CAPTURE_DEPTH) return -1;
+    capture_frame_t *f = &capture_frames[capture_depth++];
+    f->fill = 0;
+    f->error = 0;
+    f->path = path;
+    return 0;
+}
+
+int terminal_end_capture(void) {
+    if (capture_depth == 0) return 0;
+    capture_frame_t *f = &capture_frames[--capture_depth];
+    capture_flush(f);
+    return f->error ? -1 : 0;
+}
+
 void terminal_putchar(char c) {
+    if (capture_depth > 0) {
+        capture_frame_t *cap = &capture_frames[capture_depth - 1];
+        if (c != '\r' && cap->path) {
+            cap->chunk[cap->fill++] = c;
+            if (cap->fill == sizeof(cap->chunk))
+                capture_flush(cap);
+        }
+        return;
+    }
     // Check for Screen Clear (Ctrl+L sends 0x0C)
     if (c == '\f') {
         terminal_clear();
