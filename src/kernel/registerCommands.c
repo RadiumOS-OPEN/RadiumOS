@@ -1496,6 +1496,13 @@ void cmd_cat_hex(int argc, char *argv[])
     cmd_cat_hexx((const uint8_t *)argv[1]);
 }
 extern int rshPKG(int argc, const char *const *argv);
+extern int rust_fetch(int argc, const uint8_t *const *argv);
+
+void cmd_fetch(int argc, char *argv[])
+{
+    rust_fetch(argc, (const uint8_t *const *)argv);
+}
+
 void cmd_rpkg(int argc, char *argv[]) {
     if (argc < 2) {
         terminal_setcolor(VGA_COLOR_LIGHT_RED);
@@ -1549,6 +1556,7 @@ void registerCommands(void)
     register_command("setdns",    "Set DNS server (a b c d)",       cmd_setdns);
     register_command("testdns",   "Test DNS resolution",            cmd_testdns);
     register_command("nettest",   "ARP/network test",               cmd_nettest);
+    register_command("fetch",     "Fetch an HTTP(S) URL (fetch --help)", cmd_fetch);
     register_command("rawsend",   "Send raw test packet",           cmd_rawsend);
     register_command("netdiag",   "Full network diagnostics",       cmd_netdiag);
     register_command("tcpreset",  "Force TCP state reset",          cmd_tcpreset);

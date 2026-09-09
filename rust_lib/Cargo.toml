@@ -13,3 +13,10 @@ opt-level = 2
 
 [dependencies]
 linked_list_allocator = "0.10.6"
+rustls = { version = "0.23.44", default-features = false, features = ["custom-provider"] }
+webpki-roots = { version = "1.0.9", default-features = false }
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }
+rsa = { version = "0.9.8", default-features = false, features = ["sha2"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["oid"] }

@@ -7,3 +7,4 @@ os.bin
 os.iso
 packages/iso/boot/os.bin
 rust_lib/target/
+debug.log
