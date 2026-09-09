@@ -1186,11 +1186,11 @@ avfs_create_file("/plugins/env.rsh", strlen(plugin_env));
 avfs_write_file("/plugins/env.rsh", plugin_env, strlen(plugin_env), 0);
 done("Created env plugin", "env.rsh");
 
-static const char *fetch_plugin =
-"    set PLUGIN_NAME fetch\n"
+static const char *hwinfo_plugin =
+"    set PLUGIN_NAME hwinfo\n"
 "    set PLUGIN_VER 1.0\n"
 "    set PLUGIN_AUTHOR scp_2801\n"
-"    set PLUGIN_DESC sysinfo\n"
+"    set PLUGIN_DESC hardware and system information\n"
 "function information\n"
 "endfunction\n"
 "\n"
@@ -1335,9 +1335,9 @@ static const char *fetch_plugin =
 "    echo\n"
 "endfunction\n";
 
-avfs_create_file("/plugins/fetch.rsh", strlen(fetch_plugin));
-avfs_write_file("/plugins/fetch.rsh", fetch_plugin, strlen(fetch_plugin), 0);
-done("Created fetch plugin", "fetch.rsh");
+avfs_create_file("/plugins/hwinfo.rsh", strlen(hwinfo_plugin));
+avfs_write_file("/plugins/hwinfo.rsh", hwinfo_plugin, strlen(hwinfo_plugin), 0);
+done("Created hwinfo plugin", "hwinfo.rsh");
 
     const char* autoexec =
 "^include \"rsh:main\"\n"

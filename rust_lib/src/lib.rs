@@ -4,8 +4,12 @@
 #![allow(unused_variables)]
 
 mod prp;
+extern crate alloc;
+mod fetch;
+mod heap;
 
 use core::sync::atomic::{AtomicU32, Ordering};
+static FETCH_NETWORK_SILENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 use core::ptr::read_volatile;
 use core::slice;
 use core::str;
@@ -206,12 +210,14 @@ unsafe fn term_putc(c: u8) {
 
 #[no_mangle]
 pub extern "C" fn rust_print(s: &[u8]) {
+    if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
     unsafe {
         for &c in s { terminal_putchar(c); }
     }
 }
 
 fn print_num(mut num: i32) {
+    if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
     if num == 0 {
         rust_print(b"0");
         return;
@@ -252,6 +258,7 @@ fn print_hex(mut num: u32) {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    FETCH_NETWORK_SILENT.store(false, Ordering::Relaxed);
     unsafe { 
         terminal_setcolor(0x4F);
         rust_print(b"\n\n!!! RUST PANIC !!!\n");
@@ -350,7 +357,8 @@ const RTL8139_REG_CONFIG1: u16 = 0x52;
 const TSAD_ARRAY: [u16; 4] = [0x20, 0x24, 0x28, 0x2C];
 const TSD_ARRAY: [u16; 4] = [0x10, 0x14, 0x18, 0x1C];
 
-const RX_BUFFER_SIZE: usize = 8192 + 16 + 1500;
+const RX_RING_SIZE: usize = 32768;
+const RX_BUFFER_SIZE: usize = RX_RING_SIZE + 16 + 1500;
 
 const CMD_RESET: u8 = 0x10;
 const CMD_RX_ENABLE: u8 = 0x08;
@@ -367,7 +375,8 @@ const RCR_AAP: u32 = 1 << 0;
 const RCR_APM: u32 = 1 << 1;
 const RCR_AM: u32 = 1 << 2;
 const RCR_AB: u32 = 1 << 3;
-const RCR_WRAP: u32 = 1 << 7;
+const RCR_NO_WRAP: u32 = 1 << 7;
+const RCR_RING_32K: u32 = 1 << 12;
 
 #[repr(C)]
 pub struct RTL8139Interface {
@@ -494,9 +503,10 @@ pub extern "C" fn rust_init_rtl8139(iobase: u16) -> i32 {
         }
 
         outl(iobase + 0x30, rx_buffer_phys);
-        outw(iobase + RTL8139_REG_IMR, INT_RXOK | INT_TXOK | INT_RXERR | INT_TXERR | INT_RX_OVERFLOW);
+        // Network callers poll this driver; there is no NIC interrupt handler.
+        outw(iobase + RTL8139_REG_IMR, 0);
         outw(iobase + RTL8139_REG_ISR, 0xFFFF);
-        outl(iobase + RTL8139_REG_RCR, RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_WRAP);
+        outl(iobase + RTL8139_REG_RCR, RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_NO_WRAP | RCR_RING_32K);
         outb(iobase + RTL8139_REG_CMD, CMD_RX_ENABLE | CMD_TX_ENABLE);
 
         let mut mac = [0u8; 6];
@@ -594,6 +604,14 @@ static mut RX_RESPONSE_LENGTH: u32 = 0;
 
 #[no_mangle]
 pub extern "C" fn rust_rtl8139_receive() -> i32 {
+    rtl8139_receive(usize::MAX)
+}
+
+fn rtl8139_receive_one() -> i32 {
+    rtl8139_receive(1)
+}
+
+fn rtl8139_receive(limit: usize) -> i32 {
     unsafe {
         let device = match RTL8139_DEVICE.as_mut() {
             Some(dev) => dev,
@@ -632,15 +650,13 @@ pub extern "C" fn rust_rtl8139_receive() -> i32 {
 
             let new_position = (current_packet + packet_length as usize + 4 + 3) & !3;
             
-            device.current_packet = if new_position >= RX_BUFFER_SIZE {
-                (new_position - RX_BUFFER_SIZE) as u16
-            } else {
-                new_position as u16
-            };
+            // The spill area holds a crossing frame but is not part of the ring.
+            device.current_packet = (new_position % RX_RING_SIZE) as u16;
 
             outw(iobase + 0x38, device.current_packet.wrapping_sub(0x10));
 
             packets_received += 1;
+            if packets_received as usize >= limit { break; }
         }
 
         packets_received
@@ -876,9 +892,10 @@ fn build_tcp_packet(
         buffer[idx] = flags;
         idx += 1;
         
-        buffer[idx] = 0xFF;
+        // Leave room in the NIC ring while the caller processes received data.
+        buffer[idx] = 0x40;
         idx += 1;
-        buffer[idx] = 0xFF;
+        buffer[idx] = 0x00;
         idx += 1;
         
         let checksum_idx = idx;
@@ -1887,6 +1904,10 @@ unsafe fn tcp_reset_state() {
     RX_RESPONSE_LENGTH = 0;
 }
 unsafe fn tcp_connect(dest_ip: &[u8; 4], dest_port: u16) -> bool {
+    tcp_connect_timeout(dest_ip, dest_port, 5000)
+}
+
+unsafe fn tcp_connect_timeout(dest_ip: &[u8; 4], dest_port: u16, timeout_ms: u32) -> bool {
     tcp_reset_state();
 
     rust_print(b"TCP: Connecting to ");
@@ -1956,7 +1977,6 @@ let mut tcp_buffer = [0u8; 1460]; // Max TCP payload
 
     // Wait for SYN-ACK
     let start_time   = get_ticks();
-    let timeout_ms   = 5000u32;
     let mut got_syn_ack  = false;
     let mut last_progress = start_time;
 
@@ -1968,7 +1988,7 @@ let mut tcp_buffer = [0u8; 1460]; // Max TCP payload
         }
 
         RX_RESPONSE_LENGTH = 0;
-        rust_rtl8139_receive();
+        rtl8139_receive_one();
 
         if RX_RESPONSE_LENGTH < 54 {
             RX_RESPONSE_LENGTH = 0;
@@ -1978,6 +1998,12 @@ let mut tcp_buffer = [0u8; 1460]; // Max TCP payload
                 rust_print(b".");
                 last_progress = now;
             }
+            continue 'synack;
+        }
+
+        if fetch::native::tcp_packet(&RX_RESPONSE_BUFFER[..RX_RESPONSE_LENGTH as usize],
+            dest_ip, &LOCAL_IP, expected_remote, expected_local).is_none() {
+            RX_RESPONSE_LENGTH = 0;
             continue 'synack;
         }
 
@@ -2029,6 +2055,11 @@ let mut tcp_buffer = [0u8; 1460]; // Max TCP payload
 
         // SYN-ACK
         if (tcp_flags & 0x12) == 0x12 {
+            let acknowledged = u32::from_be_bytes(RX_RESPONSE_BUFFER[tcp_start + 8..tcp_start + 12].try_into().unwrap());
+            if acknowledged != TCP_CONNECTION.seq_num.wrapping_add(1) {
+                RX_RESPONSE_LENGTH = 0;
+                continue 'synack;
+            }
             let remote_seq = ((RX_RESPONSE_BUFFER[tcp_start + 4] as u32) << 24)
                            | ((RX_RESPONSE_BUFFER[tcp_start + 5] as u32) << 16)
                            | ((RX_RESPONSE_BUFFER[tcp_start + 6] as u32) <<  8)
@@ -6072,706 +6103,6 @@ pub extern "C" fn rust_image_editor() -> i32 {
         //terminal_clear();
         rust_print(b"\nEditor closed.\n");
         0
-    }
-}
-//=============================================================================
-// TLS/HTTPS SUPPORT
-//=============================================================================
-
-// TLS 1.2 Constants
-const TLS_VERSION_1_2: u16 = 0x0303;
-const TLS_HANDSHAKE: u8 = 0x16;
-const TLS_CHANGE_CIPHER_SPEC: u8 = 0x14;
-const TLS_ALERT: u8 = 0x15;
-const TLS_APPLICATION_DATA: u8 = 0x17;
-
-// Handshake types
-const HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
-const HANDSHAKE_SERVER_HELLO: u8 = 0x02;
-const HANDSHAKE_CERTIFICATE: u8 = 0x0B;
-const HANDSHAKE_SERVER_HELLO_DONE: u8 = 0x0E;
-const HANDSHAKE_CLIENT_KEY_EXCHANGE: u8 = 0x10;
-const HANDSHAKE_FINISHED: u8 = 0x14;
-
-// Cipher suites (we'll implement TLS_RSA_WITH_AES_128_CBC_SHA)
-const TLS_RSA_WITH_AES_128_CBC_SHA: u16 = 0x002F;
-
-// TLS connection state
-#[repr(C)]
-pub struct TlsConnection {
-    tcp_connected: bool,
-    handshake_complete: bool,
-    client_random: [u8; 32],
-    server_random: [u8; 32],
-    master_secret: [u8; 48],
-    client_write_key: [u8; 16],
-    server_write_key: [u8; 16],
-    client_write_iv: [u8; 16],
-    server_write_iv: [u8; 16],
-    client_seq_num: u64,
-    server_seq_num: u64,
-}
-
-static mut TLS_CONNECTION: TlsConnection = TlsConnection {
-    tcp_connected: false,
-    handshake_complete: false,
-    client_random: [0; 32],
-    server_random: [0; 32],
-    master_secret: [0; 48],
-    client_write_key: [0; 16],
-    server_write_key: [0; 16],
-    client_write_iv: [0; 16],
-    server_write_iv: [0; 16],
-    client_seq_num: 0,
-    server_seq_num: 0,
-};
-
-static mut TLS_RECEIVE_BUFFER: [u8; 65536] = [0; 65536];
-static mut TLS_RECEIVE_LEN: usize = 0;
-
-//=============================================================================
-// MINIMAL CRYPTO PRIMITIVES
-//=============================================================================
-
-// Simple PRNG for random data (NOT cryptographically secure - use for demo only!)
-unsafe fn generate_random_bytes(buffer: &mut [u8]) {
-    let mut seed = get_ticks();
-    for byte in buffer.iter_mut() {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-        *byte = (seed >> 16) as u8;
-    }
-}
-
-// SHA-256 (simplified implementation)
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-];
-
-fn rotr32(x: u32, n: u32) -> u32 {
-    (x >> n) | (x << (32 - n))
-}
-
-fn sha256(data: &[u8], output: &mut [u8; 32]) {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-    ];
-    
-    let mut padded = [0u8; 128];
-    let data_len = data.len();
-    let mut padded_len = data_len;
-    
-    // Copy data
-    for i in 0..data_len.min(64) {
-        padded[i] = data[i];
-    }
-    
-    // Add padding
-    padded[padded_len] = 0x80;
-    padded_len += 1;
-    
-    // Pad to 56 bytes (448 bits)
-    while padded_len % 64 != 56 {
-        padded[padded_len] = 0;
-        padded_len += 1;
-    }
-    
-    // Add length in bits (big-endian)
-    let bit_len = (data_len as u64) * 8;
-    for i in 0..8 {
-        padded[padded_len + i] = ((bit_len >> (56 - i * 8)) & 0xFF) as u8;
-    }
-    padded_len += 8;
-    
-    // Process blocks
-    for chunk_start in (0..padded_len).step_by(64) {
-        let mut w = [0u32; 64];
-        
-        // Prepare message schedule
-        for i in 0..16 {
-            w[i] = ((padded[chunk_start + i * 4] as u32) << 24) |
-                   ((padded[chunk_start + i * 4 + 1] as u32) << 16) |
-                   ((padded[chunk_start + i * 4 + 2] as u32) << 8) |
-                   (padded[chunk_start + i * 4 + 3] as u32);
-        }
-        
-        for i in 16..64 {
-            let s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ (w[i-15] >> 3);
-            let s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ (w[i-2] >> 10);
-            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
-        }
-        
-        // Compression
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut h_val = h[7];
-        
-        for i in 0..64 {
-            let s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h_val.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
-            let s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-            
-            h_val = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(h_val);
-    }
-    
-    // Output hash
-    for i in 0..8 {
-        output[i * 4] = (h[i] >> 24) as u8;
-        output[i * 4 + 1] = (h[i] >> 16) as u8;
-        output[i * 4 + 2] = (h[i] >> 8) as u8;
-        output[i * 4 + 3] = h[i] as u8;
-    }
-}
-
-// HMAC-SHA256
-fn hmac_sha256(key: &[u8], message: &[u8], output: &mut [u8; 32]) {
-    let mut ipad = [0x36u8; 64];
-    let mut opad = [0x5cu8; 64];
-    
-    // XOR key with pads
-    for i in 0..key.len().min(64) {
-        ipad[i] ^= key[i];
-        opad[i] ^= key[i];
-    }
-    
-    // Inner hash
-    let mut inner_data = [0u8; 128];
-    for i in 0..64 {
-        inner_data[i] = ipad[i];
-    }
-    for i in 0..message.len().min(64) {
-        inner_data[64 + i] = message[i];
-    }
-    
-    let mut inner_hash = [0u8; 32];
-    sha256(&inner_data[0..(64 + message.len().min(64))], &mut inner_hash);
-    
-    // Outer hash
-    let mut outer_data = [0u8; 96];
-    for i in 0..64 {
-        outer_data[i] = opad[i];
-    }
-    for i in 0..32 {
-        outer_data[64 + i] = inner_hash[i];
-    }
-    
-    sha256(&outer_data[0..96], output);
-}
-
-// PRF (Pseudorandom Function) for TLS
-fn prf_sha256(secret: &[u8], label: &[u8], seed: &[u8], output: &mut [u8], output_len: usize) {
-    let mut a = [0u8; 128];
-    let mut a_len = label.len() + seed.len();
-    
-    // A(0) = label + seed
-    for i in 0..label.len() {
-        a[i] = label[i];
-    }
-    for i in 0..seed.len() {
-        a[label.len() + i] = seed[i];
-    }
-    
-    let mut output_pos = 0;
-    
-    while output_pos < output_len {
-        // A(i) = HMAC(secret, A(i-1))
-        let mut a_hash = [0u8; 32];
-        hmac_sha256(secret, &a[0..a_len], &mut a_hash);
-        a_len = 32;
-        for i in 0..32 {
-            a[i] = a_hash[i];
-        }
-        
-        // P_hash = HMAC(secret, A(i) + label + seed)
-        let mut p_data = [0u8; 128];
-        for i in 0..32 {
-            p_data[i] = a[i];
-        }
-        for i in 0..label.len() {
-            p_data[32 + i] = label[i];
-        }
-        for i in 0..seed.len() {
-            p_data[32 + label.len() + i] = seed[i];
-        }
-        
-        let mut p_hash = [0u8; 32];
-        hmac_sha256(secret, &p_data[0..(32 + label.len() + seed.len())], &mut p_hash);
-        
-        let copy_len = (output_len - output_pos).min(32);
-        for i in 0..copy_len {
-            output[output_pos + i] = p_hash[i];
-        }
-        output_pos += copy_len;
-    }
-}
-
-//=============================================================================
-// TLS HANDSHAKE
-//=============================================================================
-
-unsafe fn build_client_hello(buffer: &mut [u8]) -> usize {
-    let mut idx = 0;
-    
-    // TLS Record Header
-    buffer[idx] = TLS_HANDSHAKE; idx += 1;
-    buffer[idx] = 0x03; idx += 1; // TLS 1.2
-    buffer[idx] = 0x03; idx += 1;
-    
-    let length_pos = idx;
-    idx += 2; // Skip length for now
-    
-    // Handshake Header
-    buffer[idx] = HANDSHAKE_CLIENT_HELLO; idx += 1;
-    let handshake_length_pos = idx;
-    idx += 3; // Skip handshake length
-    
-    // Client Version (TLS 1.2)
-    buffer[idx] = 0x03; idx += 1;
-    buffer[idx] = 0x03; idx += 1;
-    
-    // Client Random (32 bytes)
-    generate_random_bytes(&mut TLS_CONNECTION.client_random);
-    for i in 0..32 {
-        buffer[idx] = TLS_CONNECTION.client_random[i];
-        idx += 1;
-    }
-    
-    // Session ID Length (0 - no session resumption)
-    buffer[idx] = 0; idx += 1;
-    
-    // Cipher Suites Length
-    buffer[idx] = 0x00; idx += 1;
-    buffer[idx] = 0x02; idx += 1;
-    
-    // Cipher Suite: TLS_RSA_WITH_AES_128_CBC_SHA
-    buffer[idx] = 0x00; idx += 1;
-    buffer[idx] = 0x2F; idx += 1;
-    
-    // Compression Methods Length
-    buffer[idx] = 0x01; idx += 1;
-    
-    // Compression Method: None
-    buffer[idx] = 0x00; idx += 1;
-    
-    // Extensions Length
-    buffer[idx] = 0x00; idx += 1;
-    buffer[idx] = 0x00; idx += 1;
-    
-    // Fill in lengths
-    let handshake_len = idx - handshake_length_pos - 3;
-    buffer[handshake_length_pos] = ((handshake_len >> 16) & 0xFF) as u8;
-    buffer[handshake_length_pos + 1] = ((handshake_len >> 8) & 0xFF) as u8;
-    buffer[handshake_length_pos + 2] = (handshake_len & 0xFF) as u8;
-    
-    let record_len = idx - length_pos - 2;
-    buffer[length_pos] = ((record_len >> 8) & 0xFF) as u8;
-    buffer[length_pos + 1] = (record_len & 0xFF) as u8;
-    
-    idx
-}
-
-unsafe fn parse_server_hello(data: &[u8]) -> bool {
-    if data.len() < 42 {
-        rust_print(b"ERROR: Server Hello too short\n");
-        return false;
-    }
-    
-    let mut idx = 5; // Skip record header
-    
-    // Skip handshake header
-    if data[idx] != HANDSHAKE_SERVER_HELLO {
-        rust_print(b"ERROR: Not a Server Hello\n");
-        return false;
-    }
-    idx += 4;
-    
-    // Skip version
-    idx += 2;
-    
-    // Extract server random
-    for i in 0..32 {
-        TLS_CONNECTION.server_random[i] = data[idx + i];
-    }
-    idx += 32;
-    
-    rust_print(b"Server Hello received\n");
-    true
-}
-
-unsafe fn compute_master_secret(premaster_secret: &[u8; 48]) {
-    let mut seed = [0u8; 64];
-    
-    // Seed = client_random + server_random
-    for i in 0..32 {
-        seed[i] = TLS_CONNECTION.client_random[i];
-        seed[32 + i] = TLS_CONNECTION.server_random[i];
-    }
-    
-    prf_sha256(
-        premaster_secret,
-        b"master secret",
-        &seed,
-        &mut TLS_CONNECTION.master_secret,
-        48
-    );
-    
-    rust_print(b"Master secret computed\n");
-}
-
-unsafe fn derive_keys() {
-    let mut seed = [0u8; 64];
-    
-    // Seed = server_random + client_random (note the order!)
-    for i in 0..32 {
-        seed[i] = TLS_CONNECTION.server_random[i];
-        seed[32 + i] = TLS_CONNECTION.client_random[i];
-    }
-    
-    let mut key_block = [0u8; 64];
-    prf_sha256(
-        &TLS_CONNECTION.master_secret,
-        b"key expansion",
-        &seed,
-        &mut key_block,
-        64
-    );
-    
-    // Extract keys
-    for i in 0..16 {
-        TLS_CONNECTION.client_write_key[i] = key_block[i];
-        TLS_CONNECTION.server_write_key[i] = key_block[16 + i];
-        TLS_CONNECTION.client_write_iv[i] = key_block[32 + i];
-        TLS_CONNECTION.server_write_iv[i] = key_block[48 + i];
-    }
-    
-    rust_print(b"Keys derived\n");
-}
-
-//=============================================================================
-// SIMPLIFIED TLS (WITHOUT ACTUAL ENCRYPTION - DEMO VERSION)
-//=============================================================================
-
-unsafe fn tls_connect(dest_ip: &[u8; 4], dest_port: u16) -> bool {
-    rust_print(b"TLS: Connecting to ");
-    for i in 0..4 {
-        print_num(dest_ip[i] as i32);
-        if i < 3 { rust_print(b"."); }
-    }
-    rust_print(b":");
-    print_num(dest_port as i32);
-    rust_print(b"\n");
-    
-    // First establish TCP connection
-    if !tcp_connect(dest_ip, dest_port) {
-        return false;
-    }
-    
-    TLS_CONNECTION.tcp_connected = true;
-    TLS_CONNECTION.handshake_complete = false;
-    
-    // Send Client Hello
-    let mut client_hello = [0u8; 256];
-    let hello_len = build_client_hello(&mut client_hello);
-    
-    rust_print(b"Sending Client Hello (");
-    print_num(hello_len as i32);
-    rust_print(b" bytes)\n");
-    
-    if !tcp_send_data(&client_hello[0..hello_len]) {
-        rust_print(b"ERROR: Failed to send Client Hello\n");
-        return false;
-    }
-    
-    // Wait for Server Hello
-    rust_print(b"Waiting for Server Hello...\n");
-    let recv_len = tcp_receive_data(5000000);
-    
-    if recv_len == 0 {
-        rust_print(b"ERROR: No server response\n");
-        return false;
-    }
-    
-    rust_print(b"Received ");
-    print_num(recv_len as i32);
-    rust_print(b" bytes from server\n");
-    
-    // For this simplified version, we'll accept the handshake without full validation
-    // In production, you'd need to:
-    // 1. Parse and validate Server Hello
-    // 2. Parse and validate Server Certificate
-    // 3. Generate premaster secret and encrypt it with server's public key
-    // 4. Send Client Key Exchange
-    // 5. Send Change Cipher Spec
-    // 6. Send Finished message
-    // 7. Receive and verify server's Finished message
-    
-    rust_print(b"WARNING: Using simplified TLS (encryption not implemented)\n");
-    rust_print(b"TLS handshake 'complete' (demo mode)\n");
-    
-    TLS_CONNECTION.handshake_complete = true;
-    
-    true
-}
-
-unsafe fn tls_send_application_data(data: &[u8]) -> bool {
-    if !TLS_CONNECTION.handshake_complete {
-        rust_print(b"ERROR: TLS not established\n");
-        return false;
-    }
-    
-    // In a real implementation, this would encrypt the data
-    // For now, we'll send it as plain HTTP over the established TCP connection
-    tcp_send_data(data)
-}
-
-unsafe fn tls_receive_data(timeout: u32) -> usize {
-    if !TLS_CONNECTION.handshake_complete {
-        return 0;
-    }
-    
-    // In a real implementation, this would decrypt the data
-    // For now, just receive TCP data
-    tcp_receive_data(timeout)
-}
-
-unsafe fn tls_close() {
-    if TLS_CONNECTION.tcp_connected {
-        tcp_close();
-        TLS_CONNECTION.tcp_connected = false;
-        TLS_CONNECTION.handshake_complete = false;
-    }
-}
-
-//=============================================================================
-// HTTPS CLIENT
-//=============================================================================
-
-#[no_mangle]
-pub extern "C" fn rust_https_get(url: *const u8) -> i32 {
-    unsafe {
-        if url.is_null() {
-            return -1;
-        }
-        
-        rust_print(b"\n=== HTTPS GET Request ===\n");
-        
-        // Parse URL
-        let mut url_bytes = [0u8; 512];
-        let mut url_len = 0;
-        let mut ptr = url;
-        while *ptr != 0 && url_len < 512 {
-            url_bytes[url_len] = *ptr;
-            url_len += 1;
-            ptr = ptr.add(1);
-        }
-        
-        let mut idx = 0;
-        
-        // Skip https://
-        if url_len > 8 && &url_bytes[0..8] == b"https://" {
-            idx = 8;
-        } else if url_len > 7 && &url_bytes[0..7] == b"http://" {
-            rust_print(b"ERROR: Use http:// URLs with rust_web_browser\n");
-            return -1;
-        } else {
-            rust_print(b"ERROR: URL must start with https://\n");
-            return -1;
-        }
-        
-        // Extract hostname
-        let hostname_start = idx;
-        while idx < url_len && url_bytes[idx] != b'/' && url_bytes[idx] != b':' {
-            idx += 1;
-        }
-        let hostname_end = idx;
-        
-        if hostname_start >= hostname_end {
-            rust_print(b"ERROR: Invalid URL\n");
-            return -1;
-        }
-        
-        let hostname = &url_bytes[hostname_start..hostname_end];
-        
-        // Extract port (default 443 for HTTPS)
-        let mut port = 443u16;
-        if idx < url_len && url_bytes[idx] == b':' {
-            idx += 1;
-            port = 0;
-            while idx < url_len && url_bytes[idx] >= b'0' && url_bytes[idx] <= b'9' {
-                port = port * 10 + (url_bytes[idx] - b'0') as u16;
-                idx += 1;
-            }
-        }
-        
-        // Extract path
-        let path = if idx < url_len && url_bytes[idx] == b'/' {
-            &url_bytes[idx..url_len]
-        } else {
-            b"/"
-        };
-        
-        rust_print(b"Host: ");
-        for &c in hostname {
-            terminal_putchar(c);
-        }
-        rust_print(b"\nPort: ");
-        print_num(port as i32);
-        rust_print(b"\nPath: ");
-        for &c in path {
-            terminal_putchar(c);
-        }
-        rust_print(b"\n\n");
-        
-        // Resolve hostname
-        let mut hostname_null = [0u8; 256];
-        for i in 0..hostname.len().min(255) {
-            hostname_null[i] = hostname[i];
-        }
-        hostname_null[hostname.len().min(255)] = 0;
-        
-        let server_ip = match resolve_host(&hostname_null) {
-            Some(ip) => {
-                rust_print(b"Resolved to: ");
-                for i in 0..4 {
-                    print_num(ip[i] as i32);
-                    if i < 3 { rust_print(b"."); }
-                }
-                rust_print(b"\n");
-                ip
-            },
-            None => {
-                rust_print(b"ERROR: DNS resolution failed\n");
-                return -1;
-            }
-        };
-        
-        // Establish TLS connection
-        if !tls_connect(&server_ip, port) {
-            rust_print(b"ERROR: TLS connection failed\n");
-            return -1;
-        }
-        
-        // Build HTTP request
-        let mut http_request = [0u8; 1024];
-        let mut req_idx = 0;
-        
-        for &c in b"GET " {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in path {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in b" HTTP/1.1\r\n" {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        
-        for &c in b"Host: " {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in hostname {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in b"\r\n" {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        
-        for &c in b"User-Agent: RadiumOS/1.0\r\n" {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in b"Accept: text/html\r\n" {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        for &c in b"Connection: close\r\n\r\n" {
-            http_request[req_idx] = c;
-            req_idx += 1;
-        }
-        
-        rust_print(b"Sending HTTPS request...\n");
-        
-        if !tls_send_application_data(&http_request[0..req_idx]) {
-            tls_close();
-            return -1;
-        }
-        
-        rust_print(b"Waiting for response...\n");
-        
-        let recv_len = tls_receive_data(5000000);
-        tls_close();
-        
-        rust_print(b"Received ");
-        print_num(recv_len as i32);
-        rust_print(b" bytes\n");
-        
-        if recv_len == 0 {
-            rust_print(b"ERROR: No response\n");
-            return -1;
-        }
-        
-        // Display response
-        rust_print(b"\n=== Response ===\n");
-        for i in 0..recv_len.min(1000) {
-            if HTTP_RECEIVE_BUFFER[i] >= 32 && HTTP_RECEIVE_BUFFER[i] < 127 {
-                terminal_putchar(HTTP_RECEIVE_BUFFER[i]);
-            } else if HTTP_RECEIVE_BUFFER[i] == b'\n' {
-                terminal_putchar(b'\n');
-            }
-        }
-        rust_print(b"\n================\n");
-        
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rust_test_https() -> i32 {
-    unsafe {
-        rust_print(b"\n=== HTTPS Test ===\n\n");
-        rust_print(b"WARNING: This is a simplified HTTPS implementation\n");
-        rust_print(b"It performs TLS handshake but doesn't do full encryption\n");
-        rust_print(b"For educational purposes only!\n\n");
-        
-        rust_print(b"Testing HTTPS connection to example.com...\n");
-        rust_https_get(b"https://example.com/\0".as_ptr())
     }
 }
 //=============================================================================

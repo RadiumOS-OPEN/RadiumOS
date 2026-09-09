@@ -4,9 +4,17 @@ mod aead;
 mod chacha20;
 mod ed25519;
 mod envelope;
+mod hkdf;
 mod poly1305;
 mod sha512;
 mod x25519;
+
+pub(crate) use self::aead::{decrypt as aead_decrypt, encrypt as aead_encrypt};
+pub(crate) use self::ed25519::verify as ed25519_verify;
+pub(crate) use self::hkdf::hmac_parts;
+#[cfg(test)]
+pub(crate) use self::hkdf::hmac_sha256;
+pub(crate) use self::x25519::{x25519, BASEPOINT as X25519_BASEPOINT};
 
 extern "C" {
     fn cpu_rdrand32(value: *mut u32) -> i32;
@@ -118,7 +126,8 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-struct Sha256 {
+#[derive(Clone)]
+pub(crate) struct Sha256 {
     state: [u32; 8],
     buffer: [u8; 64],
     buffer_len: usize,
@@ -126,7 +135,7 @@ struct Sha256 {
 }
 
 impl Sha256 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: INITIAL_STATE,
             buffer: [0u8; 64],
@@ -135,7 +144,7 @@ impl Sha256 {
         }
     }
 
-    fn update(&mut self, mut input: &[u8]) {
+    pub(crate) fn update(&mut self, mut input: &[u8]) {
         self.message_len = self.message_len.wrapping_add(input.len() as u64);
 
         if self.buffer_len > 0 {
@@ -163,7 +172,7 @@ impl Sha256 {
         self.buffer_len = input.len();
     }
 
-    fn finish(mut self) -> [u8; 32] {
+    pub(crate) fn finish(mut self) -> [u8; 32] {
         let bit_len = self.message_len.wrapping_mul(8).to_be_bytes();
         self.buffer[self.buffer_len] = 0x80;
         self.buffer_len += 1;
@@ -752,6 +761,10 @@ pub extern "C" fn rust_prp_selftest() -> i32 {
     }
 
     if !ed25519::selftest() {
+        return -1;
+    }
+
+    if !hkdf::selftest() {
         return -1;
     }
 

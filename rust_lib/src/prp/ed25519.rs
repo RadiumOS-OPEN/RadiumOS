@@ -302,6 +302,38 @@ pub(super) fn verify_commit(
     point_compress(&left) == point_compress(&right)
 }
 
+pub(crate) fn verify(public: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
+    let mut big_r = [0u8; 32];
+    let mut s = [0u8; 32];
+    big_r.copy_from_slice(&signature[..32]);
+    s.copy_from_slice(&signature[32..]);
+    if s == L || !check_s_below_l(&s) {
+        return false;
+    }
+    for bytes in [public, &big_r] {
+        let point = match point_decompress(bytes) {
+            Some(point) => point,
+            None => return false,
+        };
+        // Reject noncanonical encodings and points killed by the cofactor.
+        let mut multiple = point;
+        for _ in 0..3 {
+            multiple = point_double(&multiple);
+        }
+        if point_compress(&point) != *bytes
+            || point_compress(&multiple) == point_compress(&point_identity())
+        {
+            return false;
+        }
+    }
+    let mut hasher = Sha512::new();
+    hasher.update(&big_r);
+    hasher.update(public);
+    hasher.update(message);
+    let k = sc_reduce512(&hasher.finish());
+    verify_commit(&s, &big_r, public, &k)
+}
+
 // Montgomery u-coordinate of the birationally equivalent Curve25519 point,
 // matching what x25519::x25519(priv, BASEPOINT) stores in .pub files
 pub(super) fn montgomery_u(public: &[u8; 32]) -> Option<[u8; 32]> {
@@ -361,6 +393,22 @@ pub(super) fn selftest() -> bool {
     sig[..32].copy_from_slice(&big_r);
     sig[32..].copy_from_slice(&s);
     if sig != expected_sig {
+        return false;
+    }
+
+    if !verify(&expected_pub, b"", &sig) || verify(&expected_pub, b"x", &sig) {
+        return false;
+    }
+    let mut noncanonical = sig;
+    noncanonical[32..].copy_from_slice(&L);
+    if verify(&expected_pub, b"", &noncanonical) {
+        return false;
+    }
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut forged = [0u8; 64];
+    forged[..32].copy_from_slice(&identity);
+    if verify(&identity, b"", &forged) {
         return false;
     }
 

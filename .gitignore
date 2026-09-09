@@ -7,3 +7,6 @@ os.bin
 os.iso
 packages/iso/boot/os.bin
 rust_lib/target/
+tests/fetch/target/
+__pycache__/
+debug.log
