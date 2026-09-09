@@ -2,7 +2,8 @@ use super::{Error, Url};
 use alloc::string::{String, ToString};
 
 pub const HELP: &str = concat!(
-    "Usage: fetch [options] https://host/path\n\n",
+    "Usage: fetch [options] http://host/path\n",
+    "       fetch [options] https://host/path\n\n",
     "Options:\n",
     "  -h, --help             Show this help\n",
     "  -o, --output FILE      Save response to\n",
@@ -13,7 +14,7 @@ pub const HELP: &str = concat!(
     "                         only\n",
     "  -i, --include          Include headers in\n",
     "                         output\n",
-    "  -L, --location         Follow HTTPS\n",
+    "  -L, --location         Follow HTTP(S)\n",
     "                         redirects\n",
     "  -f, --fail             Fail on HTTP status\n",
     "                         400 or higher\n",
@@ -104,7 +105,7 @@ impl Options {
         options.timeout = timeout.unwrap_or(options.timeout);
         options.max_size = max_size.unwrap_or(options.max_size);
         if options.url.is_none() && !options.help {
-            return Err(Error::Message("fetch requires an HTTPS URL"));
+            return Err(Error::Message("fetch requires an HTTP or HTTPS URL"));
         }
         if options.overwrite && options.output.is_none() {
             return Err(Error::Message("--overwrite requires --output"));
@@ -144,6 +145,7 @@ mod tests {
         assert_eq!(options.timeout, 30);
         assert_eq!(options.max_size, 1024 * 1024);
         assert!(!options.location && !options.overwrite && !options.silent);
+        assert!(Options::parse(&["http://example.com"]).is_ok());
         let options = Options::parse(&[
             "-o",
             "page.html",
@@ -187,7 +189,7 @@ mod tests {
     fn rejects_invalid_and_conflicting_options() {
         for args in [
             &[][..],
-            &["http://example.com"],
+            &["ftp://example.com"],
             &["https://a.com", "https://b.com"],
             &["--insecure", "https://a.com"],
             &["--", "--help"],

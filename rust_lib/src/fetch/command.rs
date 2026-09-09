@@ -1,5 +1,5 @@
 use super::{
-    configuration, get,
+    configuration, get, get_plain,
     native::{Rtc, Tcp},
     options::{Options, HELP},
     public_roots, Error,
@@ -134,12 +134,7 @@ fn execute(args: &[&str]) -> Result<(), Error> {
             ));
         }
     }
-    if Rtc.current_time().is_none() {
-        return Err(Error::Message(
-            "RTC unavailable or invalid; cannot check certificate dates",
-        ));
-    }
-    let config = configuration(Arc::new(Rtc), roots(options.cacert.as_deref())?)?;
+    let mut config = None;
     let started = unsafe { crate::get_ticks() };
     let timeout = options.timeout * 1000;
     crate::FETCH_NETWORK_SILENT.store(true, Ordering::Relaxed);
@@ -150,13 +145,28 @@ fn execute(args: &[&str]) -> Result<(), Error> {
             return Err(Error::Message("fetch timed out"));
         }
         let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;
-        let response = get(
-            &mut tcp,
-            &url,
-            config.clone(),
-            options.head,
-            options.max_size,
-        )?;
+        let response = if url.is_https {
+            if config.is_none() {
+                if Rtc.current_time().is_none() {
+                    return Err(Error::Message(
+                        "RTC unavailable or invalid; cannot check certificate dates",
+                    ));
+                }
+                config = Some(configuration(
+                    Arc::new(Rtc),
+                    roots(options.cacert.as_deref())?,
+                )?);
+            }
+            get(
+                &mut tcp,
+                &url,
+                config.as_ref().unwrap().clone(),
+                options.head,
+                options.max_size,
+            )?
+        } else {
+            get_plain(&mut tcp, &url, options.head, options.max_size)?
+        };
         drop(tcp);
         if options.location && [301, 302, 303, 307, 308].contains(&response.status) {
             if redirects == 5 {

@@ -50,6 +50,7 @@ pub struct Url {
     pub host: String,
     pub port: u16,
     pub path: String,
+    pub is_https: bool,
 }
 
 impl Url {
@@ -60,9 +61,13 @@ impl Url {
         {
             return Err(Error::Message("invalid URL characters or URL too long"));
         }
-        let rest = input
-            .strip_prefix("https://")
-            .ok_or(Error::Message("URL must start with https://"))?;
+        let (rest, is_https) = if let Some(rest) = input.strip_prefix("https://") {
+            (rest, true)
+        } else if let Some(rest) = input.strip_prefix("http://") {
+            (rest, false)
+        } else {
+            return Err(Error::Message("URL must start with http:// or https://"));
+        };
         let rest = rest.split('#').next().unwrap_or(rest);
         let end = rest.find(['/', '?']).unwrap_or(rest.len());
         let authority = &rest[..end];
@@ -74,7 +79,7 @@ impl Url {
                     .filter(|&p| p != 0)
                     .ok_or(Error::Message("invalid URL port"))?,
             ),
-            None => (authority, 443),
+            None => (authority, if is_https { 443 } else { 80 }),
         };
         if host.is_empty()
             || host.len() > 253
@@ -99,23 +104,35 @@ impl Url {
             host: host.to_ascii_lowercase(),
             port,
             path,
+            is_https,
         })
     }
 
     pub fn authority(&self) -> String {
-        if self.port == 443 {
+        if self.port == if self.is_https { 443 } else { 80 } {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
         }
     }
 
+    fn scheme(&self) -> &'static str {
+        if self.is_https {
+            "https"
+        } else {
+            "http"
+        }
+    }
+
     pub fn redirect(&self, location: &str) -> Result<Self, Error> {
-        if location.starts_with("https://") {
+        if self.is_https && location.starts_with("http://") {
+            return Err(Error::Message("HTTPS redirect to HTTP is not allowed"));
+        }
+        if location.starts_with("https://") || location.starts_with("http://") {
             return Self::parse(location);
         }
         if location.starts_with("//") {
-            return Self::parse(&format!("https:{location}"));
+            return Self::parse(&format!("{}:{location}", self.scheme()));
         }
         if location.contains("://") || location.split('/').next().unwrap_or("").contains(':') {
             return Err(Error::Message("redirect to an unsupported scheme"));
@@ -130,7 +147,7 @@ impl Url {
             let base = self.path.split('?').next().unwrap_or("/");
             format!("{}{location}", &base[..base.rfind('/').unwrap_or(0) + 1])
         };
-        let mut target = Self::parse(&format!("https://{}{path}", self.authority()))?;
+        let mut target = Self::parse(&format!("{}://{}{path}", self.scheme(), self.authority()))?;
         let (path, query) = target.path.split_once('?').unwrap_or((&target.path, ""));
         let mut segments = Vec::new();
         for part in path.split('/') {
@@ -187,6 +204,40 @@ pub struct Response {
 
 const HEADER_LIMIT: usize = 16384;
 const RECORD_BUFFER: usize = 18432;
+const WIRE_OVERHEAD_LIMIT: usize = 1024 * 1024;
+
+fn request(url: &Url, head: bool) -> String {
+    format!("{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RadiumOS-fetch/1.0\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        if head { "HEAD" } else { "GET" }, url.path, url.authority())
+}
+
+pub fn get_plain<T: Transport>(
+    transport: &mut T,
+    url: &Url,
+    head: bool,
+    max_size: usize,
+) -> Result<Response, Error> {
+    transport.write(request(url, head).as_bytes())?;
+    let limit = max_size
+        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
+        .ok_or(Error::Message("invalid size limit"))?;
+    let mut incoming = [0u8; 4096];
+    let mut response = Vec::new();
+    loop {
+        if let Some(result) = parse_response(&response, head, max_size, false)? {
+            return Ok(result);
+        }
+        let count = transport.read(&mut incoming)?;
+        if count == 0 {
+            return parse_response(&response, head, max_size, true)?
+                .ok_or(Error::Message("incomplete HTTP response"));
+        }
+        if count > limit.saturating_sub(response.len()) {
+            return Err(Error::Message("response exceeds --max-size"));
+        }
+        response.extend_from_slice(&incoming[..count]);
+    }
+}
 
 pub fn get<T: Transport>(
     transport: &mut T,
@@ -198,8 +249,7 @@ pub fn get<T: Transport>(
     let name = ServerName::try_from(url.host.clone())
         .map_err(|_| Error::Message("invalid server name"))?;
     let mut connection = UnbufferedClientConnection::new(config, name)?;
-    let request = format!("{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RadiumOS-fetch/1.0\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-        if head { "HEAD" } else { "GET" }, url.path, url.authority());
+    let request = request(url, head);
     let mut incoming = vec![0u8; RECORD_BUFFER];
     let mut outgoing = vec![0u8; RECORD_BUFFER];
     let mut used = 0;
@@ -236,7 +286,7 @@ pub fn get<T: Transport>(
                     let record = record?;
                     discard += record.discard;
                     let limit = max_size
-                        .checked_add(1024 * 1024 + HEADER_LIMIT)
+                        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
                         .ok_or(Error::Message("invalid size limit"))?;
                     if record.payload.len() > limit.saturating_sub(response.len()) {
                         return Err(Error::Message("response exceeds --max-size"));
@@ -460,12 +510,20 @@ mod tests {
     #[test]
     fn urls_and_http_framing() {
         let url = Url::parse("https://Example.com:8443/a/b?q=1#fragment").unwrap();
+        assert!(url.is_https);
         assert_eq!(url.authority(), "example.com:8443");
         assert_eq!(url.path, "/a/b?q=1");
         assert_eq!(url.redirect("../c").unwrap().path, "/c");
         assert_eq!(url.redirect("?q=2").unwrap().path, "/a/b?q=2");
+        assert!(url.redirect("http://other.example/b").is_err());
+        let url = Url::parse("http://Example.com/a").unwrap();
+        assert!(!url.is_https);
+        assert_eq!(url.port, 80);
+        assert_eq!(url.authority(), "example.com");
+        assert!(!url.redirect("//other.example/b").unwrap().is_https);
+        assert!(url.redirect("https://other.example/b").unwrap().is_https);
         for invalid in [
-            "http://example.com",
+            "ftp://example.com",
             "https://u:p@example.com/",
             "https://example.com:0",
             "https://example.com:65536",
