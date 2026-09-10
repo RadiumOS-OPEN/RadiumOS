@@ -13,7 +13,8 @@ src/kernel/registerCommands.o: src/kernel/registerCommands.c \
   src/kernel/../commands/cat.h src/kernel/../commands/settings.h \
   src/kernel/../commands/ls.h src/kernel/../commands/tui.h \
   src/kernel/../commands/radifetch.h src/kernel/../commands/cowsay.h \
-  src/kernel/../commands/gogetter.h src/kernel/../commands/cd.h
+  src/kernel/../commands/gogetter.h src/kernel/../commands/cd.h \
+  src/kernel/../commands/gfxtest.h
 src/kernel/../errors/error.h:
 src/kernel/../terminal/terminal.h:
 src/kernel/../terminal/../vga/vga.h:
@@ -41,3 +42,4 @@ src/kernel/../commands/radifetch.h:
 src/kernel/../commands/cowsay.h:
 src/kernel/../commands/gogetter.h:
 src/kernel/../commands/cd.h:
+src/kernel/../commands/gfxtest.h:
