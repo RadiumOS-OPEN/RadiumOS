@@ -1,6 +1,7 @@
 use super::sha512::{sha512, Sha512};
 use super::x25519::{
-    fe_add, fe_from_bytes, fe_mul, fe_mul_small, fe_one, fe_pow, fe_sq, fe_sub, fe_to_bytes, Fe,
+    fe_add, fe_cswap, fe_from_bytes, fe_mul, fe_mul_small, fe_one, fe_pow, fe_sq, fe_sub,
+    fe_to_bytes, Fe,
 };
 
 const D: [u8; 32] = [
@@ -94,8 +95,14 @@ fn point_mul(scalar: &[u8; 32], base: &Point) -> Point {
     for i in (0..256).rev() {
         acc = point_double(&acc);
         let bit = (scalar[i / 8] >> (i % 8)) & 1;
-        if bit == 1 {
-            acc = point_add(&acc, base);
+        let mut sum = point_add(&acc, base);
+        for (selected, other) in [
+            (&mut acc.x, &mut sum.x),
+            (&mut acc.y, &mut sum.y),
+            (&mut acc.z, &mut sum.z),
+            (&mut acc.t, &mut sum.t),
+        ] {
+            fe_cswap(bit, selected, other);
         }
     }
     acc
@@ -268,17 +275,15 @@ pub(super) fn expand_prefix(private: &[u8; 32]) -> [u8; 32] {
 }
 
 pub(super) fn check_s_below_l(s: &[u8; 32]) -> bool {
-    let mut not_less = false;
     for i in (0..32).rev() {
         if s[i] > L[i] {
-            not_less = true;
-            break;
+            return false;
         }
         if s[i] < L[i] {
             return true;
         }
     }
-    !not_less
+    false
 }
 
 // left = S*B, right = R + k*A, equal as compressed points
@@ -307,7 +312,7 @@ pub(crate) fn verify(public: &[u8; 32], message: &[u8], signature: &[u8; 64]) ->
     let mut s = [0u8; 32];
     big_r.copy_from_slice(&signature[..32]);
     s.copy_from_slice(&signature[32..]);
-    if s == L || !check_s_below_l(&s) {
+    if !check_s_below_l(&s) {
         return false;
     }
     for bytes in [public, &big_r] {
@@ -367,6 +372,10 @@ fn hex_decode64(hex: &[u8]) -> [u8; 64] {
 }
 
 pub(super) fn selftest() -> bool {
+    if check_s_below_l(&L) {
+        return false;
+    }
+
     // RFC 8032 test 1: empty message
     let private = hex_decode(b"9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
     let expected_pub =
