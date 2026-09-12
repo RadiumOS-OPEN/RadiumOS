@@ -25,6 +25,7 @@
 #include "../commands/gogetter.h"
 #include "../commands/cd.h"
 #include "../commands/text.h"
+#include "../commands/gfxtest.h"
 
 #include <stdint.h>
 
@@ -880,6 +881,7 @@ void registerCommands(void)
     register_command("top",       "Task monitor",                   top_command);
     register_command("exit",      "Exit the OS",                    exit_command);
     register_command("whd.diag",  "Watchdog task diagram",          watchdog_diagram);
+    register_command("gfxtest",       "Graphics test",  gfxtest);
 
     // -- Script engine --------------------------------------------------------
     register_command("script",    "Run .rsh/.rash script",          cmd_script);
