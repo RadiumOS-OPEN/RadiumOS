@@ -243,7 +243,7 @@ pub(super) fn sc_mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 }
 
 fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let h = sha512(private);
+    let mut h = sha512(private);
     let mut scalar = [0u8; 32];
     scalar.copy_from_slice(&h[..32]);
     scalar[0] &= 248;
@@ -251,6 +251,7 @@ fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     scalar[31] |= 64;
     let mut prefix = [0u8; 32];
     prefix.copy_from_slice(&h[32..]);
+    h.zeroize();
     (scalar, prefix)
 }
 
