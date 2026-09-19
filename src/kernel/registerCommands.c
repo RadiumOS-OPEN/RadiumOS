@@ -1557,6 +1557,7 @@ void registerCommands(void)
     register_command("testdns",   "Test DNS resolution",            cmd_testdns);
     register_command("nettest",   "ARP/network test",               cmd_nettest);
     register_command("fetch",     "Fetch an HTTP(S) URL (fetch --help)", cmd_fetch);
+    register_command("rchat",     "Open the RChat communications client", tui);
     register_command("rawsend",   "Send raw test packet",           cmd_rawsend);
     register_command("netdiag",   "Full network diagnostics",       cmd_netdiag);
     register_command("tcpreset",  "Force TCP state reset",          cmd_tcpreset);

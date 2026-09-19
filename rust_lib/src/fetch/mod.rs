@@ -217,7 +217,17 @@ pub fn get_plain<T: Transport>(
     head: bool,
     max_size: usize,
 ) -> Result<Response, Error> {
-    transport.write(request(url, head).as_bytes())?;
+    let request = request(url, head);
+    exchange_plain(transport, request.as_bytes(), head, max_size)
+}
+
+pub(crate) fn exchange_plain<T: Transport>(
+    transport: &mut T,
+    request: &[u8],
+    head: bool,
+    max_size: usize,
+) -> Result<Response, Error> {
+    transport.write(request)?;
     let limit = max_size
         .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
         .ok_or(Error::Message("invalid size limit"))?;
@@ -246,10 +256,21 @@ pub fn get<T: Transport>(
     head: bool,
     max_size: usize,
 ) -> Result<Response, Error> {
+    let request = request(url, head);
+    exchange_tls(transport, url, config, request.as_bytes(), head, max_size)
+}
+
+pub(crate) fn exchange_tls<T: Transport>(
+    transport: &mut T,
+    url: &Url,
+    config: Arc<ClientConfig>,
+    request: &[u8],
+    head: bool,
+    max_size: usize,
+) -> Result<Response, Error> {
     let name = ServerName::try_from(url.host.clone())
         .map_err(|_| Error::Message("invalid server name"))?;
     let mut connection = UnbufferedClientConnection::new(config, name)?;
-    let request = request(url, head);
     let mut incoming = vec![0u8; RECORD_BUFFER];
     let mut outgoing = vec![0u8; RECORD_BUFFER];
     let mut used = 0;
@@ -274,7 +295,7 @@ pub fn get<T: Transport>(
             ConnectionState::WriteTraffic(mut state) => {
                 if !sent {
                     let len = state
-                        .encrypt(request.as_bytes(), &mut outgoing)
+                        .encrypt(request, &mut outgoing)
                         .map_err(|_| Error::Message("TLS request exceeds buffer"))?;
                     transport.write(&outgoing[..len])?;
                     sent = true;
@@ -315,6 +336,11 @@ pub fn get<T: Transport>(
             }
             let count = transport.read(&mut incoming[used..])?;
             if count == 0 {
+                // Many servers FIN after the HTTP body without TLS close_notify.
+                if sent {
+                    return parse_response(&response, head, max_size, true)?
+                        .ok_or(Error::Message("incomplete HTTP response"));
+                }
                 return Err(Error::Message(
                     "connection closed before authenticated response completion",
                 ));
@@ -512,6 +538,15 @@ mod tests {
         let url = Url::parse("https://Example.com:8443/a/b?q=1#fragment").unwrap();
         assert!(url.is_https);
         assert_eq!(url.authority(), "example.com:8443");
+        let url = Url::parse(
+            "https://rchat-server-abcdefghijklmnopqrstuvwxyz0123456789.vercel.app",
+        )
+        .unwrap();
+        assert_eq!(
+            url.host,
+            "rchat-server-abcdefghijklmnopqrstuvwxyz0123456789.vercel.app"
+        );
+        assert_eq!(url.port, 443);
         assert_eq!(url.path, "/a/b?q=1");
         assert_eq!(url.redirect("../c").unwrap().path, "/c");
         assert_eq!(url.redirect("?q=2").unwrap().path, "/a/b?q=2");

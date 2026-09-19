@@ -10,10 +10,12 @@ mod sha512;
 mod x25519;
 
 pub(crate) use self::aead::{decrypt as aead_decrypt, encrypt as aead_encrypt};
-pub(crate) use self::ed25519::verify as ed25519_verify;
-pub(crate) use self::hkdf::hmac_parts;
+pub(crate) use self::ed25519::{
+    public_key as ed25519_public_key, sign as ed25519_sign, verify as ed25519_verify,
+};
 #[cfg(test)]
 pub(crate) use self::hkdf::hmac_sha256;
+pub(crate) use self::hkdf::{hkdf_expand, hkdf_extract, hmac_parts};
 pub(crate) use self::x25519::{x25519, BASEPOINT as X25519_BASEPOINT};
 
 extern "C" {
@@ -196,7 +198,7 @@ impl Sha256 {
     }
 }
 
-pub(super) fn sha256(input: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input);
     hasher.finish()
@@ -219,7 +221,7 @@ const LONG_SHA256: [u8; 32] = [
     0x0b, 0x24, 0x9b, 0x11, 0xe8, 0xf0, 0x7a, 0x51, 0xaf, 0xac, 0x45, 0x03, 0x7a, 0xfe, 0xe9, 0xd1,
 ];
 
-pub(super) fn random_bytes(output: &mut [u8]) -> bool {
+pub(crate) fn random_bytes(output: &mut [u8]) -> bool {
     let mut success = true;
 
     for chunk in output.chunks_mut(4) {

@@ -4,6 +4,8 @@
 #![allow(unused_variables)]
 
 mod prp;
+#[cfg(target_os = "none")]
+mod rchat;
 extern crate alloc;
 mod fetch;
 mod heap;
