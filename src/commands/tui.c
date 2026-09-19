@@ -13,7 +13,8 @@
 #define RCHAT_ID_LEN 22
 #define RCHAT_MESSAGE_MAX 4096
 #define RCHAT_NICKNAME_MAX 24
-#define RCHAT_SERVER_MAX 63
+/* https:// + 253-octet host + :port + optional slash */
+#define RCHAT_SERVER_MAX 280
 #define RCHAT_CONTACTS_MAX 4
 #define RCHAT_SERVER_PROFILES_MAX 4
 #define RCHAT_HISTORY_MAX 8
@@ -569,14 +570,14 @@ static void write_message(vga_window_t *win)
                                : 0;
 }
 
-static void refresh_messages(vga_window_t *win, rchat_screen_t return_screen)
+static void refresh_messages(rchat_screen_t return_screen, bool quiet)
 {
     rchat_server_profile_t *profile = active_profile();
     if (!profile || !rust_rchat_is_enrolled()) {
-        fail("Select and enroll a server before refreshing.", return_screen);
+        if (!quiet)
+            fail("Select and enroll a server before refreshing.", return_screen);
         return;
     }
-    draw_loading(win, "Checking for messages...");
     if (profile->ack_pending) {
         if (rust_rchat_ack_pending() != 0) {
             fail("A saved message is still waiting for server acknowledgement.",
@@ -592,6 +593,7 @@ static void refresh_messages(vga_window_t *win, rchat_screen_t return_screen)
                                      (uint8_t *)message, sizeof(message));
         if (result == 1) return;
         if (result != 0) {
+            if (quiet && (result == -4 || result == -5)) return;
             fail(result == -4 ? "Could not reach or authenticate the server."
                               : result == -5 ? "The server rejected the refresh."
                               : result == -7 ? "A previous message still needs local storage."
@@ -715,6 +717,9 @@ static int self_test(void)
     if (server_url_kind("https://chat.example") != 2) failures |= 1 << 0;
     if (server_url_kind("http://chat.example") != 1) failures |= 1 << 1;
     if (server_url_kind("https://bad host")) failures |= 1 << 2;
+    if (server_url_kind(
+            "https://rchat-server-abcdefghijklmnopqrstuvwxyz0123456789.vercel.app") != 2)
+        failures |= 1 << 11;
     if (!valid_client_id("123456789012345678901A")) failures |= 1 << 3;
     if (valid_client_id("AAAAAAAAAAAAAAAAAAAAAB")) failures |= 1 << 4;
     if (!valid_nickname("Jedrek")) failures |= 1 << 5;
@@ -792,7 +797,7 @@ void tui(int argc, char *argv[])
         if (!read_key_until(next_refresh, &key)) {
             if ((state.screen == RCHAT_HOME || state.screen == RCHAT_CHAT) &&
                 active_profile() && rust_rchat_is_enrolled())
-                refresh_messages(&win, state.screen);
+                refresh_messages(state.screen, true);
             next_refresh = get_unix_timestamp() + RCHAT_REFRESH_SECONDS;
             continue;
         }
@@ -814,7 +819,7 @@ void tui(int argc, char *argv[])
             if (key == 0x01) state.screen = RCHAT_HOME;
             else if (key == 0x1C) write_message(&win);
             else if (key == 0x13) {
-                refresh_messages(&win, RCHAT_CHAT); /* R */
+                refresh_messages(RCHAT_CHAT, false); /* R */
                 next_refresh = get_unix_timestamp() + RCHAT_REFRESH_SECONDS;
             } else if (key == 0x12) rename_person(&win); /* E */
             else if (key == 0x48 && state.history_offset > 0) state.history_offset--;
@@ -841,7 +846,7 @@ void tui(int argc, char *argv[])
             state.screen = RCHAT_CHAT;
         } else if (key == 0x31) add_person(&win); /* N */
         else if (key == 0x13) {
-            refresh_messages(&win, RCHAT_HOME); /* R */
+            refresh_messages(RCHAT_HOME, false); /* R */
             next_refresh = get_unix_timestamp() + RCHAT_REFRESH_SECONDS;
         } else if (key == 0x12) rename_person(&win); /* E */
         else if (key == 0x19) {
