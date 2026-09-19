@@ -5,7 +5,7 @@ use rustls::time_provider::TimeProvider;
 
 use super::{Error, Transport};
 
-pub(super) struct Tcp {
+pub(crate) struct Tcp {
     pending: Vec<u8>,
     offset: usize,
     started: u32,
@@ -15,7 +15,7 @@ pub(super) struct Tcp {
 }
 
 impl Tcp {
-    pub(super) fn connect(host: &str, port: u16, timeout_ms: u32) -> Result<Self, Error> {
+    pub(crate) fn connect(host: &str, port: u16, timeout_ms: u32) -> Result<Self, Error> {
         let started = unsafe { crate::get_ticks() };
         let ip = match host.parse::<core::net::Ipv4Addr>() {
             Ok(ip) => ip.octets(),
@@ -389,7 +389,7 @@ pub(crate) fn tcp_packet<'a>(
 }
 
 #[derive(Debug)]
-pub(super) struct Rtc;
+pub(crate) struct Rtc;
 
 impl TimeProvider for Rtc {
     fn current_time(&self) -> Option<UnixTime> {

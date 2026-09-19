@@ -3,6 +3,7 @@ use super::x25519::{
     fe_add, fe_cswap, fe_from_bytes, fe_mul, fe_mul_small, fe_one, fe_pow, fe_sq, fe_sub,
     fe_to_bytes, Fe,
 };
+use zeroize::Zeroize;
 
 const D: [u8; 32] = [
     0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75, 0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
@@ -249,7 +250,7 @@ pub(super) fn sc_mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 }
 
 fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let h = sha512(private);
+    let mut h = sha512(private);
     let mut scalar = [0u8; 32];
     scalar.copy_from_slice(&h[..32]);
     scalar[0] &= 248;
@@ -257,12 +258,43 @@ fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     scalar[31] |= 64;
     let mut prefix = [0u8; 32];
     prefix.copy_from_slice(&h[32..]);
+    h.zeroize();
     (scalar, prefix)
 }
 
-pub(super) fn public_key(private: &[u8; 32]) -> [u8; 32] {
-    let (scalar, _) = expand_private(private);
-    point_compress(&point_mul(&scalar, &base_point()))
+pub(crate) fn public_key(private: &[u8; 32]) -> [u8; 32] {
+    let (mut scalar, mut prefix) = expand_private(private);
+    let public = point_compress(&point_mul(&scalar, &base_point()));
+    scalar.zeroize();
+    prefix.zeroize();
+    public
+}
+
+pub(crate) fn sign(private: &[u8; 32], message: &[u8]) -> [u8; 64] {
+    let (mut scalar, mut prefix) = expand_private(private);
+    let public = point_compress(&point_mul(&scalar, &base_point()));
+
+    let mut hasher = Sha512::new();
+    hasher.update(&prefix);
+    hasher.update(message);
+    let mut r = sc_reduce512(&hasher.finish());
+    let big_r = compress_scalar_mul(&r);
+
+    let mut hasher = Sha512::new();
+    hasher.update(&big_r);
+    hasher.update(&public);
+    hasher.update(message);
+    let mut k = sc_reduce512(&hasher.finish());
+    let s = sc_mul_add(&k, &scalar, &r);
+
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&big_r);
+    signature[32..].copy_from_slice(&s);
+    scalar.zeroize();
+    prefix.zeroize();
+    r.zeroize();
+    k.zeroize();
+    signature
 }
 
 pub(super) fn compress_scalar_mul(scalar: &[u8; 32]) -> [u8; 32] {
@@ -385,6 +417,9 @@ pub(super) fn selftest() -> bool {
     }
 
     let expected_sig = hex_decode64(b"e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+    if sign(&private, b"") != expected_sig {
+        return false;
+    }
 
     let mut hasher = Sha512::new();
     hasher.update(&expand_prefix(&private));

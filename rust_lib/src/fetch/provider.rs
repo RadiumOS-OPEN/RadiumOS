@@ -11,18 +11,31 @@ use zeroize::Zeroize;
 
 use crate::prp;
 
+const TLS13_CHACHA20: SupportedCipherSuite = SupportedCipherSuite::Tls13(&Tls13CipherSuite {
+    common: CipherSuiteCommon {
+        suite: CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+        hash_provider: &Sha256,
+        confidentiality_limit: u64::MAX,
+    },
+    hkdf_provider: &HkdfUsingHmac(&HmacSha256),
+    aead_alg: &Chacha20Poly1305,
+    quic: None,
+});
+
+const TLS13_AES128: SupportedCipherSuite = SupportedCipherSuite::Tls13(&Tls13CipherSuite {
+    common: CipherSuiteCommon {
+        suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
+        hash_provider: &Sha256,
+        confidentiality_limit: 1 << 23,
+    },
+    hkdf_provider: &HkdfUsingHmac(&HmacSha256),
+    aead_alg: &Aes128Gcm,
+    quic: None,
+});
+
 pub(super) fn provider() -> CryptoProvider {
     CryptoProvider {
-        cipher_suites: vec![SupportedCipherSuite::Tls13(&Tls13CipherSuite {
-            common: CipherSuiteCommon {
-                suite: CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
-                hash_provider: &Sha256,
-                confidentiality_limit: u64::MAX,
-            },
-            hkdf_provider: &HkdfUsingHmac(&HmacSha256),
-            aead_alg: &Chacha20Poly1305,
-            quic: None,
-        })],
+        cipher_suites: vec![TLS13_CHACHA20, TLS13_AES128],
         kx_groups: vec![&X25519],
         signature_verification_algorithms: super::verify::ALGORITHMS,
         secure_random: &Random,
@@ -201,6 +214,95 @@ impl MessageDecrypter for RecordCipher {
     }
 }
 
+struct Aes128Gcm;
+struct Aes128RecordCipher {
+    key: AeadKey,
+    iv: Iv,
+}
+
+impl Tls13AeadAlgorithm for Aes128Gcm {
+    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+        Box::new(Aes128RecordCipher { key, iv })
+    }
+
+    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter> {
+        Box::new(Aes128RecordCipher { key, iv })
+    }
+
+    fn key_len(&self) -> usize {
+        16
+    }
+
+    fn extract_keys(
+        &self,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError> {
+        Ok(ConnectionTrafficSecrets::Aes128Gcm { key, iv })
+    }
+}
+
+fn aes128(key: &AeadKey) -> Result<aes_gcm::Aes128Gcm, Error> {
+    aes_gcm::KeyInit::new_from_slice(key.as_ref()).map_err(|_| Error::EncryptError)
+}
+
+impl MessageEncrypter for Aes128RecordCipher {
+    fn encrypt(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        use aes_gcm::aead::AeadInPlace;
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = PrefixedPayload::with_capacity(total_len);
+        payload.extend_from_chunks(&msg.payload);
+        payload.extend_from_slice(&[u8::from(msg.typ)]);
+        let nonce = aes_gcm::Nonce::from(Nonce::new(&self.iv, seq).0);
+        let tag = aes128(&self.key)?
+            .encrypt_in_place_detached(&nonce, &make_tls13_aad(total_len), payload.as_mut())
+            .map_err(|_| Error::EncryptError)?;
+        payload.extend_from_slice(&tag);
+        Ok(OutboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            payload,
+        ))
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len + 17
+    }
+}
+
+impl MessageDecrypter for Aes128RecordCipher {
+    fn decrypt<'a>(
+        &mut self,
+        mut msg: InboundOpaqueMessage<'a>,
+        seq: u64,
+    ) -> Result<InboundPlainMessage<'a>, Error> {
+        use aes_gcm::aead::AeadInPlace;
+        if msg.payload.len() < 17 {
+            return Err(Error::DecryptError);
+        }
+        let aad = make_tls13_aad(msg.payload.len());
+        let plain_len = msg.payload.len() - 16;
+        let mut tag = aes_gcm::Tag::default();
+        tag.copy_from_slice(&msg.payload[plain_len..]);
+        let nonce = aes_gcm::Nonce::from(Nonce::new(&self.iv, seq).0);
+        aes128(&self.key)
+            .map_err(|_| Error::DecryptError)?
+            .decrypt_in_place_detached(
+                &nonce,
+                &aad,
+                &mut msg.payload[..plain_len],
+                &tag,
+            )
+            .map_err(|_| Error::DecryptError)?;
+        msg.payload.truncate(plain_len);
+        msg.into_tls13_unpadded_message()
+    }
+}
+
 #[derive(Debug)]
 struct Random;
 
@@ -354,6 +456,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(plain.typ, ContentType::Handshake);
+        assert_eq!(plain.payload, b"hello world");
+
+        let mut enc = Aes128Gcm.encrypter([7; 16].into(), [8; 12].into());
+        let mut dec = Aes128Gcm.decrypter([7; 16].into(), [8; 12].into());
+        let encrypted = enc
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: ContentType::Handshake,
+                    version: ProtocolVersion::TLSv1_3,
+                    payload: OutboundChunks::new(&[b"hello", b" world"]),
+                },
+                42,
+            )
+            .unwrap();
+        let mut bytes = encrypted.payload.as_ref().to_vec();
+        let plain = dec
+            .decrypt(
+                InboundOpaqueMessage::new(
+                    ContentType::ApplicationData,
+                    ProtocolVersion::TLSv1_2,
+                    &mut bytes,
+                ),
+                42,
+            )
+            .unwrap();
         assert_eq!(plain.payload, b"hello world");
         for peer in [&[0u8; 32][..], &[1u8; 31][..]] {
             let exchange = Box::new(KeyExchange {

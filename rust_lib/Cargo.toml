@@ -12,6 +12,7 @@ lto = true
 opt-level = 2
 
 [dependencies]
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes"] }
 linked_list_allocator = "0.10.6"
 rustls = { version = "0.23.44", default-features = false, features = ["custom-provider"] }
 webpki-roots = { version = "1.0.9", default-features = false }
