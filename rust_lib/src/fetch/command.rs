@@ -1,5 +1,5 @@
 use super::{
-    configuration, get, get_plain,
+    configuration, configuration_insecure, get, get_plain,
     native::{Rtc, Tcp},
     options::{Options, HELP},
     public_roots, Error,
@@ -147,15 +147,16 @@ fn execute(args: &[&str]) -> Result<(), Error> {
         let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;
         let response = if url.is_https {
             if config.is_none() {
-                if Rtc.current_time().is_none() {
-                    return Err(Error::Message(
-                        "RTC unavailable or invalid; cannot check certificate dates",
-                    ));
-                }
-                config = Some(configuration(
-                    Arc::new(Rtc),
-                    roots(options.cacert.as_deref())?,
-                )?);
+                config = Some(if options.insecure {
+                    configuration_insecure(Arc::new(Rtc))?
+                } else {
+                    if Rtc.current_time().is_none() {
+                        return Err(Error::Message(
+                            "RTC unavailable or invalid; cannot check certificate dates",
+                        ));
+                    }
+                    configuration(Arc::new(Rtc), roots(options.cacert.as_deref())?)?
+                });
             }
             get(
                 &mut tcp,

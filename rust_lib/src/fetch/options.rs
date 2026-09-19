@@ -27,6 +27,9 @@ pub const HELP: &str = concat!(
     "                         1048576)\n",
     "      --cacert FILE      Use CA certificates\n",
     "                         from FILE\n",
+    "      --insecure         Accept self-signed or\n",
+    "                         untrusted server\n",
+    "                         certificates\n",
 );
 
 #[derive(Debug)]
@@ -43,6 +46,7 @@ pub struct Options {
     pub timeout: u32,
     pub max_size: usize,
     pub cacert: Option<String>,
+    pub insecure: bool,
 }
 
 impl Options {
@@ -60,6 +64,7 @@ impl Options {
             timeout: 30,
             max_size: 1024 * 1024,
             cacert: None,
+            insecure: false,
         };
         let mut timeout = None;
         let mut max_size = None;
@@ -82,6 +87,7 @@ impl Options {
                 "-f" | "--fail" => options.fail = true,
                 "-s" | "--silent" => options.silent = true,
                 "--overwrite" => options.overwrite = true,
+                "--insecure" => options.insecure = true,
                 "-o" | "--output" | "--cacert" | "--timeout" | "--max-size" => {
                     let value = args
                         .next()
@@ -109,6 +115,11 @@ impl Options {
         }
         if options.overwrite && options.output.is_none() {
             return Err(Error::Message("--overwrite requires --output"));
+        }
+        if options.insecure && options.cacert.is_some() {
+            return Err(Error::Message(
+                "--insecure cannot be combined with --cacert",
+            ));
         }
         Ok(options)
     }
@@ -191,7 +202,7 @@ mod tests {
             &[][..],
             &["ftp://example.com"],
             &["https://a.com", "https://b.com"],
-            &["--insecure", "https://a.com"],
+            &["--insecure", "--cacert", "roots.pem", "https://a.com"],
             &["--", "--help"],
             &["-o"],
             &["--output", "--head", "https://a.com"],
@@ -214,5 +225,6 @@ mod tests {
         }
         assert!(Options::parse(&["-o", "a", "--output", "a", "https://a.com"]).is_ok());
         assert!(Options::parse(&["--timeout", "1", "--timeout", "01", "https://a.com"]).is_ok());
+        assert!(Options::parse(&["--insecure", "https://a.com"]).unwrap().insecure);
     }
 }

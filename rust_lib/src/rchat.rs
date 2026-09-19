@@ -5,7 +5,7 @@ use zeroize::Zeroize;
 
 use crate::{
     fetch::{
-        configuration, exchange_plain, exchange_tls,
+        configuration, configuration_insecure, exchange_plain, exchange_tls,
         native::{Rtc, Tcp},
         public_roots, Response, Url,
     },
@@ -26,6 +26,7 @@ const SERVER_ADDRESS_MAX: usize = 280;
 struct Profile {
     key: String,
     url: Url,
+    trust_server_cert: bool,
     auth_private: [u8; 32],
     auth_public: [u8; 32],
     encryption_private: [u8; 32],
@@ -65,15 +66,19 @@ unsafe fn c_string<'a>(pointer: *const u8, maximum: usize) -> Result<&'a str, ()
     Err(())
 }
 
+fn normalize_server_address(address: &str) -> &str {
+    address.trim_end_matches('/')
+}
+
 fn profile_key(address: &str, url: &Url) -> Result<String, ()> {
     if url.path != "/" {
         return Err(());
     }
+    let address = normalize_server_address(address);
     let authority = address
         .strip_prefix("https://")
         .or_else(|| address.strip_prefix("http://"))
-        .ok_or(())?
-        .trim_end_matches('/');
+        .ok_or(())?;
     if authority.is_empty() || authority.contains(['/', '?', '#']) {
         return Err(());
     }
@@ -110,6 +115,7 @@ fn new_profile(key: String, url: Url) -> Result<Profile, ()> {
     Ok(Profile {
         key,
         url,
+        trust_server_cert: false,
         auth_private,
         auth_public,
         encryption_private,
@@ -524,10 +530,14 @@ fn api_request(
     let mut url = profile.url.clone();
     url.path = path.into();
     let tls_config = if url.is_https {
-        if Rtc.current_time().is_none() {
-            return Err(());
-        }
-        Some(configuration(Arc::new(Rtc), public_roots()).map_err(|_| ())?)
+        Some(if profile.trust_server_cert {
+            configuration_insecure(Arc::new(Rtc)).map_err(|_| ())?
+        } else {
+            if Rtc.current_time().is_none() {
+                return Err(());
+            }
+            configuration(Arc::new(Rtc), public_roots()).map_err(|_| ())?
+        })
     } else {
         None
     };
@@ -867,11 +877,16 @@ unsafe fn active_profile_mut() -> Option<&'static mut Profile> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rust_rchat_use_server(address: *const u8) -> i32 {
+pub unsafe extern "C" fn rust_rchat_use_server(
+    address: *const u8,
+    trust_server_cert: i32,
+) -> i32 {
     let address = match c_string(address, SERVER_ADDRESS_MAX) {
         Ok(address) => address,
         Err(()) => return -1,
     };
+    let trust_server_cert = trust_server_cert != 0;
+    let address = normalize_server_address(address);
     let url = match Url::parse(address) {
         Ok(url) => url,
         Err(_) => return -1,
@@ -883,16 +898,18 @@ pub unsafe extern "C" fn rust_rchat_use_server(address: *const u8) -> i32 {
     let profiles = PROFILES.get_or_insert_with(Vec::new);
     if let Some(index) = profiles.iter().position(|profile| profile.key == key) {
         profiles[index].url = url;
+        profiles[index].trust_server_cert = trust_server_cert;
         ACTIVE_PROFILE = index;
         return 0;
     }
     if profiles.len() == MAX_PROFILES {
         return -2;
     }
-    let profile = match new_profile(key, url) {
+    let mut profile = match new_profile(key, url) {
         Ok(profile) => profile,
         Err(()) => return -3,
     };
+    profile.trust_server_cert = trust_server_cert;
     if profiles.iter().any(|existing| {
         profile.auth_private == existing.auth_private
             || profile.auth_private == existing.encryption_private
@@ -984,6 +1001,12 @@ pub unsafe extern "C" fn rust_rchat_enroll(invite: *const u8) -> i32 {
         Err(()) => return -4,
     };
     if response.status != 200 && response.status != 201 {
+        if response.body.windows(14).any(|window| window == b"invalid_invite") {
+            return -7;
+        }
+        if response.body.windows(17).any(|window| window == b"invalid_signature") {
+            return -8;
+        }
         return -5;
     }
     let returned_id = match json_string_field(&response.body, "client_id")
