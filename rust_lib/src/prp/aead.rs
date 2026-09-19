@@ -40,7 +40,7 @@ pub(super) fn tags_equal(left: &[u8; 16], right: &[u8; 16]) -> bool {
     difference == 0
 }
 
-pub(super) fn encrypt(
+pub(crate) fn encrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],
@@ -53,7 +53,7 @@ pub(super) fn encrypt(
     Some(authenticate(key, nonce, aad, data))
 }
 
-pub(super) fn decrypt(
+pub(crate) fn decrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],

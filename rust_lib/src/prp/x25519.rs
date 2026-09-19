@@ -2,7 +2,7 @@ const MASK51: u64 = (1 << 51) - 1;
 
 pub(super) type Fe = [u64; 5];
 
-pub(super) const BASEPOINT: [u8; 32] = [
+pub(crate) const BASEPOINT: [u8; 32] = [
     9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
@@ -196,7 +196,7 @@ fn fe_invert(a: &Fe) -> Fe {
     fe_pow(&e, a)
 }
 
-pub(super) fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     let mut k = *scalar;
     k[0] &= 248;
     k[31] &= 127;

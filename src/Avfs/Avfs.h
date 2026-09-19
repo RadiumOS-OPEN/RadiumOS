@@ -18,6 +18,7 @@ void avfs_init(void);
 // File operations
 int avfs_create_file(const char* name, uint32_t size);
 int avfs_write_file(const char* name, const void* buffer, uint32_t size, uint32_t offset);
+int avfs_save_file(const char* name, const void* buffer, uint32_t size, bool overwrite);
 int avfs_read_file(const char* name, void* buffer, uint32_t size, uint32_t offset);
 int avfs_append_file(const char* name, const void* buffer, uint32_t size);
 int avfs_remove_file(const char* name);

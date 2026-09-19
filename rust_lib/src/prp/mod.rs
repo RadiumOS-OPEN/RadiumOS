@@ -4,9 +4,19 @@ mod aead;
 mod chacha20;
 mod ed25519;
 mod envelope;
+mod hkdf;
 mod poly1305;
 mod sha512;
 mod x25519;
+
+pub(crate) use self::aead::{decrypt as aead_decrypt, encrypt as aead_encrypt};
+pub(crate) use self::ed25519::{
+    public_key as ed25519_public_key, sign as ed25519_sign, verify as ed25519_verify,
+};
+#[cfg(test)]
+pub(crate) use self::hkdf::hmac_sha256;
+pub(crate) use self::hkdf::{hkdf_expand, hkdf_extract, hmac_parts};
+pub(crate) use self::x25519::{x25519, BASEPOINT as X25519_BASEPOINT};
 
 extern "C" {
     fn cpu_rdrand32(value: *mut u32) -> i32;
@@ -118,7 +128,8 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-struct Sha256 {
+#[derive(Clone)]
+pub(crate) struct Sha256 {
     state: [u32; 8],
     buffer: [u8; 64],
     buffer_len: usize,
@@ -126,7 +137,7 @@ struct Sha256 {
 }
 
 impl Sha256 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: INITIAL_STATE,
             buffer: [0u8; 64],
@@ -135,7 +146,7 @@ impl Sha256 {
         }
     }
 
-    fn update(&mut self, mut input: &[u8]) {
+    pub(crate) fn update(&mut self, mut input: &[u8]) {
         self.message_len = self.message_len.wrapping_add(input.len() as u64);
 
         if self.buffer_len > 0 {
@@ -163,7 +174,7 @@ impl Sha256 {
         self.buffer_len = input.len();
     }
 
-    fn finish(mut self) -> [u8; 32] {
+    pub(crate) fn finish(mut self) -> [u8; 32] {
         let bit_len = self.message_len.wrapping_mul(8).to_be_bytes();
         self.buffer[self.buffer_len] = 0x80;
         self.buffer_len += 1;
@@ -187,7 +198,7 @@ impl Sha256 {
     }
 }
 
-pub(super) fn sha256(input: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input);
     hasher.finish()
@@ -210,7 +221,7 @@ const LONG_SHA256: [u8; 32] = [
     0x0b, 0x24, 0x9b, 0x11, 0xe8, 0xf0, 0x7a, 0x51, 0xaf, 0xac, 0x45, 0x03, 0x7a, 0xfe, 0xe9, 0xd1,
 ];
 
-pub(super) fn random_bytes(output: &mut [u8]) -> bool {
+pub(crate) fn random_bytes(output: &mut [u8]) -> bool {
     let mut success = true;
 
     for chunk in output.chunks_mut(4) {
@@ -452,16 +463,18 @@ pub unsafe extern "C" fn rust_prp_sign(file: *const u8, private_key: *const u8) 
         }
     }
 
+    // signing scalar is the private bytes themselves (already X25519-clamped by
+    // keygen; clamp defensively), so the signature public matches the .pub file.
+    // sha512 expansion is used only for the deterministic nonce prefix.
     let h = sha512::sha512(&private);
-    let mut scalar = [0u8; 32];
-    scalar.copy_from_slice(&h[..32]);
+    let mut scalar = private;
     scalar[0] &= 248;
-    scalar[31] &= 63;
+    scalar[31] &= 127;
     scalar[31] |= 64;
     let mut prefix = [0u8; 32];
     prefix.copy_from_slice(&h[32..]);
 
-    let public = ed25519::public_key(&private);
+    let public = ed25519::compress_scalar_mul(&scalar);
 
     let mut hasher = Sha512::new();
     hasher.update(&prefix);
@@ -523,8 +536,11 @@ pub unsafe extern "C" fn rust_prp_verify(file: *const u8, expected_pub: *const u
     if !expected_pub.is_null() {
         let mut want = [0u8; 32];
         core::ptr::copy_nonoverlapping(expected_pub, want.as_mut_ptr(), 32);
-        if public != want {
-            return -8;
+        // .pub files hold the X25519 u-coordinate of the same group element the
+        // signature's compressed Edwards public encodes
+        match ed25519::montgomery_u(&public) {
+            Some(u) if u == want => {}
+            _ => return -8,
         }
     }
 
@@ -747,6 +763,10 @@ pub extern "C" fn rust_prp_selftest() -> i32 {
     }
 
     if !ed25519::selftest() {
+        return -1;
+    }
+
+    if !hkdf::selftest() {
         return -1;
     }
 

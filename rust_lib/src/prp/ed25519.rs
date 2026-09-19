@@ -1,7 +1,9 @@
 use super::sha512::{sha512, Sha512};
 use super::x25519::{
-    fe_add, fe_from_bytes, fe_mul, fe_mul_small, fe_one, fe_pow, fe_sq, fe_sub, fe_to_bytes, Fe,
+    fe_add, fe_cswap, fe_from_bytes, fe_mul, fe_mul_small, fe_one, fe_pow, fe_sq, fe_sub,
+    fe_to_bytes, Fe,
 };
+use zeroize::Zeroize;
 
 const D: [u8; 32] = [
     0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75, 0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
@@ -94,8 +96,14 @@ fn point_mul(scalar: &[u8; 32], base: &Point) -> Point {
     for i in (0..256).rev() {
         acc = point_double(&acc);
         let bit = (scalar[i / 8] >> (i % 8)) & 1;
-        if bit == 1 {
-            acc = point_add(&acc, base);
+        let mut sum = point_add(&acc, base);
+        for (selected, other) in [
+            (&mut acc.x, &mut sum.x),
+            (&mut acc.y, &mut sum.y),
+            (&mut acc.z, &mut sum.z),
+            (&mut acc.t, &mut sum.t),
+        ] {
+            fe_cswap(bit, selected, other);
         }
     }
     acc
@@ -242,7 +250,7 @@ pub(super) fn sc_mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 }
 
 fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let h = sha512(private);
+    let mut h = sha512(private);
     let mut scalar = [0u8; 32];
     scalar.copy_from_slice(&h[..32]);
     scalar[0] &= 248;
@@ -250,12 +258,43 @@ fn expand_private(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     scalar[31] |= 64;
     let mut prefix = [0u8; 32];
     prefix.copy_from_slice(&h[32..]);
+    h.zeroize();
     (scalar, prefix)
 }
 
-pub(super) fn public_key(private: &[u8; 32]) -> [u8; 32] {
-    let (scalar, _) = expand_private(private);
-    point_compress(&point_mul(&scalar, &base_point()))
+pub(crate) fn public_key(private: &[u8; 32]) -> [u8; 32] {
+    let (mut scalar, mut prefix) = expand_private(private);
+    let public = point_compress(&point_mul(&scalar, &base_point()));
+    scalar.zeroize();
+    prefix.zeroize();
+    public
+}
+
+pub(crate) fn sign(private: &[u8; 32], message: &[u8]) -> [u8; 64] {
+    let (mut scalar, mut prefix) = expand_private(private);
+    let public = point_compress(&point_mul(&scalar, &base_point()));
+
+    let mut hasher = Sha512::new();
+    hasher.update(&prefix);
+    hasher.update(message);
+    let mut r = sc_reduce512(&hasher.finish());
+    let big_r = compress_scalar_mul(&r);
+
+    let mut hasher = Sha512::new();
+    hasher.update(&big_r);
+    hasher.update(&public);
+    hasher.update(message);
+    let mut k = sc_reduce512(&hasher.finish());
+    let s = sc_mul_add(&k, &scalar, &r);
+
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&big_r);
+    signature[32..].copy_from_slice(&s);
+    scalar.zeroize();
+    prefix.zeroize();
+    r.zeroize();
+    k.zeroize();
+    signature
 }
 
 pub(super) fn compress_scalar_mul(scalar: &[u8; 32]) -> [u8; 32] {
@@ -268,17 +307,15 @@ pub(super) fn expand_prefix(private: &[u8; 32]) -> [u8; 32] {
 }
 
 pub(super) fn check_s_below_l(s: &[u8; 32]) -> bool {
-    let mut not_less = false;
     for i in (0..32).rev() {
         if s[i] > L[i] {
-            not_less = true;
-            break;
+            return false;
         }
         if s[i] < L[i] {
             return true;
         }
     }
-    !not_less
+    false
 }
 
 // left = S*B, right = R + k*A, equal as compressed points
@@ -302,6 +339,50 @@ pub(super) fn verify_commit(
     point_compress(&left) == point_compress(&right)
 }
 
+pub(crate) fn verify(public: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
+    let mut big_r = [0u8; 32];
+    let mut s = [0u8; 32];
+    big_r.copy_from_slice(&signature[..32]);
+    s.copy_from_slice(&signature[32..]);
+    if !check_s_below_l(&s) {
+        return false;
+    }
+    for bytes in [public, &big_r] {
+        let point = match point_decompress(bytes) {
+            Some(point) => point,
+            None => return false,
+        };
+        // Reject noncanonical encodings and points killed by the cofactor.
+        let mut multiple = point;
+        for _ in 0..3 {
+            multiple = point_double(&multiple);
+        }
+        if point_compress(&point) != *bytes
+            || point_compress(&multiple) == point_compress(&point_identity())
+        {
+            return false;
+        }
+    }
+    let mut hasher = Sha512::new();
+    hasher.update(&big_r);
+    hasher.update(public);
+    hasher.update(message);
+    let k = sc_reduce512(&hasher.finish());
+    verify_commit(&s, &big_r, public, &k)
+}
+
+// Montgomery u-coordinate of the birationally equivalent Curve25519 point,
+// matching what x25519::x25519(priv, BASEPOINT) stores in .pub files
+pub(super) fn montgomery_u(public: &[u8; 32]) -> Option<[u8; 32]> {
+    let p = point_decompress(public)?;
+    let zinv = fe_invert(&p.z);
+    let y = fe_mul(&p.y, &zinv);
+    // u = (1 + y) / (1 - y)
+    let num = fe_add(&fe_one(), &y);
+    let den = fe_sub(&fe_one(), &y);
+    Some(fe_to_bytes(&fe_mul(&num, &fe_invert(&den))))
+}
+
 fn hex_decode(hex: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for i in 0..32 {
@@ -323,6 +404,10 @@ fn hex_decode64(hex: &[u8]) -> [u8; 64] {
 }
 
 pub(super) fn selftest() -> bool {
+    if check_s_below_l(&L) {
+        return false;
+    }
+
     // RFC 8032 test 1: empty message
     let private = hex_decode(b"9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
     let expected_pub =
@@ -332,6 +417,9 @@ pub(super) fn selftest() -> bool {
     }
 
     let expected_sig = hex_decode64(b"e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+    if sign(&private, b"") != expected_sig {
+        return false;
+    }
 
     let mut hasher = Sha512::new();
     hasher.update(&expand_prefix(&private));
@@ -349,6 +437,22 @@ pub(super) fn selftest() -> bool {
     sig[..32].copy_from_slice(&big_r);
     sig[32..].copy_from_slice(&s);
     if sig != expected_sig {
+        return false;
+    }
+
+    if !verify(&expected_pub, b"", &sig) || verify(&expected_pub, b"x", &sig) {
+        return false;
+    }
+    let mut noncanonical = sig;
+    noncanonical[32..].copy_from_slice(&L);
+    if verify(&expected_pub, b"", &noncanonical) {
+        return false;
+    }
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut forged = [0u8; 64];
+    forged[..32].copy_from_slice(&identity);
+    if verify(&identity, b"", &forged) {
         return false;
     }
 

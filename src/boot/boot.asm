@@ -7,13 +7,7 @@ dd MB_MAGIC
 dd MB_FLAGS
 dd MB_CHECKSUM
 
-; ----- Initial Stack ----- FIXED!
 section .bss
-align 16
-stack_bottom:           ; Low address
-    resb 16384          ; 16 KiB stack space
-stack_top:              ; High address - stack grows DOWN from here
-
 align 4096
 global bpd
 bpd:
@@ -26,9 +20,10 @@ bptl:
 ; ----- Boot -----
 section .text
 global _start
+extern _stack_top
 _start:
     cli                         ; Disable interrupts during boot
-    mov esp, stack_top          ; FIXED: Point to TOP of stack
+    mov esp, _stack_top          ; Use the stack reserved by linker.ld
     
 
     
