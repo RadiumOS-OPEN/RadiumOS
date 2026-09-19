@@ -538,6 +538,15 @@ mod tests {
         let url = Url::parse("https://Example.com:8443/a/b?q=1#fragment").unwrap();
         assert!(url.is_https);
         assert_eq!(url.authority(), "example.com:8443");
+        let url = Url::parse(
+            "https://rchat-server-abcdefghijklmnopqrstuvwxyz0123456789.vercel.app",
+        )
+        .unwrap();
+        assert_eq!(
+            url.host,
+            "rchat-server-abcdefghijklmnopqrstuvwxyz0123456789.vercel.app"
+        );
+        assert_eq!(url.port, 443);
         assert_eq!(url.path, "/a/b?q=1");
         assert_eq!(url.redirect("../c").unwrap().path, "/c");
         assert_eq!(url.redirect("?q=2").unwrap().path, "/a/b?q=2");

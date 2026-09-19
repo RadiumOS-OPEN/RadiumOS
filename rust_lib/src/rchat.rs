@@ -21,6 +21,7 @@ const MESSAGE_PREFIX: &[u8] = b"rchat-message-v1\0";
 const HPKE_INFO: &[u8] = b"rchat-hpke-v1";
 const NETWORK_TIMEOUT_MS: u32 = 15_000;
 const RESPONSE_LIMIT: usize = 48 * 1024;
+const SERVER_ADDRESS_MAX: usize = 280;
 
 struct Profile {
     key: String,
@@ -867,7 +868,7 @@ unsafe fn active_profile_mut() -> Option<&'static mut Profile> {
 
 #[no_mangle]
 pub unsafe extern "C" fn rust_rchat_use_server(address: *const u8) -> i32 {
-    let address = match c_string(address, 63) {
+    let address = match c_string(address, SERVER_ADDRESS_MAX) {
         Ok(address) => address,
         Err(()) => return -1,
     };
