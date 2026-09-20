@@ -66,10 +66,12 @@ unsafe fn c_string<'a>(pointer: *const u8, maximum: usize) -> Result<&'a str, ()
     Err(())
 }
 
+/// Removes trailing slashes from a server address before it is stored or parsed.
 fn normalize_server_address(address: &str) -> &str {
     address.trim_end_matches('/')
 }
 
+/// Derives the normalized authority used to identify a server profile.
 fn profile_key(address: &str, url: &Url) -> Result<String, ()> {
     if url.path != "/" {
         return Err(());
@@ -85,6 +87,7 @@ fn profile_key(address: &str, url: &Url) -> Result<String, ()> {
     Ok(authority.to_ascii_lowercase())
 }
 
+/// Creates a server profile with fresh authentication and encryption keys.
 fn new_profile(key: String, url: Url) -> Result<Profile, ()> {
     let mut auth_private = [0u8; 32];
     let mut encryption_private = [0u8; 32];
@@ -519,6 +522,7 @@ impl Drop for NetworkGuard {
     }
 }
 
+/// Sends one rChat API request using the profile's configured transport policy.
 fn api_request(
     profile: &Profile,
     method: &str,
@@ -877,6 +881,11 @@ unsafe fn active_profile_mut() -> Option<&'static mut Profile> {
 }
 
 #[no_mangle]
+/// Selects or creates the active profile for a server address.
+///
+/// # Safety
+///
+/// `address` must point to a readable, NUL-terminated string.
 pub unsafe extern "C" fn rust_rchat_use_server(
     address: *const u8,
     trust_server_cert: i32,
@@ -964,6 +973,11 @@ pub extern "C" fn rust_rchat_self_test() -> bool {
 }
 
 #[no_mangle]
+/// Enrolls the active profile with a server-issued invite code.
+///
+/// # Safety
+///
+/// `invite` must point to a readable, NUL-terminated string.
 pub unsafe extern "C" fn rust_rchat_enroll(invite: *const u8) -> i32 {
     let invite = match c_string(invite, 64) {
         Ok(invite)

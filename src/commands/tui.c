@@ -171,6 +171,7 @@ static rchat_server_profile_t *active_profile(void)
     return &state.servers[state.active_server];
 }
 
+/** Removes every trailing slash from a mutable server URL. */
 static void strip_trailing_slash(char *url)
 {
     size_t length = strlen(url);
@@ -179,6 +180,7 @@ static void strip_trailing_slash(char *url)
     }
 }
 
+/** Removes the legacy insecure marker and reports whether it was present. */
 static bool strip_legacy_insecure_suffix(char *url)
 {
     static const char suffix[] = "#insecure";
@@ -192,6 +194,7 @@ static bool strip_legacy_insecure_suffix(char *url)
     return false;
 }
 
+/** Synchronizes the active server address and certificate policy with Rust. */
 static void sync_rust_server(void)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -387,6 +390,7 @@ static void draw_profile(vga_window_t *win)
                 color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLUE));
 }
 
+/** Draws the server selection screen and its transport security warning. */
 static void draw_servers(vga_window_t *win)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -574,6 +578,7 @@ static void append_message(rchat_contact_t *contact, const char *text, bool from
     strcpy(message->text, text);
 }
 
+/** Prompts for and sends a message to the selected contact. */
 static void write_message(vga_window_t *win)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -605,6 +610,7 @@ static void write_message(vga_window_t *win)
                                : 0;
 }
 
+/** Polls for messages and stores them in their matching contact histories. */
 static void refresh_messages(rchat_screen_t return_screen, bool quiet)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -676,6 +682,7 @@ static void refresh_messages(rchat_screen_t return_screen, bool quiet)
     }
 }
 
+/** Adds or updates a server profile from interactive input. */
 static void edit_server(vga_window_t *win)
 {
     char server[RCHAT_SERVER_MAX + 1];
@@ -730,6 +737,7 @@ static void edit_server(vga_window_t *win)
     state.active_server = state.server_count++;
 }
 
+/** Enrolls the active server identity using an invite code. */
 static void enroll_identity(vga_window_t *win)
 {
     if (!active_profile()) {
@@ -810,6 +818,7 @@ static void print_help(void)
     print("HTTP exposes credentials and metadata; message contents stay E2EE.\n");
 }
 
+/** Runs the interactive rChat terminal interface. */
 void tui(int argc, char *argv[])
 {
     if (argc > 1) {

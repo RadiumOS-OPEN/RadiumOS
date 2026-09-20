@@ -182,6 +182,7 @@ impl Url {
     }
 }
 
+/// Builds a TLS client configuration that validates certificates against `roots`.
 pub fn configuration(
     time: Arc<dyn TimeProvider>,
     roots: RootCertStore,
@@ -194,6 +195,7 @@ pub fn configuration(
     Ok(Arc::new(config))
 }
 
+/// Builds a TLS client configuration that skips server certificate validation.
 pub fn configuration_insecure(time: Arc<dyn TimeProvider>) -> Result<Arc<ClientConfig>, Error> {
     let signatures = WebPkiServerVerifier::builder_with_provider(
         Arc::new(public_roots()),
@@ -210,6 +212,7 @@ pub fn configuration_insecure(time: Arc<dyn TimeProvider>) -> Result<Arc<ClientC
     Ok(Arc::new(config))
 }
 
+/// Applies the protocol settings shared by verified and insecure TLS clients.
 fn finish_client_config(config: &mut ClientConfig) {
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
@@ -222,6 +225,7 @@ struct InsecureVerifier {
 }
 
 impl ServerCertVerifier for InsecureVerifier {
+    /// Accepts the server certificate without validating its identity or trust chain.
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
@@ -233,6 +237,7 @@ impl ServerCertVerifier for InsecureVerifier {
         Ok(ServerCertVerified::assertion())
     }
 
+    /// Verifies TLS 1.2 handshake signatures using the standard signature verifier.
     fn verify_tls12_signature(
         &self,
         message: &[u8],
@@ -243,6 +248,7 @@ impl ServerCertVerifier for InsecureVerifier {
             .verify_tls12_signature(message, cert, dss)
     }
 
+    /// Verifies TLS 1.3 handshake signatures using the standard signature verifier.
     fn verify_tls13_signature(
         &self,
         message: &[u8],
@@ -253,6 +259,7 @@ impl ServerCertVerifier for InsecureVerifier {
             .verify_tls13_signature(message, cert, dss)
     }
 
+    /// Returns the signature schemes supported by the standard verifier.
     fn supported_verify_schemes(&self) -> alloc::vec::Vec<SignatureScheme> {
         self.signatures.supported_verify_schemes()
     }

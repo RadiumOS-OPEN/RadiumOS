@@ -50,6 +50,7 @@ pub struct Options {
 }
 
 impl Options {
+    /// Parses fetch command arguments and rejects incompatible option combinations.
     pub fn parse(args: &[&str]) -> Result<Self, Error> {
         let mut options = Self {
             help: false,
@@ -197,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    /// Rejects malformed or conflicting options while accepting valid repetitions.
     fn rejects_invalid_and_conflicting_options() {
         for args in [
             &[][..],

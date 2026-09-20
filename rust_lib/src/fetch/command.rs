@@ -119,6 +119,7 @@ fn roots(path: Option<&str>) -> Result<RootCertStore, Error> {
     Ok(roots)
 }
 
+/// Executes one fetch invocation from already-decoded command arguments.
 fn execute(args: &[&str]) -> Result<(), Error> {
     let options = Options::parse(args)?;
     if options.help {

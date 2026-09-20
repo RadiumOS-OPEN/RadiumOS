@@ -90,6 +90,7 @@ fn point_double(p: &Point) -> Point {
     }
 }
 
+/// Multiplies an Edwards point by a little-endian scalar.
 fn point_mul(scalar: &[u8; 32], base: &Point) -> Point {
     let mut acc = point_identity();
     for i in (0..256).rev() {
@@ -299,6 +300,7 @@ pub(super) fn expand_prefix(private: &[u8; 32]) -> [u8; 32] {
     prefix
 }
 
+/// Reports whether an encoded signature scalar is no greater than the group order.
 pub(super) fn check_s_below_l(s: &[u8; 32]) -> bool {
     let mut not_less = false;
     for i in (0..32).rev() {
@@ -334,6 +336,7 @@ pub(super) fn verify_commit(
     point_compress(&left) == point_compress(&right)
 }
 
+/// Verifies an Ed25519 signature and rejects noncanonical point encodings.
 pub(crate) fn verify(public: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
     let mut big_r = [0u8; 32];
     let mut s = [0u8; 32];
@@ -398,6 +401,7 @@ fn hex_decode64(hex: &[u8]) -> [u8; 64] {
     out
 }
 
+/// Runs known-answer and malformed-signature checks for the Ed25519 implementation.
 pub(super) fn selftest() -> bool {
     // RFC 8032 test 1: empty message
     let private = hex_decode(b"9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
