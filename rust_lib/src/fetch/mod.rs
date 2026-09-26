@@ -15,8 +15,15 @@ use alloc::{
 };
 use core::fmt;
 use rustls::{
-    client::UnbufferedClientConnection, pki_types::ServerName, time_provider::TimeProvider,
-    unbuffered::ConnectionState, ClientConfig, RootCertStore,
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        WebPkiServerVerifier,
+    },
+    client::UnbufferedClientConnection,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    time_provider::TimeProvider,
+    unbuffered::ConnectionState,
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
 };
 
 #[derive(Debug)]
@@ -175,6 +182,7 @@ impl Url {
     }
 }
 
+/// Builds a TLS client configuration that validates certificates against `roots`.
 pub fn configuration(
     time: Arc<dyn TimeProvider>,
     roots: RootCertStore,
@@ -183,10 +191,78 @@ pub fn configuration(
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
         .with_no_client_auth();
+    finish_client_config(&mut config);
+    Ok(Arc::new(config))
+}
+
+/// Builds a TLS client configuration that skips server certificate validation.
+pub fn configuration_insecure(time: Arc<dyn TimeProvider>) -> Result<Arc<ClientConfig>, Error> {
+    let signatures = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(public_roots()),
+        Arc::new(provider::provider()),
+    )
+    .build()
+    .map_err(|_| Error::Message("TLS verifier setup failed"))?;
+    let mut config = ClientConfig::builder_with_details(Arc::new(provider::provider()), time)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier { signatures }))
+        .with_no_client_auth();
+    finish_client_config(&mut config);
+    Ok(Arc::new(config))
+}
+
+/// Applies the protocol settings shared by verified and insecure TLS clients.
+fn finish_client_config(config: &mut ClientConfig) {
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     config.max_fragment_size = Some(1200);
-    Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+struct InsecureVerifier {
+    signatures: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for InsecureVerifier {
+    /// Accepts the server certificate without validating its identity or trust chain.
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    /// Verifies TLS 1.2 handshake signatures using the standard signature verifier.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.signatures
+            .verify_tls12_signature(message, cert, dss)
+    }
+
+    /// Verifies TLS 1.3 handshake signatures using the standard signature verifier.
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.signatures
+            .verify_tls13_signature(message, cert, dss)
+    }
+
+    /// Returns the signature schemes supported by the standard verifier.
+    fn supported_verify_schemes(&self) -> alloc::vec::Vec<SignatureScheme> {
+        self.signatures.supported_verify_schemes()
+    }
 }
 
 pub fn public_roots() -> RootCertStore {

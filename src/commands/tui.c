@@ -21,7 +21,7 @@
 #define RCHAT_HISTORY_VISIBLE 4
 #define RCHAT_REFRESH_SECONDS 15
 
-extern int rust_rchat_use_server(const uint8_t *address);
+extern int rust_rchat_use_server(const uint8_t *address, int trust_server_cert);
 extern int rust_rchat_client_id(uint8_t *output, uint32_t capacity);
 extern int rust_rchat_auth_public(uint8_t *output, uint32_t capacity);
 extern int rust_rchat_encryption_public(uint8_t *output, uint32_t capacity);
@@ -57,6 +57,7 @@ typedef struct {
 typedef struct {
     char host[RCHAT_SERVER_MAX + 1];
     char address[RCHAT_SERVER_MAX + 1];
+    bool trust_server_cert;
     int contact_count;
     int selection;
     bool ack_pending;
@@ -168,6 +169,38 @@ static rchat_server_profile_t *active_profile(void)
     if (state.active_server < 0 || state.active_server >= state.server_count)
         return NULL;
     return &state.servers[state.active_server];
+}
+
+/** Removes every trailing slash from a mutable server URL. */
+static void strip_trailing_slash(char *url)
+{
+    size_t length = strlen(url);
+    while (length > 0 && url[length - 1] == '/') {
+        url[--length] = '\0';
+    }
+}
+
+/** Removes the legacy insecure marker and reports whether it was present. */
+static bool strip_legacy_insecure_suffix(char *url)
+{
+    static const char suffix[] = "#insecure";
+    size_t suffix_len = strlen(suffix);
+    size_t length = strlen(url);
+    if (length >= suffix_len && strcmp(url + length - suffix_len, suffix) == 0) {
+        url[length - suffix_len] = '\0';
+        strip_trailing_slash(url);
+        return true;
+    }
+    return false;
+}
+
+/** Synchronizes the active server address and certificate policy with Rust. */
+static void sync_rust_server(void)
+{
+    rchat_server_profile_t *profile = active_profile();
+    if (!profile) return;
+    rust_rchat_use_server((const uint8_t *)profile->address,
+                          profile->trust_server_cert ? 1 : 0);
 }
 
 static bool valid_client_id(const char *id)
@@ -357,6 +390,7 @@ static void draw_profile(vga_window_t *win)
                 color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLUE));
 }
 
+/** Draws the server selection screen and its transport security warning. */
 static void draw_servers(vga_window_t *win)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -375,13 +409,17 @@ static void draw_servers(vga_window_t *win)
         put_wrapped(win, 5, 12, 64, 3,
                     "HTTP exposes login and metadata. Messages remain end-to-end encrypted.",
                     color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLUE));
+    else if (profile && profile->trust_server_cert)
+        put_wrapped(win, 5, 12, 64, 3,
+                    "TLS certificate is not verified. Use only for local development.",
+                    color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLUE));
     else
         put_clipped(win, 5, 12, 64, "HTTPS is recommended.", color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE));
 
     put_clipped(win, 3, 21, 68,
                 profile && rust_rchat_is_enrolled()
-                    ? "E/ENTER Edit   F8/ESC Back"
-                    : "I Enroll   E/ENTER Edit   F8/ESC Back",
+                    ? "T TLS trust   E/ENTER Edit   F8/ESC Back"
+                    : "I Enroll   T TLS trust   E/ENTER Edit   F8/ESC Back",
                 color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLUE));
 }
 
@@ -540,6 +578,7 @@ static void append_message(rchat_contact_t *contact, const char *text, bool from
     strcpy(message->text, text);
 }
 
+/** Prompts for and sends a message to the selected contact. */
 static void write_message(vga_window_t *win)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -552,6 +591,7 @@ static void write_message(vga_window_t *win)
     }
 
     rchat_contact_t *contact = &profile->contacts[profile->selection];
+    sync_rust_server();
     draw_loading(win, "Sending message...");
     int send_result = rust_rchat_send((const uint8_t *)contact->client_id,
                                       (const uint8_t *)draft_message);
@@ -570,6 +610,7 @@ static void write_message(vga_window_t *win)
                                : 0;
 }
 
+/** Polls for messages and stores them in their matching contact histories. */
 static void refresh_messages(rchat_screen_t return_screen, bool quiet)
 {
     rchat_server_profile_t *profile = active_profile();
@@ -586,6 +627,7 @@ static void refresh_messages(rchat_screen_t return_screen, bool quiet)
         }
         profile->ack_pending = false;
     }
+    sync_rust_server();
     for (int count = 0; count < RCHAT_HISTORY_MAX; count++) {
         char sender[RCHAT_ID_LEN + 1];
         char message[RCHAT_MESSAGE_MAX + 1];
@@ -640,18 +682,29 @@ static void refresh_messages(rchat_screen_t return_screen, bool quiet)
     }
 }
 
+/** Adds or updates a server profile from interactive input. */
 static void edit_server(vga_window_t *win)
 {
     char server[RCHAT_SERVER_MAX + 1];
     char host[RCHAT_SERVER_MAX + 1];
+    bool trust_server_cert = false;
     if (!input(win, "SERVER", "HTTP exposes client-server traffic; prefer HTTPS.",
                server, RCHAT_SERVER_MAX, false)) return;
+    if (strip_legacy_insecure_suffix(server)) trust_server_cert = true;
+    strip_trailing_slash(server);
     if (!server_host(server, host)) {
         fail("Use http:// or https:// followed by a domain or IP address.", RCHAT_SERVERS);
         return;
     }
 
-    int identity_result = rust_rchat_use_server((const uint8_t *)server);
+    for (int i = 0; i < state.server_count; i++) {
+        if (strcmp(state.servers[i].host, host) == 0) {
+            trust_server_cert = state.servers[i].trust_server_cert;
+            break;
+        }
+    }
+
+    int identity_result = rust_rchat_use_server((const uint8_t *)server, trust_server_cert ? 1 : 0);
     if (identity_result == -2) {
         fail("This build can remember four server profiles.", RCHAT_SERVERS);
         return;
@@ -664,6 +717,7 @@ static void edit_server(vga_window_t *win)
     for (int i = 0; i < state.server_count; i++) {
         if (strcmp(state.servers[i].host, host) == 0) {
             strcpy(state.servers[i].address, server);
+            state.servers[i].trust_server_cert = trust_server_cert;
             state.active_server = i;
             return;
         }
@@ -676,12 +730,14 @@ static void edit_server(vga_window_t *win)
     rchat_server_profile_t *profile = &state.servers[state.server_count];
     strcpy(profile->host, host);
     strcpy(profile->address, server);
+    profile->trust_server_cert = trust_server_cert;
     profile->contact_count = 0;
     profile->selection = 0;
     profile->ack_pending = false;
     state.active_server = state.server_count++;
 }
 
+/** Enrolls the active server identity using an invite code. */
 static void enroll_identity(vga_window_t *win)
 {
     if (!active_profile()) {
@@ -694,6 +750,7 @@ static void enroll_identity(vga_window_t *win)
     }
     char invite[65];
     if (!input(win, "ENROLL", "Invite code", invite, 64, true)) return;
+    sync_rust_server();
     draw_loading(win, "Enrolling identity with server...");
     int result = rust_rchat_enroll((const uint8_t *)invite);
     memset(invite, 0, sizeof(invite));
@@ -704,6 +761,10 @@ static void enroll_identity(vga_window_t *win)
         fail("Could not reach or authenticate the server.", RCHAT_SERVERS);
     else if (result == -5)
         fail("The server rejected enrollment.", RCHAT_SERVERS);
+    else if (result == -7)
+        fail("The invite code is invalid or exhausted.", RCHAT_SERVERS);
+    else if (result == -8)
+        fail("Enrollment signature verification failed.", RCHAT_SERVERS);
     else
         fail("The server returned an invalid enrollment response.", RCHAT_SERVERS);
 }
@@ -757,6 +818,7 @@ static void print_help(void)
     print("HTTP exposes credentials and metadata; message contents stay E2EE.\n");
 }
 
+/** Runs the interactive rChat terminal interface. */
 void tui(int argc, char *argv[])
 {
     if (argc > 1) {
@@ -831,6 +893,13 @@ void tui(int argc, char *argv[])
             if (key == 0x01 || key == 0x42) state.screen = RCHAT_HOME;
             else if (key == 0x1C || key == 0x12) edit_server(&win);
             else if (key == 0x17) enroll_identity(&win); /* I */
+            else if (key == 0x14) { /* T */
+                rchat_server_profile_t *profile = active_profile();
+                if (profile && server_url_kind(profile->address) == 2) {
+                    profile->trust_server_cert = !profile->trust_server_cert;
+                    sync_rust_server();
+                }
+            }
             continue;
         }
 
