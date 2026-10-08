@@ -518,6 +518,13 @@ void schedule() {
     // No other tasks, reset current task's time
     current_task->remaining_time = current_task->time_slice;
 }
+
+void yield(void) {
+    if (!current_task) return;
+    current_task->remaining_time = 0;
+    schedule();
+}
+
 void block_task(uint32_t pid) {
     Task* task = get_task_by_pid(pid);
     if (task && task->is_active) {

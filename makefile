@@ -1,40 +1,48 @@
 #!/usr/bin/make -f
-# Compiler and tools configuration
-NASM = nasm
-CC = clang
-CARGO = cargo
-LD = $(shell command -v ld.lld 2>/dev/null || command -v ld.lld-19 2>/dev/null || printf '%s' ld.lld)
-QEMU = qemu-system-i386
-NM = $(shell command -v llvm-nm 2>/dev/null || command -v llvm-nm-19 2>/dev/null || printf '%s' llvm-nm)
 
-# Compiler flags
-# Added -MMD -MP for automatic header dependency tracking
+# ---------------------------------------------------------------------
+# COMPILER AND TOOLS CONFIGURATION
+# ---------------------------------------------------------------------
+NASM  ?= nasm
+CC    ?= clang
+CARGO ?= cargo
+QEMU  ?= qemu-system-i386
+
+# Use simple expansion (:=) so shell detection only runs ONCE per make execution
+LD := $(shell command -v ld.lld 2>/dev/null || command -v ld.lld-19 2>/dev/null || printf '%s' ld.lld)
+NM := $(shell command -v llvm-nm 2>/dev/null || command -v llvm-nm-19 2>/dev/null || printf '%s' llvm-nm)
+
+# ---------------------------------------------------------------------
+# COMPILER & LINKER FLAGS
+# ---------------------------------------------------------------------
 NASMFLAGS = -f elf32
-CFLAGS = -c -target i686-none-elf -ffreestanding -mno-sse -Wall -Wextra -Werror=implicit-function-declaration -MMD -MP
-# Added --unresolved-symbols=ignore-all so the binary is produced for our NM verification script
-LDFLAGS = -T linker.ld -static -nostdlib --unresolved-symbols=ignore-all --fatal-warnings
+CFLAGS    = -c -target i686-none-elf -ffreestanding -mno-sse -Wall -Wextra -Werror=implicit-function-declaration -MMD -MP
+LDFLAGS   = -T linker.ld -static -nostdlib --unresolved-symbols=ignore-all --fatal-warnings
 
-# Directories
-SRC_DIR = src
-BOOT_DIR = $(SRC_DIR)/boot
-GRUB_DIR = $(SRC_DIR)/grub
+# ---------------------------------------------------------------------
+# DIRECTORIES & SOURCES
+# ---------------------------------------------------------------------
+SRC_DIR      = src
+BOOT_DIR     = $(SRC_DIR)/boot
+GRUB_DIR     = $(SRC_DIR)/grub
 RUST_LIB_DIR = rust_lib
-ISO_DIR = iso
-BACKUP_DIR = backups
+ISO_DIR      = iso
+BACKUP_DIR   = backups
 
-# Source files
-BOOT_ASM = $(BOOT_DIR)/boot.asm
-GRUB_ASM = $(GRUB_DIR)/grub.asm
-C_SOURCES = $(shell find $(SRC_DIR) -name '*.c')
-RUST_SOURCES = $(shell find $(RUST_LIB_DIR)/src -name '*.rs')
+BOOT_ASM     = $(BOOT_DIR)/boot.asm
+GRUB_ASM     = $(GRUB_DIR)/grub.asm
+
+# Suppress find errors if directories do not yet exist
+C_SOURCES    := $(shell find $(SRC_DIR) -name '*.c' 2>/dev/null)
+RUST_SOURCES := $(shell find $(RUST_LIB_DIR)/src -name '*.rs' 2>/dev/null)
 
 # Object files and dependencies
-BOOT_OBJ = $(BOOT_DIR)/boot.o
-GRUB_OBJ = $(GRUB_DIR)/grub.o
+BOOT_OBJ  = $(BOOT_DIR)/boot.o
+GRUB_OBJ  = $(GRUB_DIR)/grub.o
 C_OBJECTS = $(C_SOURCES:.c=.o)
-C_DEPS = $(C_SOURCES:.c=.d)
+C_DEPS    = $(C_SOURCES:.c=.d)
 
-# Check if Rust library exists
+# Check if Rust library configuration exists
 ifeq ($(wildcard $(RUST_LIB_DIR)/Cargo.toml),$(RUST_LIB_DIR)/Cargo.toml)
     RUST_LIB = $(RUST_LIB_DIR)/target/i686-radiumos/release/libradiumos_rust.a
     USE_RUST = yes
@@ -45,9 +53,28 @@ endif
 
 # Output files
 KERNEL_BIN = os.bin
-ISO_FILE = os.iso
-DISK_IMG = disk.img
+ISO_FILE   = os.iso
+DISK_IMG   = disk.img
 
+# ---------------------------------------------------------------------
+# NETWORKING CONFIGURATION
+# ---------------------------------------------------------------------
+NETWORK_MODE   ?= user
+TAP_IFACE      ?= tap0
+TAP_USER       ?= $(USER)
+TAP_AUTO_SETUP ?= 1
+
+ifeq ($(NETWORK_MODE),tap)
+    NETWORK_FLAGS = -netdev tap,id=net0,ifname=$(TAP_IFACE),script=no,downscript=no
+else ifeq ($(NETWORK_MODE),user)
+    NETWORK_FLAGS = -netdev user,id=net0
+else
+    $(error Unsupported NETWORK_MODE='$(NETWORK_MODE)'; use NETWORK_MODE=user or NETWORK_MODE=tap)
+endif
+
+# ---------------------------------------------------------------------
+# QEMU FLAGS
+# ---------------------------------------------------------------------
 QEMU_FLAGS = -display sdl \
   -rtc base=utc,clock=host,driftfix=slew \
   -m 4G \
@@ -59,20 +86,23 @@ QEMU_FLAGS = -display sdl \
   -serial pty \
   -debugcon file:debug.log \
   -global isa-debugcon.iobase=0xE9 \
-  -netdev user,id=net0 \
+    $(NETWORK_FLAGS) \
   -device rtl8139,netdev=net0 \
   -vga std \
   -global VGA.vgamem_mb=16 \
   -audiodev pa,id=audio0 \
   -machine pcspk-audiodev=audio0 \
-  -d guest_errors
+  -d guest_errors,int,cpu_reset,page \
+  -D qemu_panic.log \
+  -no-reboot
 
-# Default target
+# ---------------------------------------------------------------------
+# MAIN TARGETS
+# ---------------------------------------------------------------------
 .PHONY: all
-all: check-rust-status verify-sources $(ISO_FILE) $(DISK_IMG) verify-symbols
+all: check-rust-status verify-sources verify-symbols $(ISO_FILE) $(DISK_IMG)
 	@echo "✓ Build complete and verified"
 
-# Check Rust status
 .PHONY: check-rust-status
 check-rust-status:
 ifeq ($(USE_RUST),yes)
@@ -82,7 +112,7 @@ else
 endif
 
 # ---------------------------------------------------------------------
-# SOURCE VERIFICATION
+# SOURCE & SYMBOL VERIFICATION
 # ---------------------------------------------------------------------
 .PHONY: verify-sources
 verify-sources:
@@ -98,9 +128,6 @@ verify-sources:
 		echo "  ⚠ WARNING: no C sources found under $(SRC_DIR)/"; \
 	fi
 
-# ---------------------------------------------------------------------
-# SYMBOL VERIFICATION
-# ---------------------------------------------------------------------
 .PHONY: verify-symbols
 verify-symbols: $(KERNEL_BIN)
 	@echo "Verifying symbol resolution in $(KERNEL_BIN)..."
@@ -117,7 +144,7 @@ verify-symbols: $(KERNEL_BIN)
 .PHONY: check-symbol
 check-symbol: $(KERNEL_BIN)
 	@if [ -z "$(SYM)" ]; then echo "Usage: make check-symbol SYM=funcname"; exit 1; fi
-	@RESULT=$$($(NM) $(KERNEL_BIN) | grep -w "$(SYM)"); \
+	@RESULT=$$($(NM) $(KERNEL_BIN) 2>/dev/null | grep -w "$(SYM)"); \
 	if [ -z "$$RESULT" ]; then \
 		echo "✗ '$(SYM)' not found in binary at all (not compiled/linked)"; \
 	else \
@@ -126,7 +153,9 @@ check-symbol: $(KERNEL_BIN)
 		echo "$$RESULT" | grep -qi ' T \| t ' && echo "✓ '$(SYM)' is defined (has real code)"; \
 	fi
 
-# Build kernel binary
+# ---------------------------------------------------------------------
+# COMPILATION & LINKING
+# ---------------------------------------------------------------------
 $(KERNEL_BIN): $(BOOT_OBJ) $(GRUB_OBJ) $(C_OBJECTS) $(RUST_LIB)
 	@echo "Linking kernel..."
 ifeq ($(USE_RUST),yes)
@@ -137,28 +166,31 @@ endif
 	@echo "✓ Kernel binary created: $(KERNEL_BIN)"
 
 $(BOOT_OBJ): $(BOOT_ASM)
+	@mkdir -p $(dir $@)
 	@echo "Building boot.asm"
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 $(GRUB_OBJ): $(GRUB_ASM)
+	@mkdir -p $(dir $@)
 	@echo "Building grub.asm"
 	$(NASM) $(NASMFLAGS) $< -o $@
 
-# Build C object files (Headers tracked automatically via .d files)
 %.o: %.c
+	@mkdir -p $(dir $@)
 	@echo "Compiling C: $<"
 	$(CC) $(CFLAGS) $< -o $@
 
-# Build Rust library with Cargo
 ifeq ($(USE_RUST),yes)
 $(RUST_LIB): $(RUST_SOURCES) i686-radiumos.json .cargo/config.toml
 	@echo "Building Rust library with Cargo..."
-	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Z json-target-spec --target ../i686-radiumos.json
+	cd $(RUST_LIB_DIR) && $(CARGO) +nightly build --release -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem --target ../i686-radiumos.json
 	@echo "✓ Rust library built"
 endif
 
-# Create bootable ISO
-$(ISO_FILE): $(KERNEL_BIN)
+# ---------------------------------------------------------------------
+# IMAGE GENERATION
+# ---------------------------------------------------------------------
+$(ISO_FILE): $(KERNEL_BIN) verify-symbols
 	@echo "Making a bootable ISO"
 	@mkdir -p $(ISO_DIR)/boot/grub
 	@echo 'set timeout=0' > $(ISO_DIR)/boot/grub/grub.cfg
@@ -171,7 +203,6 @@ $(ISO_FILE): $(KERNEL_BIN)
 	grub-mkrescue -o $@ $(ISO_DIR) 2>/dev/null
 	@echo "✓ ISO created"
 
-# Create FAT12 disk image
 $(DISK_IMG):
 	@echo "Creating FAT12 disk image"
 	@rm -f $@
@@ -184,6 +215,9 @@ $(DISK_IMG):
 	fi
 	@echo "✓ Disk image created"
 
+# ---------------------------------------------------------------------
+# HELPER SCRIPTS & TARGETS
+# ---------------------------------------------------------------------
 define SERIAL_LISTENER_SCRIPT
 #!/bin/sh
 PTS_PATH="$$1"
@@ -192,19 +226,48 @@ CLIP_CMD=""
 if command -v wl-copy >/dev/null 2>&1; then CLIP_CMD="wl-copy"; elif command -v xclip >/dev/null 2>&1; then CLIP_CMD="xclip -selection clipboard"; elif command -v xsel >/dev/null 2>&1; then CLIP_CMD="xsel -i -b"; fi
 ACCUM=""
 while IFS= read -r line || [ -n "$$line" ]; do
-	CLEAN=$$(echo "$$line" | tr -d '\r')
-	if [ -z "$$CLEAN" ]; then
-		if [ -n "$$ACCUM" ]; then
-			echo "      [Serial: Clipboard Updated]"
-			if [ -n "$$CLIP_CMD" ]; then printf "%s" "$$ACCUM" | $$CLIP_CMD; else printf "%s" "$$ACCUM" > "$$CLIPFILE"; fi
-			ACCUM=""
-		fi
-	else
-		if [ -z "$$ACCUM" ]; then ACCUM="$$CLEAN"; else ACCUM="$${ACCUM}\n$$CLEAN"; fi
-	fi
+    CLEAN=$$(echo "$$line" | tr -d '\r')
+    if [ -z "$$CLEAN" ]; then
+        if [ -n "$$ACCUM" ]; then
+            echo "      [Serial: Clipboard Updated]"
+            if [ -n "$$CLIP_CMD" ]; then printf "%s" "$$ACCUM" | $$CLIP_CMD; else printf "%s" "$$ACCUM" > "$$CLIPFILE"; fi
+            ACCUM=""
+        fi
+    else
+        if [ -z "$$ACCUM" ]; then ACCUM="$${ACCUM}\n$$CLEAN"; else ACCUM="$${ACCUM}\n$$CLEAN"; fi
+    fi
 done < "$$PTS_PATH"
 endef
 export SERIAL_LISTENER_SCRIPT
+
+.PHONY: tap-setup
+tap-setup:
+	@command -v ip >/dev/null 2>&1 || { echo "✗ ip command not found"; exit 1; }
+	@if ip link show $(TAP_IFACE) >/dev/null 2>&1; then \
+		echo "✓ TAP interface already exists: $(TAP_IFACE)"; \
+	else \
+		echo "Creating TAP interface $(TAP_IFACE) for $(TAP_USER)..."; \
+		sudo ip tuntap add dev $(TAP_IFACE) mode tap user $(TAP_USER); \
+	fi
+	@sudo ip link set $(TAP_IFACE) up
+	@echo "✓ $(TAP_IFACE) is ready"
+	@echo "Run: make run NETWORK_MODE=tap TAP_IFACE=$(TAP_IFACE)"
+
+.PHONY: tap-clean
+tap-clean:
+	@if ip link show $(TAP_IFACE) >/dev/null 2>&1; then \
+		sudo ip tuntap del dev $(TAP_IFACE) mode tap; \
+		echo "✓ Removed $(TAP_IFACE)"; \
+	else \
+		echo "TAP interface $(TAP_IFACE) does not exist"; \
+	fi
+
+.PHONY: network-help
+network-help:
+	@echo "Default NAT:   make run"
+	@echo "TAP capture:   make tap-setup && make run NETWORK_MODE=tap"
+	@echo "TAP cleanup:   make tap-clean"
+	@echo "Interface:     TAP_IFACE=$(TAP_IFACE)"
 
 .PHONY: run
 run: all
@@ -212,7 +275,19 @@ run: all
 	@echo "Booting RadiumOS"
 	@echo "========================================="
 	@command -v xclip >/dev/null 2>&1 || command -v wl-copy >/dev/null 2>&1 || echo "[!] WARNING: No clipboard tool (xclip/wl-copy) found."
-	@QEMU_LOG=$$(mktemp); CLIP_FILE=$$(mktemp); trap "rm -f $$QEMU_LOG $$CLIP_FILE" EXIT; \
+	@QEMU_LOG="qemu_execution.log"; CLIP_FILE=$$(mktemp); TAP_CREATED=0; \
+	trap 'if [ "$$TAP_CREATED" = "1" ]; then sudo ip tuntap del dev $(TAP_IFACE) mode tap; fi; rm -f "$$CLIP_FILE"' EXIT; \
+	if [ "$(NETWORK_MODE)" = "tap" ] && [ "$(TAP_AUTO_SETUP)" = "1" ]; then \
+		command -v ip >/dev/null 2>&1 || { echo "✗ ip command not found; cannot configure TAP"; exit 1; }; \
+		if ip link show $(TAP_IFACE) >/dev/null 2>&1; then \
+			echo "✓ Using existing TAP interface: $(TAP_IFACE)"; \
+		else \
+			echo "Creating TAP interface $(TAP_IFACE) for $(TAP_USER)..."; \
+			sudo ip tuntap add dev $(TAP_IFACE) mode tap user $(TAP_USER) || exit 1; \
+			TAP_CREATED=1; \
+		fi; \
+		sudo ip link set $(TAP_IFACE) up || exit 1; \
+	fi; \
 	$(QEMU) $(QEMU_FLAGS) > $$QEMU_LOG 2>&1 & QEMU_PID=$$!; echo "[1] QEMU PID: $$QEMU_PID"; \
 	PTS_PATH=""; echo "[*] Waiting for Serial Port (PTY) path..."; \
 	for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -230,7 +305,6 @@ run: all
 	if [ "$$BRIDGE_PID" != "0" ]; then kill $$BRIDGE_PID 2>/dev/null; fi; \
 	echo "[!] QEMU closed."
 
-# Debug target
 .PHONY: debug
 debug: all
 	@echo "========================================="
@@ -239,7 +313,6 @@ debug: all
 	@echo "========================================="
 	$(QEMU) $(QEMU_FLAGS) -s -S
 
-# Snapshot/Backup target
 .PHONY: backup
 backup:
 	@echo "Creating source snapshot..."
@@ -249,13 +322,12 @@ backup:
 		Makefile linker.ld 2>/dev/null || true
 	@echo "✓ Snapshot saved to $(BACKUP_DIR)/"
 
-# Clean build artifacts
 .PHONY: clean
 clean:
 	@echo "Cleaning up..."
 	@rm -f $(BOOT_OBJ) $(GRUB_OBJ) $(C_OBJECTS) $(C_DEPS)
 	@if [ -d "$(RUST_LIB_DIR)" ]; then cd $(RUST_LIB_DIR) && cargo clean 2>/dev/null || true; fi
-	@rm -f $(KERNEL_BIN) $(ISO_FILE) $(DISK_IMG) test.txt debug.log
+	@rm -f $(KERNEL_BIN) $(ISO_FILE) $(DISK_IMG) test.txt debug.log qemu_execution.log qemu_panic.log
 	@rm -rf $(ISO_DIR)/boot/$(KERNEL_BIN)
 	@echo "✓ Clean complete"
 
@@ -307,6 +379,7 @@ help:
 	@echo "Build & Run:"
 	@echo "  make              - Build everything"
 	@echo "  make run          - Build and run in QEMU"
+	@echo "  make run NETWORK_MODE=tap - Run QEMU with TAP networking"
 	@echo "  make debug        - Run in QEMU, pause for GDB connection (:1234)"
 	@echo "  make backup       - Create a tarball of your source code"
 	@echo "  make rebuild      - Clean and rebuild"
@@ -315,6 +388,11 @@ help:
 	@echo "  make verify-sources        - List which .c files are picked up"
 	@echo "  make verify-symbols        - Fail if any undefined symbols remain"
 	@echo "  make check-symbol SYM=name - Check if a function is really linked"
+	@echo ""
+	@echo "Networking:"
+	@echo "  make network-help - Show user-mode and TAP networking commands"
+	@echo "  make tap-setup    - Create and configure TAP_IFACE"
+	@echo "  make tap-clean    - Remove TAP_IFACE"
 	@echo ""
 	@echo "Rust:"
 	@echo "  make init-rust  - Setup Rust support"

@@ -2,10 +2,9 @@
 #include "../terminal/terminal.h"
 #include "../Avfs/Avfs.h"
 
-#define MEMORY_POOL_SIZE 1024
+#define MEMORY_POOL_SIZE 33554432 // 32 MB
 static char memory_pool[MEMORY_POOL_SIZE];
 static size_t allocated_size = 0;
-
 
 typedef struct Block {
     size_t size;        // Size of usable memory (not including header)
@@ -83,11 +82,9 @@ int parse_int(const char* str) {
 static Block* heap_start = NULL;
 
 void* malloc(size_t size) {
-
     Block* current = heap_start;
     Block* prev = NULL;
 
-    
     if (!size) {
         print("malloc: size is 0, returning NULL\n");
         return NULL;
@@ -95,8 +92,21 @@ void* malloc(size_t size) {
     
     size = (size + 7) & ~7;
 
-    
-    // First-fit search through ALL blocks
+    // Coalesce adjacent free blocks to eliminate fragmentation
+    Block* coalesce = heap_start;
+    while (coalesce && coalesce->next) {
+        if (coalesce->is_free && coalesce->next->is_free) {
+            coalesce->size += sizeof(Block) + coalesce->next->size;
+            coalesce->next = coalesce->next->next;
+            continue; // Re-evaluate in case of 3+ consecutive free blocks
+        }
+        coalesce = coalesce->next;
+    }
+
+    // Reset current pointer to the start of the heap for the search
+    current = heap_start;
+
+    // First-fit search through all blocks
     while (current) {
         if (current->is_free && current->size >= size) {
             // Found suitable block

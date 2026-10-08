@@ -41,6 +41,8 @@ static size_t cursor_position = 0;
 static size_t selection_start = (size_t)-1;
 static size_t selection_end   = (size_t)-1;
 
+static volatile uint8_t scancode_capture_depth = 0;
+
 static char   clipboard[COMMAND_BUFFER_SIZE];
 static size_t clipboard_len = 0;
 #define FREEZE_CLIP_SIZE (VGA_WIDTH * VGA_HEIGHT * 3) // chars + \r\n per row, worst case
@@ -55,6 +57,19 @@ typedef struct {
 } UndoSnapshot;
 
 static UndoSnapshot undo_snapshot = { .valid = false };
+
+#define MAX_BACKGROUND_COMMANDS 4
+static char background_commands[MAX_BACKGROUND_COMMANDS][COMMAND_BUFFER_SIZE];
+static size_t background_command_head = 0;
+static size_t background_command_tail = 0;
+static size_t background_command_count = 0;
+static bool background_runner_active = false;
+static int background_command_pid = -1;
+
+// ── Helios .rxe executor (rust_lib/src/helios.rs) ──────────────────────────
+// Called when the user types ./filename — resolves <name>.rxe in AVFS,
+// validates RXE magic (rejects non-RadiumOS binaries), and runs the VM.
+extern int helios_exec_file(const char *path);
 
 // ============================================================
 // Forward Declarations (Fixes compile errors)
@@ -81,6 +96,9 @@ static size_t word_left(const char *buf, size_t pos);
 static size_t word_right(const char *buf, size_t pos, size_t len);
 static bool process_extended_byte(uint8_t ext, char *command_buffer, size_t *command_length);
 static bool freeze_handle_key(uint8_t scan_code, char *command_buffer, size_t *command_length);
+static bool execute_command_segment(const char *command, bool record_history);
+static void background_command_task(void);
+static bool prepare_background_append(const char *command);
 
 // ============================================================
 // Implementation of Helpers
@@ -839,6 +857,39 @@ int tab_complete(char *command_buffer, size_t *command_length) {
 
 bool is_key_pressed(void) { return (port_byte_in(0x64) & 0x01) != 0; }
 
+static uint32_t scancode_irq_save(void) {
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static void scancode_irq_restore(uint32_t flags) {
+    if (flags & 0x200u) __asm__ volatile("sti" ::: "memory");
+}
+
+int keyboard_poll_scancode(void) {
+    if (scancode_capture_depth == 0 || !is_key_pressed()) return -1;
+    return port_byte_in(0x60);
+}
+
+void keyboard_clear_scancodes(void) {
+    uint32_t flags = scancode_irq_save();
+    for (int i = 0; i < 32 && is_key_pressed(); i++) port_byte_in(0x60);
+    scancode_irq_restore(flags);
+}
+
+void keyboard_scancode_capture_begin(void) {
+    uint32_t flags = scancode_irq_save();
+    if (scancode_capture_depth < UINT8_MAX) scancode_capture_depth++;
+    scancode_irq_restore(flags);
+}
+
+void keyboard_scancode_capture_end(void) {
+    uint32_t flags = scancode_irq_save();
+    if (scancode_capture_depth > 0) scancode_capture_depth--;
+    scancode_irq_restore(flags);
+}
+
 void keyboard_await(const char *message, bool clear_screen) {
     if (clear_screen) terminal_clear();
     if (message != NULL) {
@@ -856,123 +907,224 @@ void keyboard_await(const char *message, bool clear_screen) {
     }
 }
 
-void execute_command_extern(const char *cmd) {
-    if (!cmd || cmd[0] == '\0') return;
+static bool execute_command_segment(const char *command, bool record_history) {
+    if (!command || command[0] == '\0') return true;
+    if (record_history) add_to_history(command);
 
-    // Make a mutable copy since strtok modifies the string
     char buf[COMMAND_BUFFER_SIZE];
-    strncpy(buf, cmd, COMMAND_BUFFER_SIZE - 1);
+    strncpy(buf, command, COMMAND_BUFFER_SIZE - 1);
     buf[COMMAND_BUFFER_SIZE - 1] = '\0';
 
-    // Tokenize into argc/argv
     char *argv[MAX_ARGUMENTS];
-    int   argc  = 0;
-    char *token = strtok(buf, " ");
+    int argc = 0;
+    char *token = strtok(buf, " \t");
     while (token && argc < MAX_ARGUMENTS) {
         argv[argc++] = token;
-        token = strtok(NULL, " ");
+        token = strtok(NULL, " \t");
     }
-    if (argc == 0) return;
+    if (argc == 0) return true;
 
-    // Search registered command table
-    for (size_t i = 0; i < command_count; i++) {
-        if (strcmp(argv[0], commands[i].name) == 0) {
-            commands[i].execute(argc, argv);
-            return;
-        }
-    }
-
-    // Not found — print error
-    print("! unknown command: ");
-    print(argv[0]);
-    print(" !\n");
-}
-
-void execute_command(const char *command) {
-    if (strcmp(command, "") == 0) return;
-    add_to_history(command);
-    char *argv[MAX_ARGUMENTS];
-    int   argc  = 0;
-    char *token = strtok((char *)command, " ");
-    while (token && argc < MAX_ARGUMENTS) {
-        argv[argc++] = token;
-        token = strtok(NULL, " ");
-    }
-    if (argc == 0) return;
-
-    // "> file" sends a command's output to a file, ">> file" appends
-    // (echo handles its own redirection)
     int redirect_index = -1;
     int append_mode = 0;
     if (strcmp(argv[0], "echo") != 0) {
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], ">") == 0) { redirect_index = i; break; }
-            if (strcmp(argv[i], ">>") == 0) { redirect_index = i; append_mode = 1; break; }
+        for (int index = 1; index < argc; index++) {
+            if (strcmp(argv[index], ">") == 0) { redirect_index = index; break; }
+            if (strcmp(argv[index], ">>") == 0) { redirect_index = index; append_mode = 1; break; }
         }
     }
 
-    for (size_t i = 0; i < command_count; i++) {
-        if (strcmp(argv[0], commands[i].name) == 0) {
-            if (redirect_index == -1) {
-                commands[i].execute(argc, argv);
-            } else {
-                if (redirect_index + 1 >= argc) {
-                    print("\n! missing filename after ");
-                    print(append_mode ? ">>" : ">");
-                    print(" !\n");
-                    return;
-                }
+    for (size_t index = 0; index < command_count; index++) {
+        if (strcmp(argv[0], commands[index].name) != 0) continue;
+        if (redirect_index == -1) {
+            commands[index].execute(argc, argv);
+            return true;
+        }
+        if (redirect_index + 1 >= argc) {
+            print("\n! missing filename after ");
+            print(append_mode ? ">>" : ">");
+            print(" !\n");
+            return false;
+        }
 
-                char *file = argv[redirect_index + 1];
+        char *file = argv[redirect_index + 1];
+        if (avfs_is_directory(file)) {
+            print("\n! "); print(file); print(" is a directory !\n");
+            return false;
+        }
+        if (append_mode) {
+            if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) {
+                print("\n! could not create "); print(file); print(" !\n");
+                return false;
+            }
+        } else {
+            if (avfs_file_exists(file) && avfs_remove_file(file) != 0) {
+                print("\n! could not replace "); print(file); print(" !\n");
+                return false;
+            }
+            if (avfs_create_file(file, 0) != 0) {
+                print("\n! could not create "); print(file); print(" !\n");
+                return false;
+            }
+        }
+        if (terminal_begin_capture(file) != 0) {
+            print("\n! could not start capture for "); print(file); print(" !\n");
+            return false;
+        }
+        commands[index].execute(redirect_index, argv);
+        if (terminal_end_capture() != 0) {
+            print("\n! disk full while writing "); print(file); print(" !\n");
+            return false;
+        }
+        return true;
+    }
+    // ── ./ executable dispatch ────────────────────────────────────────────────
+    // Syntax:  ./filename [args...]
+    // RadiumOS resolves <filename>.rxe from AVFS and runs it through the
+    // Helios VM.  The RXE magic check inside helios_exec_file rejects any
+    // binary that isn't a native RadiumOS executable.
+    //
+    // Examples:
+    //   ./hello          → loads hello.rxe, runs it
+    //   ./counter        → loads counter.rxe, runs it
+    //   ./myapp.rxe      → explicit extension also accepted
+    if (argv[0][0] == '.' && argv[0][1] == '/') {
+        const char *path = argv[0] + 2;   // strip the leading "./"
+        if (path[0] == '\0') {
+            print("\n! ./ requires a filename, e.g. ./hello !\n");
+            return false;
+        }
 
-                if (avfs_is_directory(file)) {
-                    print("\n! ");
-                    print(file);
-                    print(" is a directory !\n");
-                    return;
-                }
+        terminal_setcolor(VGA_COLOR_LIGHT_CYAN);
+        print("[helios] executing: ");
+        print(argv[0]);
+        terminal_setcolor(VGA_COLOR_WHITE);
+        print("\n");
 
-                if (append_mode) {
-                    // >> keeps existing contents; only create if missing
-                    if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) {
-                        print("\n! could not create ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
-                } else {
-                    if (avfs_file_exists(file) && avfs_remove_file(file) != 0) {
-                        print("\n! could not replace ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
+        int result = helios_exec_file(path);
 
-                    if (avfs_create_file(file, 0) != 0) {
-                        print("\n! could not create ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
-                }
-
-                if (terminal_begin_capture(file) != 0) {
-                    print("\n! could not start capture for ");
-                    print(file);
-                    print(" !\n");
-                    return;
-                }
-                commands[i].execute(redirect_index, argv);
-                if (terminal_end_capture() != 0) {
-                    print("\n! disk full while writing ");
-                    print(file);
-                    print(" !\n");
+        if (result < 0) {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED);
+            print("[helios] process exited with error code: ");
+            // print result as decimal
+            {
+                char _rbuf[12];
+                int _rn = (result < 0) ? -result : result;
+                int _ri = 0;
+                if (result < 0) { print("-"); }
+                if (_rn == 0) { print("0"); }
+                else {
+                    while (_rn > 0) { _rbuf[_ri++] = '0' + (_rn % 10); _rn /= 10; }
+                    while (_ri > 0) terminal_putchar(_rbuf[--_ri]);
                 }
             }
+            print("\n");
+            terminal_setcolor(VGA_COLOR_WHITE);
+            return false;
+        }
+
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        print("(kernel)->[helios] process exited: 0\n");
+        terminal_setcolor(VGA_COLOR_WHITE);
+        return true;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    print("\n! unknown command: "); print(argv[0]); print(" !\n");
+    return false;
+}
+
+static void background_command_task(void) {
+    while (background_command_count != 0) {
+        execute_command(background_commands[background_command_head]);
+        background_commands[background_command_head][0] = '\0';
+        background_command_head = (background_command_head + 1) % MAX_BACKGROUND_COMMANDS;
+        background_command_count--;
+    }
+    background_runner_active = false;
+    background_command_pid = -1;
+    cleanup_task(get_current_pid());
+    for (;;) asm volatile("hlt");
+}
+
+static bool prepare_background_append(const char *command) {
+    char copy[COMMAND_BUFFER_SIZE];
+    strncpy(copy, command, COMMAND_BUFFER_SIZE - 1);
+    copy[COMMAND_BUFFER_SIZE - 1] = '\0';
+    char *token = strtok(copy, " \t");
+    while (token) {
+        if (strcmp(token, ">>") == 0) {
+            char *file = strtok(NULL, " \t");
+            if (!file || avfs_is_directory(file)) return false;
+            if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) return false;
+            return true;
+        }
+        token = strtok(NULL, " \t");
+    }
+    return true;
+}
+
+void execute_command_extern(const char *cmd) {
+    execute_command(cmd);
+}
+
+void execute_command(const char *command) {
+    if (!command || command[0] == '\0') return;
+    add_to_history(command);
+
+    const char *actual_command = command;
+    bool silent = command[0] == '[' && command[1] == 's' && command[2] == ']';
+    if (silent) {
+        actual_command = command + 3;
+        while (*actual_command == ' ' || *actual_command == '\t') actual_command++;
+        if (*actual_command == '\0') {
+            print("\n! [s] requires a command !\n");
             return;
         }
+        if (background_command_count == MAX_BACKGROUND_COMMANDS) {
+            print("\n! silent command queue is full; try again shortly !\n");
+            return;
+        }
+        if (!prepare_background_append(actual_command)) {
+            print("\n! could not prepare the silent command output file !\n");
+            return;
+        }
+        strncpy(background_commands[background_command_tail], actual_command, COMMAND_BUFFER_SIZE - 1);
+        background_commands[background_command_tail][COMMAND_BUFFER_SIZE - 1] = '\0';
+        background_command_tail = (background_command_tail + 1) % MAX_BACKGROUND_COMMANDS;
+        background_command_count++;
+        if (!background_runner_active) {
+            background_runner_active = true;
+            background_command_pid = create_task((uint32_t)background_command_task, 0, 0, true, 20);
+        }
+        if (background_command_pid < 0) {
+            background_runner_active = false;
+            background_command_count--;
+            background_command_tail = (background_command_tail + MAX_BACKGROUND_COMMANDS - 1) % MAX_BACKGROUND_COMMANDS;
+            background_commands[background_command_tail][0] = '\0';
+            print("\n! could not start silent command !\n");
+        } else {
+            yield();
+        }
+        return;
     }
-    print("\n! unknown command !\n");
+
+    char chain[COMMAND_BUFFER_SIZE];
+    strncpy(chain, actual_command, COMMAND_BUFFER_SIZE - 1);
+    chain[COMMAND_BUFFER_SIZE - 1] = '\0';
+    char *segment = chain;
+    for (;;) {
+        char *separator = NULL;
+        for (char *cursor = segment; cursor[0] != '\0'; cursor++) {
+            if (cursor[0] == '&' && cursor[1] == '&') { separator = cursor; break; }
+        }
+        if (separator) *separator = '\0';
+        while (*segment == ' ' || *segment == '\t') segment++;
+        char *end = segment + strlen(segment);
+        while (end > segment && (end[-1] == ' ' || end[-1] == '\t')) *--end = '\0';
+        if (*segment == '\0' || !execute_command_segment(segment, false)) return;
+        if (!separator) return;
+        segment = separator + 2;
+    }
 }
 
 // ============================================================
@@ -1379,7 +1531,7 @@ void keyboard_handler(void) {
     static char   command_buffer[COMMAND_BUFFER_SIZE];
     static size_t command_length = 0;
 
-    if (!is_key_pressed()) return;
+    if (scancode_capture_depth > 0 || !is_key_pressed()) return;
     uint8_t scan_code = inb(0x60);
 
     // 1. Handle Freeze Mode (Screen Selection/Copy)
@@ -1623,6 +1775,9 @@ void keyboard_read_input(void) {
 // keyboard_input (blocking single-line read)
 // ============================================================
 int keyboard_input(char *userinput) {
+    if (userinput == NULL) return -2;
+    keyboard_scancode_capture_begin();
+    keyboard_clear_scancodes();
     static char command_buffer[COMMAND_BUFFER_SIZE];
     size_t command_length = 0;
 
@@ -1633,8 +1788,12 @@ int keyboard_input(char *userinput) {
     memset(command_buffer, 0, COMMAND_BUFFER_SIZE);
 
     while (true) {
-        if (!is_key_pressed()) continue;
-        uint8_t scan_code = port_byte_in(0x60);
+        int queued_scan_code = keyboard_poll_scancode();
+        if (queued_scan_code < 0) {
+            __asm__ volatile("pause");
+            continue;
+        }
+        uint8_t scan_code = (uint8_t)queued_scan_code;
 
         // Update call to pass buffer args
         if (freeze_handle_key(scan_code, command_buffer, &command_length)) continue;
@@ -1661,10 +1820,11 @@ int keyboard_input(char *userinput) {
         if (g_ctrl_pressed) {
             if (scan_code == 0x2E) {
                 terminal_putchar('^'); terminal_putchar('C'); terminal_putchar('\n');
+                keyboard_scancode_capture_end();
                 return -1;
             }
             if (scan_code == 0x1E) {
-                if (command_length > 0) { terminal_putchar('\n'); userinput[0] = '\0'; return -3; }
+                if (command_length > 0) { terminal_putchar('\n'); userinput[0] = '\0'; keyboard_scancode_capture_end(); return -3; }
                 continue;
             }
             if (scan_code == 0x2C) {
@@ -1729,8 +1889,13 @@ int keyboard_input(char *userinput) {
             command_buffer[command_length] = '\0';
             print("\n");
             add_to_history(command_buffer);
-            strncpy(userinput, command_buffer, COMMAND_BUFFER_SIZE);
-            userinput[COMMAND_BUFFER_SIZE - 1] = '\0';
+            
+            // FIX: Only copy up to the actual string length, capped at 255
+            // to ensure it safely fits within the malloc(256) buffer from Helios.
+            size_t copy_len = (command_length < 255) ? command_length : 255;
+            strncpy(userinput, command_buffer, copy_len);
+            userinput[copy_len] = '\0'; // Guarantee null termination
+            keyboard_scancode_capture_end();
             return 0;
         }
         if (scan_code == 0x0E) { // Backspace

@@ -503,15 +503,19 @@ int avfs_write_file(const char* name, const void* buffer, uint32_t size, uint32_
     avfs_file_entry_t* f = &avfs.files[file_index];
     if (f->type != AVFS_TYPE_FILE) return -3;
     
-    // Check 1: Ensure the requested write fits within the file's declared size
-    if (offset + size > f->size) return -2;
+    uint32_t new_end = offset + size;
+    if (new_end > f->size) {
+        // Automatically grow the file blocks and update size to fit the write
+        int res = avfs_truncate(name, (int)new_end);
+        if (res != 0) return res;
+        
+        // Re-fetch pointer in case avfs_truncate relocated the file block in memory
+        f = &avfs.files[file_index];
+    }
 
     uint32_t start_addr = f->start_block * AVFS_BLOCK_SIZE + offset;
-    
-    // FIX: Check 2: Ensure the write operation does not overflow the global data buffer
-    // This prevents the crash if the file metadata says the file is big, but the buffer is small.
     if (start_addr + size > AVFS_DATA_SIZE) {
-        return -4; // New error code for buffer overflow
+        return -4; // Buffer overflow check
     }
 
     memcpy(&avfs.data[start_addr], buffer, size);

@@ -1,4 +1,3 @@
-
 #include "../utility/utility.h"
 #include "../Avfs/Avfs.h"
 #include "../terminal/terminal.h"
@@ -23,6 +22,16 @@ void createFiles(void) {
     avfs_create_dir("./~");  // Hidden system directory
     
     done("Created directory structure", "filesystem");
+
+   // Discord authorization is loaded by discord.me at runtime.
+   const char* discord_token = 
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+   avfs_create_file("/var/token", strlen(discord_token));
+   avfs_write_file("/var/token", discord_token, strlen(discord_token), 0);
+   done("Created Discord authorization file", "/var/token");
     
     const char* erm = "\n ";
     avfs_create_file("/unholy/page1.txt", strlen(erm));
@@ -5167,6 +5176,541 @@ const char* hello_html =
 avfs_create_file("/home/user/hello.html", strlen(hello_html));
 avfs_write_file("/home/user/hello.html", hello_html, strlen(hello_html), 0);
 done("Updated hello world with CSS & New Tags", "hello.html");
+const char* panic_idt_rsh =
+    "% IDT is a global in .bss, kernel loads at 0x100000\n"
+    "% .bss starts after .text .rodata .data — typically ~0x108000 range\n"
+    "% IDT entry is 8 bytes, entry 13 (GPF) is at idt_base + 13*8 = idt_base + 104\n"
+    "% We read first to find the real base by scanning for valid IDT entries\n"
+    "% (valid entries have selector=0x08 and flags=0x8E)\n"
+    "\n"
+    "% scan from 0x108000 upward in 4KB steps to find idt[] base\n"
+    "set scan 0x108000\n"
+    "set scan_end 0x200000\n"
+    "set step 0x1000\n"
+    "set idt_base 0\n"
+    "\n"
+    "while $scan < $scan_end\n"
+    "    mem.read $scan w0\n"
+    "    inc scan 4\n"
+    "    mem.read $scan w1\n"
+    "    dec scan 4\n"
+    "\n"
+    "    % check if word1 upper byte looks like IDT flags (0x8E or 0xEE)\n"
+    "    % and selector field (word1 low = 0x0008)\n"
+    "    band $w1 0x0000FFFF sel\n"
+    "    band $w1 0xFF000000 attr\n"
+    "\n"
+    "    if $sel == 8 do\n"
+    "        if $attr == 0x8E000000 do\n"
+    "            set idt_base $scan\n"
+    "            echo [panic_idt] Found IDT base at $idt_base\n"
+    "        endif\n"
+    "    endif\n"
+    "\n"
+    "    if $idt_base > 0 do\n"
+    "        set scan $scan_end\n"
+    "    endif\n"
+    "\n"
+    "    inc scan $step\n"
+    "endwhile\n"
+    "\n"
+    "if $idt_base == 0 do\n"
+    "    echo [panic_idt] IDT scan failed - using fallback 0x10A000\n"
+    "    set idt_base 0x10A000\n"
+    "endif\n"
+    "\n"
+    "% GPF handler is entry 13 = offset 104 bytes into IDT\n"
+    "% Each IDTEntry: isr_low(2) selector(2) reserved(1) attributes(1) isr_high(2) = 8 bytes\n"
+    "% Read existing handler so we can log it\n"
+    "set gpf_offset $idt_base\n"
+    "inc gpf_offset 104\n"
+    "\n"
+    "mem.read $gpf_offset gpf_word0\n"
+    "inc gpf_offset 4\n"
+    "mem.read $gpf_offset gpf_word1\n"
+    "\n"
+    "echo [panic_idt] GPF entry word0=$gpf_word0 word1=$gpf_word1\n"
+    "\n"
+    "% Now corrupt — overwrite isr_low and isr_high with garbage\n"
+    "% handler will point to 0xBEEF00AD — unmapped, triple fault on next GPF\n"
+    "dec gpf_offset 4\n"
+    "mem.write $gpf_offset 0xBEEF0000\n"
+    "inc gpf_offset 4\n"
+    "mem.write $gpf_offset 0x00AD008E\n"
+    "\n"
+    "echo [panic_idt] GPF handler corrupted. System will triple fault on next GPF.\n"
+    "echo [panic_idt] Trigger: access any bad address or run an invalid instruction.";
+    avfs_create_file("/home/user/panic_idt.rsh", strlen(panic_idt_rsh));
+    avfs_write_file("/home/user/panic_idt.rsh", panic_idt_rsh, strlen(panic_idt_rsh), 0);
+    done("Created panic_idt.rsh", "/home/user/panic_idt.rsh");
+
+    const char* panic_stack_rsh =
+    "% Kernel task stacks start at 0x200000, each task gets 0x4000 bytes\n"
+    "% allocate_kernel_stack() hands out 0x204000, 0x208000, 0x20C000...\n"
+    "% The idle/boot task stack is the very first one at 0x200000-0x204000\n"
+    "% ESP sits somewhere near the TOP of that range (stack grows down)\n"
+    "% We walk from top downward overwriting anything that looks like a\n"
+    "% return address (in kernel code space: 0x100000 - 0x400000)\n"
+    "\n"
+    "set STACK_TOP 0x204000\n"
+    "set STACK_BOT 0x200000\n"
+    "set ptr $STACK_TOP\n"
+    "set step 4\n"
+    "set killed 0\n"
+    "\n"
+    "echo [panic_stack] Walking boot task stack 0x200000-0x204000\n"
+    "echo [panic_stack] Poisoning kernel return addresses with 0xDEADC0DE\n"
+    "\n"
+    "while $ptr > $STACK_BOT\n"
+    "    dec ptr $step\n"
+    "    mem.read $ptr val\n"
+    "\n"
+    "    if $val > 0x100000 do\n"
+    "        if $val < 0x400000 do\n"
+    "            mem.write $ptr 0xDEADC0DE\n"
+    "            inc killed 1\n"
+    "        endif\n"
+    "    endif\n"
+    "endwhile\n"
+    "\n"
+    "echo [panic_stack] Poisoned $killed return addresses.\n"
+    "echo [panic_stack] Panic fires on next function return in boot task.";
+    avfs_create_file("/home/user/panic_stack.rsh", strlen(panic_stack_rsh));
+    avfs_write_file("/home/user/panic_stack.rsh", panic_stack_rsh, strlen(panic_stack_rsh), 0);
+    done("Created panic_stack.rsh", "/home/user/panic_stack.rsh");
+
+    const char* panic_gdt_rsh =
+    "% GDT is gdt_entries[] global in .bss, right after IDT in memory\n"
+    "% Layout: 6 entries * 8 bytes = 48 bytes total\n"
+    "% entry 0: null\n"
+    "% entry 1: kernel code  (0x9A access, base=0, limit=0xFFFFFFFF)\n"
+    "% entry 2: kernel data  (0x92 access, base=0, limit=0xFFFFFFFF)\n"
+    "% entry 3: user code    (0xFA)\n"
+    "% entry 4: user data    (0xF2)\n"
+    "% entry 5: TSS          (0x89)\n"
+    "%\n"
+    "% We find gdt_entries by reading the GDTR register indirectly —\n"
+    "% gdt_pointer.base is stored just before idt[] or just after in .bss\n"
+    "% Scan for the GDT by looking for the null descriptor pattern (8 zero bytes)\n"
+    "% followed by a valid kernel code descriptor\n"
+    "\n"
+    "set scan 0x108000\n"
+    "set scan_end 0x200000\n"
+    "set step 8\n"
+    "set gdt_base 0\n"
+    "\n"
+    "while $scan < $scan_end\n"
+    "    mem.read $scan w0\n"
+    "    inc scan 4\n"
+    "    mem.read $scan w1\n"
+    "    dec scan 4\n"
+    "\n"
+    "    % null descriptor: both words zero\n"
+    "    if $w0 == 0 do\n"
+    "        if $w1 == 0 do\n"
+    "            % check next entry for kernel code descriptor signature\n"
+    "            % kernel code: limit_low=0xFFFF, base_low=0x0000 → word0=0x0000FFFF\n"
+    "            set next $scan\n"
+    "            inc next 8\n"
+    "            mem.read $next kc0\n"
+    "            if $kc0 == 0x0000FFFF do\n"
+    "                set gdt_base $scan\n"
+    "                echo [panic_gdt] Found GDT at $gdt_base\n"
+    "                set scan $scan_end\n"
+    "            endif\n"
+    "        endif\n"
+    "    endif\n"
+    "\n"
+    "    inc scan $step\n"
+    "endwhile\n"
+    "\n"
+    "if $gdt_base == 0 do\n"
+    "    echo [panic_gdt] GDT scan failed - using fallback 0x109000\n"
+    "    set gdt_base 0x109000\n"
+    "endif\n"
+    "\n"
+    "% Corrupt entry 2 (kernel data segment) — offset 16 bytes from base\n"
+    "% Zero out the entire descriptor — limit becomes 0, base becomes 0\n"
+    "% kernel data accesses will immediately fault\n"
+    "set kd_off $gdt_base\n"
+    "inc kd_off 16\n"
+    "\n"
+    "mem.read $kd_off before0\n"
+    "inc kd_off 4\n"
+    "mem.read $kd_off before1\n"
+    "dec kd_off 4\n"
+    "\n"
+    "echo [panic_gdt] Kernel data seg before: $before0 $before1\n"
+    "echo [panic_gdt] Zeroing kernel data segment descriptor...\n"
+    "\n"
+    "mem.write $kd_off 0x00000000\n"
+    "inc kd_off 4\n"
+    "mem.write $kd_off 0x00000000\n"
+    "\n"
+    "echo [panic_gdt] Kernel data segment destroyed.\n"
+    "echo [panic_gdt] Next kernel data access will GPF.";
+    avfs_create_file("/home/user/panic_gdt.rsh", strlen(panic_gdt_rsh));
+    avfs_write_file("/home/user/panic_gdt.rsh", panic_gdt_rsh, strlen(panic_gdt_rsh), 0);
+    done("Created panic_gdt.rsh", "/home/user/panic_gdt.rsh");
+    // ===== HELIOS LANGUAGE EXAMPLES =====
+    // Helios is RadiumOS's custom C-like language.
+    // Source: .hls  →  compile with: helios compile <src.hls> <out.rxe>
+    //         then run:              ./out  (or: helios run out.rxe)
+
+    // ── hello.hls ─────────────────────────────────────────────────────────────
+    // Classic first program: prints a greeting and exits.
+    const char* hls_hello =
+        "// hello.hls — Helios hello world\n"
+        "// author: scp_2801\n"
+        "\n"
+        "fn main() -> void {\n"
+        "    print(\"Hello from Helios!\\n\");\n"
+        "    print(\"Running on RadiumOS — i686 bare metal.\\n\");\n"
+        "}\n";
+    avfs_create_file("/home/user/hello.hls", strlen(hls_hello));
+    avfs_write_file("/home/user/hello.hls", hls_hello, strlen(hls_hello), 0);
+    done("Created Helios hello-world source", "hello.hls");
+
+    // ── counter.hls ───────────────────────────────────────────────────────────
+    // Demonstrates: let, while loop, arithmetic, print of integers.
+const char* hls_counter =
+    "// counter.hls — count from 1 to 10\n"
+    "// author: scp_2801\n"
+    "\n"
+    "fn main() -> void {\n"
+    "    for i in 1..=10 {\n"
+    "        print(i);\n"
+    "        print(\"\\n\");\n"
+    "    }\n"
+    "    print(\"Done.\\n\");\n"
+    "}\n";
+avfs_create_file("/home/user/counter.hls", strlen(hls_counter));
+avfs_write_file("/home/user/counter.hls", hls_counter, strlen(hls_counter), 0);
+done("Created Helios counter source", "counter.hls");
+
+    // ── fizzbuzz.hls ──────────────────────────────────────────────────────────
+    // Demonstrates: fn calls, if/else chains, modulo operator.
+    const char* hls_fizzbuzz =
+        "// fizzbuzz.hls — classic FizzBuzz 1..20\n"
+        "// author: scp_2801\n"
+        "\n"
+        "fn fizzbuzz(int n) -> void {\n"
+        "    let int r3 = n % 3;\n"
+        "    let int r5 = n % 5;\n"
+        "    if (r3 == 0) {\n"
+        "        if (r5 == 0) {\n"
+        "            print(\"FizzBuzz\\n\");\n"
+        "        } else {\n"
+        "            print(\"Fizz\\n\");\n"
+        "        }\n"
+        "    } else {\n"
+        "        if (r5 == 0) {\n"
+        "            print(\"Buzz\\n\");\n"
+        "        } else {\n"
+        "            print(n);\n"
+        "            print(\"\\n\");\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fn main() -> void {\n"
+        "    let int i = 1;\n"
+        "    while (i <= 20) {\n"
+        "        fizzbuzz(i);\n"
+        "        i = i + 1;\n"
+        "    }\n"
+        "}\n";
+    avfs_create_file("/home/user/fizzbuzz.hls", strlen(hls_fizzbuzz));
+    avfs_write_file("/home/user/fizzbuzz.hls", hls_fizzbuzz, strlen(hls_fizzbuzz), 0);
+    done("Created Helios fizzbuzz source", "fizzbuzz.hls");
+
+// 1. Create the math utility module
+const char* math_content = 
+    "// math.hls - Utility module\n"
+    "fn add(int a, int b) -> int {\n"
+    "    return a + b;\n"
+    "}\n\n"
+    "fn multiply(int a, int b) -> int {\n"
+    "    return a * b;\n"
+    "}\n";
+
+avfs_create_file("/home/user/math.hls", strlen(math_content));
+avfs_write_file("/home/user/math.hls", (char*)math_content, strlen(math_content), 0);
+
+// 2. Create the main program
+const char* main_content = 
+    "// main.hls - Main entry point\n"
+    "include \"math.hls\";\n\n"
+    "fn main() -> void {\n"
+    "    let int x = 10;\n"
+    "    let int y = 5;\n"
+    "    \n"
+    "    let int sum = multiply(x, y);\n"
+    "    print(sum);\n"
+    "}\n";
+
+avfs_create_file("/home/user/main.hls", strlen(main_content));
+avfs_write_file("/home/user/main.hls", (char*)main_content, strlen(main_content), 0);
+
+ // ── keyboard.hls — PS/2 Keyboard Driver & Poller ──────────────────────────
+    // Demonstrates: direct port I/O (inb/outb), scancode parsing, and event loops.
+    // author: scp_2801
+    // Define the Helios source code as a C string
+const char *hls_keyboard = 
+    "// keyboard.hls — low-level PS/2 keyboard driver\n"
+    "// Type a line and press Enter. Ctrl+C cancels input.\n"
+    "fn main() {\n"
+    "    print(\"Keyboard input demo\\nType a line, then press Enter:\\n\");\n"
+    "    print_char(62);\n"
+    "    print_char(32);\n"
+    "    let line = input();\n"
+    "    print(\"You entered: \");\n"
+    "    print_str(line);\n"
+    "    print(\"\\nDone.\\n\");\n"
+    "}\n";
+
+    avfs_create_file("/home/user/keyboard.hls", strlen(hls_keyboard));
+    avfs_write_file("/home/user/keyboard.hls", hls_keyboard, strlen(hls_keyboard), 0);
+    done("Created Helios PS/2 keyboard driver source", "keyboard.hls");
+
+const char* hls_prp_demo =
+    "using::prp::selftest;\n"
+    "using::prp::keygen;\n"
+    "using::prp::sha256_file;\n"
+    "fn main() {\n"
+    "    print(\"PRP self-test:\");\n"
+    "    print_char(32);\n"
+    "    let test_result = selftest();\n"
+    "    print(test_result);\n"
+    "    print(\"\\nGenerating demo key pair:\");\n"
+    "    print_char(32);\n"
+    "    let key_result = keygen(\"/tmp/helios-demo-key\");\n"
+    "    print(key_result);\n"
+    "    let digest = malloc(32);\n"
+    "    let hash_result = sha256_file(\"/README.txt\", digest);\n"
+    "    print(\"\\nREADME SHA-256 status:\");\n"
+    "    print_char(32);\n"
+    "    print(hash_result);\n"
+    "    if hash_result == 0 {\n"
+    "        print(\"\\nDigest:\");\n"
+    "        print_char(32);\n"
+    "        for i in 0..32 { print_hex(peek8(digest + i)); }\n"
+    "    }\n"
+    "    free(digest);\n"
+    "    print(\"\\nDone.\\n\");\n"
+    "}\n";
+avfs_create_file("/home/user/prp_demo.hls", strlen(hls_prp_demo));
+avfs_write_file("/home/user/prp_demo.hls", hls_prp_demo, strlen(hls_prp_demo), 0);
+done("Created Helios PRP API demo", "prp_demo.hls");
+
+const char* vga_demo =
+    "const VGA_MEM: int = 0xB8000;\n"
+    "const COLS:    int = 80;\n"
+    "const ROWS:    int = 50;\n"
+    "\n"
+    "fn make_cell(ch: int, color: int) -> int {\n"
+    "    return ch | (color << 8);\n"
+    "}\n"
+    "\n"
+    "fn write_vga(x: int, y: int, cell_val: int) {\n"
+    "    let offset = (y * COLS + x) * 2;\n"
+    "    let target = VGA_MEM + offset;\n"
+    "    unsafe {\n"
+    "        poke16(target, cell_val);\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "fn clear_screen(bg_color: int) {\n"
+    "    let blank = make_cell(32, bg_color);\n"
+    "    let x = 0;\n"
+    "    let y = 0;\n"
+    "    for y in 0..ROWS {\n"
+    "        for x in 0..COLS {\n"
+    "            write_vga(x, y, blank);\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "fn print_string(x: int, y: int, s: str, color: int) {\n"
+    "    let i = 0;\n"
+    "    let len = strlen(s);\n"
+    "    for i in 0..len {\n"
+    "        let char_str = strsub(s, i, 1);\n"
+    "        let ascii_val = char_code(char_str);\n"
+    "        write_vga(x + i, y, make_cell(ascii_val, color));\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "fn draw_box(x1: int, y1: int, x2: int, y2: int, border_color: int, bg_color: int) {\n"
+    "    let x = 0;\n"
+    "    let y = 0;\n"
+    "    let fill_cell = make_cell(32, bg_color);\n"
+    "    for y in (y1 + 1)..y2 {\n"
+    "        for x in (x1 + 1)..x2 {\n"
+    "            write_vga(x, y, fill_cell);\n"
+    "        }\n"
+    "    }\n"
+    "    let h_cell = make_cell(205, border_color);\n"
+    "    for x in (x1 + 1)..x2 {\n"
+    "        write_vga(x, y1, h_cell);\n"
+    "        write_vga(x, y2, h_cell);\n"
+    "    }\n"
+    "    let v_cell = make_cell(186, border_color);\n"
+    "    for y in (y1 + 1)..y2 {\n"
+    "        write_vga(x1, y, v_cell);\n"
+    "        write_vga(x2, y, v_cell);\n"
+    "    }\n"
+    "    write_vga(x1, y1, make_cell(201, border_color));\n"
+    "    write_vga(x2, y1, make_cell(187, border_color));\n"
+    "    write_vga(x1, y2, make_cell(200, border_color));\n"
+    "    write_vga(x2, y2, make_cell(188, border_color));\n"
+    "}\n"
+    "\n"
+    "fn main() {\n"
+    "    clear_screen(0x07);\n"
+    "    let box_x1 = 25;\n"
+    "    let box_y1 = 10;\n"
+    "    let box_x2 = 55;\n"
+    "    let box_y2 = 14;\n"
+    "    let border_attr = 0x1B;\n"
+    "    let bg_attr     = 0x1E;\n"
+    "    draw_box(box_x1, box_y1, box_x2, box_y2, border_attr, bg_attr);\n"
+    "    let message = \"Hello, World!\";\n"
+    "    let text_x = box_x1 + 9;\n"
+    "    let text_y = box_y1 + 2;\n"
+    "    print_string(text_x, text_y, message, 0x1E);\n"
+    "}\n";
+
+avfs_create_file("/home/user/vga_demo.hls", strlen(vga_demo));
+avfs_write_file("/home/user/vga_demo.hls", vga_demo, strlen(vga_demo), 0);
+done("Created Helios VGA demo source", "vga_demo.hls");
+const char* fetch_demo = 
+"// ============================================================================\n"
+"//  fetch_demo.hls - Helios HTTP Networking Demo\n"
+"// ============================================================================\n"
+"\n"
+"using::fetch::get;\n"
+"using::fetch::active;\n"
+"\n"
+"fn check_network_status() {\n"
+"    print(\"Checking network subsystem status...\\n\");\n"
+"    let busy = active();\n"
+"    if busy == 1 {\n"
+"        print(\"  Status: Network stack is currently busy.\\n\");\n"
+"    } else {\n"
+"        print(\"  Status: Network stack is idle and ready.\\n\");\n"
+"    }\n"
+"}\n"
+"\n"
+"fn fetch_url_data(url: str) {\n"
+"    print(\"Initiating GET request to: \");\n"
+"    print_str(url);\n"
+"    print(\"\\n\");\n"
+"    \n"
+"    let status_code = get(url);\n"
+"    \n"
+"    print(\"Transaction complete. Server returned status code: \");\n"
+"    print(status_code);\n"
+"    print(\"\\n\");\n"
+"    \n"
+"    if status_code == 200 {\n"
+"        print(\"Success: Data pulled successfully.\\n\");\n"
+"    } else {\n"
+"        if status_code < 0 {\n"
+"            print(\"Error: Low-level socket or networking failure occurred.\\n\");\n"
+"        } else {\n"
+"            print(\"Warning: Received a non-200 HTTP response.\\n\");\n"
+"        }\n"
+"    }\n"
+"}\n"
+"\n"
+"fn main() {\n"
+"    print(\"--- Helios Fetch API Demonstration ---\\n\\n\");\n"
+"    check_network_status();\n"
+"    print(\"\\n\");\n"
+"    fetch_url_data(\"http://example.com\");\n"
+"    print(\"\\n\");\n"
+"    print(\"--- Demo Finished ---\\n\");\n"
+"}";
+
+avfs_create_file("/home/user/fetch_demo.hls", strlen(fetch_demo));
+avfs_write_file("/home/user/fetch_demo.hls", fetch_demo, strlen(fetch_demo), 0);
+done("Created Helios fetch demo source", "fetch_demo.hls");
+
+const char* hls_basics =
+    "fn main() -> void {\n"
+    "    let arr[5] = 0;\n"
+    "    for i in 0..5 {\n"
+    "        arr[i] = i;\n"
+    "    }\n"
+    "    let sum = 0;\n"
+    "    let j = 0;\n"
+    "    while (j < 5) {\n"
+    "        sum += arr[j];\n"
+    "        j += 1;\n"
+    "    }\n"
+    "    print(\"The sum is: \");\n"
+    "    print(sum);\n"
+    "}\n";
+
+avfs_create_file("/home/user/basics.hls", strlen(hls_basics));
+avfs_write_file("/home/user/basics.hls", hls_basics, strlen(hls_basics), 0);
+done("Created Helios basics source", "basics.hls");
+
+
+const char* hls_hardware =
+    "fn main() -> void {\n"
+    "    unsafe {\n"
+    "        asm!(\"cli\");\n"
+    "        let vga_ptr = 0xB8000;\n"
+    "        let char_data = *vga_ptr;\n"
+    "        print(\"Data at 0xB8000: \");\n"
+    "        print_hex(char_data);\n"
+    "        asm!(\"sti\");\n"
+    "    }\n"
+    "}\n";
+
+avfs_create_file("/home/user/hardware.hls", strlen(hls_hardware));
+avfs_write_file("/home/user/hardware.hls", hls_hardware, strlen(hls_hardware), 0);
+done("Created Helios hardware source", "hardware.hls");
+const char* hls_ps_linear =
+    "// ps_linear.hls — Direct Task Check (No Loops)\n"
+    "// author: scp_2801\n"
+    "\n"
+    "fn main() -> void {\n"
+    "    print(\"[*] Checking specific memory address for Task...\\n\");\n"
+    "    \n"
+    "    // Change this to the exact memory address where your kernel allocates its first task\n"
+    "    let target_addr = 0x100000;\n"
+    "    let task_magic = 0x5441534B; // 'TASK'\n"
+    "    \n"
+    "    unsafe {\n"
+    "        let val = peek(target_addr, 32);\n"
+    "        \n"
+    "        if val == task_magic {\n"
+    "            let pid = peek(target_addr + 4, 32);\n"
+    "            let state = peek(target_addr + 8, 32);\n"
+    "            \n"
+    "            print(\"[+] Task Found!\\n\");\n"
+    "            print(\" | PID: \");\n"
+    "            print(pid);\n"
+    "            print(\" | State: \");\n"
+    "            print(state);\n"
+    "            print(\"\\n\");\n"
+    "        } else {\n"
+    "            print(\"[-] No task magic found at address.\\n\");\n"
+    "        }\n"
+    "    }\n"
+    "    \n"
+    "    print(\"[*] Linear execution complete.\\n\");\n"
+    "}\n";
+
+avfs_create_file("/home/user/ps_linear.hls", strlen(hls_ps_linear));
+avfs_write_file("/home/user/ps_linear.hls", hls_ps_linear, strlen(hls_ps_linear), 0);
+done("Created Helios linear task checker", "ps_linear.hls");
+
+
+
     avfs_chdir("/home/user");
     
 }

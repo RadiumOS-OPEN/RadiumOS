@@ -1,3 +1,4 @@
+
 #[cfg(target_os = "none")]
 mod command;
 #[cfg(target_os = "none")]
@@ -228,9 +229,14 @@ pub(crate) fn exchange_plain<T: Transport>(
     max_size: usize,
 ) -> Result<Response, Error> {
     transport.write(request)?;
-    let limit = max_size
-        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
-        .ok_or(Error::Message("invalid size limit"))?;
+    let is_unlimited = max_size == 0 || max_size == usize::MAX;
+    let limit = if is_unlimited {
+        usize::MAX
+    } else {
+        max_size
+            .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
+            .ok_or(Error::Message("invalid size limit"))?
+    };
     let mut incoming = [0u8; 4096];
     let mut response = Vec::new();
     loop {
@@ -242,7 +248,7 @@ pub(crate) fn exchange_plain<T: Transport>(
             return parse_response(&response, head, max_size, true)?
                 .ok_or(Error::Message("incomplete HTTP response"));
         }
-        if count > limit.saturating_sub(response.len()) {
+        if !is_unlimited && count > limit.saturating_sub(response.len()) {
             return Err(Error::Message("response exceeds --max-size"));
         }
         response.extend_from_slice(&incoming[..count]);
@@ -277,6 +283,8 @@ pub(crate) fn exchange_tls<T: Transport>(
     let mut written = 0;
     let mut sent = false;
     let mut response = Vec::new();
+    let is_unlimited = max_size == 0 || max_size == usize::MAX;
+
     loop {
         let status = connection.process_tls_records(&mut incoming[..used]);
         let mut discard = status.discard;
@@ -306,11 +314,13 @@ pub(crate) fn exchange_tls<T: Transport>(
                 while let Some(record) = state.next_record() {
                     let record = record?;
                     discard += record.discard;
-                    let limit = max_size
-                        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
-                        .ok_or(Error::Message("invalid size limit"))?;
-                    if record.payload.len() > limit.saturating_sub(response.len()) {
-                        return Err(Error::Message("response exceeds --max-size"));
+                    if !is_unlimited {
+                        let limit = max_size
+                            .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
+                            .ok_or(Error::Message("invalid size limit"))?;
+                        if record.payload.len() > limit.saturating_sub(response.len()) {
+                            return Err(Error::Message("response exceeds --max-size"));
+                        }
                     }
                     response.extend_from_slice(record.payload);
                 }
@@ -456,6 +466,7 @@ fn parse_response_at(
     if length.is_some() && chunked {
         return Err(Error::Message("ambiguous HTTP response framing"));
     }
+    let is_unlimited = max_size == 0 || max_size == usize::MAX;
     let data = &bytes[end..];
     let body = if head || status == 204 || status == 304 {
         Vec::new()
@@ -465,7 +476,7 @@ fn parse_response_at(
             None => return Ok(None),
         }
     } else if let Some(length) = length {
-        if length > max_size {
+        if !is_unlimited && length > max_size {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if data.len() < length {
@@ -473,7 +484,7 @@ fn parse_response_at(
         }
         data[..length].to_vec()
     } else {
-        if data.len() > max_size {
+        if !is_unlimited && data.len() > max_size {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if !closed {
@@ -490,6 +501,7 @@ fn parse_response_at(
 }
 
 fn decode_chunks(mut bytes: &[u8], max_size: usize) -> Result<Option<Vec<u8>>, Error> {
+    let is_unlimited = max_size == 0 || max_size == usize::MAX;
     let mut body = Vec::new();
     loop {
         let end = match bytes.windows(2).position(|w| w == b"\r\n") {
@@ -515,7 +527,7 @@ fn decode_chunks(mut bytes: &[u8], max_size: usize) -> Result<Option<Vec<u8>>, E
                 _ => Ok(None),
             };
         }
-        if size > max_size.saturating_sub(body.len()) {
+        if !is_unlimited && size > max_size.saturating_sub(body.len()) {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if bytes.len() < size + 2 {
@@ -614,3 +626,4 @@ mod tests {
             .is_empty());
     }
 }
+
