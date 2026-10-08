@@ -10,3 +10,4 @@ rust_lib/target/
 debug.log
 .DS_Store
 qemu_panic.log
+rust_lib/target/
