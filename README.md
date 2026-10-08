@@ -1,10 +1,11 @@
 # RadiumOS
 
+Bare-metal operating system for i686 architecture, written in Rust and C.
+
 # ALERT
 
 - TO RUN RADIUMOS VIA MAKEFILE YOU HAVE TO USE `make run CC=clang` UNTIL FURTHER NOTICE !
 
-Bare-metal operating system for i686 architecture, written in Rust and C.
 
 ## Features
 
