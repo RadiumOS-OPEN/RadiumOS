@@ -2,7 +2,7 @@
 #include "../terminal/terminal.h"
 #include "../Avfs/Avfs.h"
 
-#define MEMORY_POOL_SIZE 1024
+#define MEMORY_POOL_SIZE (8 * 1024 * 1024)
 static char memory_pool[MEMORY_POOL_SIZE];
 static size_t allocated_size = 0;
 
