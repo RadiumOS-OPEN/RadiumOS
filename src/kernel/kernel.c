@@ -30,6 +30,8 @@
 
 extern void script_init();
 
+extern void helios_init();
+
 // Rust multitasking
 
 extern void rust_init_multitasking(void);
@@ -595,6 +597,7 @@ keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to c
 
        //outb(0x21, inb(0x21) | 0x01); 
     enable_interrupts();
+    helios_init();
     while (1) {
         halt();
     }
