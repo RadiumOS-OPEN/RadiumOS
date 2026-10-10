@@ -428,6 +428,64 @@ bool avfs_file_exists(const char* name) {
     return avfs_find_file(name) != -1;
 }
 
+int avfs_save_file(const char* name, const void* buffer, uint32_t size, bool overwrite) {
+    if (!name || (!buffer && size) || size > AVFS_DATA_SIZE) return -1;
+    uint32_t length = 0;
+    uint32_t component = 0;
+    uint32_t components = 0;
+    while (name[length]) {
+        if (length >= AVFS_PATH_MAX - 1) return -1;
+        if ((uint8_t)name[length] < 32 || (uint8_t)name[length] == 127) return -1;
+        if (name[length] == '/') {
+            component = 0;
+            if (++components >= 64) return -1;
+        } else if (++component >= AVFS_FILENAME_MAX) return -1;
+        length++;
+    }
+    if (!length || name[length - 1] == '/') return -1;
+    if (name[0] != '/' && length + strlen(avfs.current_dir) + 1 >= AVFS_PATH_MAX) return -1;
+    if (name[0] != '/') {
+        for (uint32_t i = 0; avfs.current_dir[i]; i++) {
+            if (avfs.current_dir[i] == '/' && ++components >= 64) return -1;
+        }
+    }
+
+    char normalized[AVFS_PATH_MAX];
+    normalize_path(name, normalized);
+    int index = avfs_find_entry(normalized);
+    if (index < 0) {
+        char parent[AVFS_PATH_MAX];
+        get_parent_path(normalized, parent);
+        int parent_index = avfs_find_entry(parent);
+        if (parent_index < 0 || avfs.files[parent_index].type != AVFS_TYPE_DIR) return -1;
+        int result = avfs_create_file(normalized, size);
+        if (result != 0) return result;
+        result = avfs_write_file(normalized, buffer, size, 0);
+        if (result != 0) avfs_remove_file(normalized);
+        return result;
+    }
+    avfs_file_entry_t* file = &avfs.files[index];
+    if (!overwrite || file->type != AVFS_TYPE_FILE) return -1;
+    uint32_t blocks = (size + AVFS_BLOCK_SIZE - 1) / AVFS_BLOCK_SIZE;
+    if (!blocks) blocks = 1;
+    int start = avfs_find_free_blocks((int)blocks);
+    if (start < 0) return -2;
+
+    // Keep the old file until the replacement has its own storage.
+    if (size) memcpy(&avfs.data[(uint32_t)start * AVFS_BLOCK_SIZE], buffer, size);
+    for (uint32_t block = (uint32_t)start; block < (uint32_t)start + blocks; block++) {
+        avfs.block_bitmap[block] = 1;
+    }
+    uint32_t old_blocks = (file->size + AVFS_BLOCK_SIZE - 1) / AVFS_BLOCK_SIZE;
+    if (!old_blocks) old_blocks = 1;
+    for (uint32_t block = file->start_block; block < file->start_block + old_blocks; block++) {
+        avfs.block_bitmap[block] = 0;
+    }
+    file->start_block = (uint32_t)start;
+    file->size = size;
+    return 0;
+}
+
 bool avfs_is_directory(const char* path) {
     int index = avfs_find_entry(path);
     if (index == -1) {

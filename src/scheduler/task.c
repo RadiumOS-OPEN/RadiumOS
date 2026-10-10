@@ -125,9 +125,14 @@ void handle_interrupt(TrapFrame regs) {
     if (regs.interrupt >= 32 && regs.interrupt <= 47) {
         // Timer interrupt (IRQ 0)
         if (regs.interrupt == 32) {
-            // Call Rust scheduler instead of C scheduler
             extern void rust_schedule(void);
-            rust_schedule();
+            extern bool rust_fetch_active(void);
+            extern volatile uint32_t ticks;
+            ticks++;
+            // Fetch waits for network I/O with IRQs enabled, without nesting shell tasks.
+            outb(0x20, 0x20);
+            if (!rust_fetch_active()) rust_schedule();
+            return;
         }
         
         // Send EOI to PIC
