@@ -246,22 +246,7 @@ new_task_setup:
     mov gs, ax
     iret
 
+extern vga_set_mode13h
 global set_vga_mode13h
 set_vga_mode13h:
-    push eax
-    push edx
-    
-    mov dx, 0x3C2
-    mov al, 0x63
-    out dx, al
-    
-    mov dx, 0x3C4
-    mov al, 0x00
-    out dx, al
-    inc dx
-    mov al, 0x01
-    out dx, al
-    
-    pop edx
-    pop eax
-    ret
+    jmp vga_set_mode13h

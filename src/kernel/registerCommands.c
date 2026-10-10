@@ -52,6 +52,8 @@ extern int32_t  rust_killall_tasks(void);
 extern int rust_send_ntfy_notification(const uint8_t *message);
 extern int rust_ntfy_post_complete(const uint8_t *message, uint32_t message_len);
 extern int rust_image_editor(void);
+extern int rust_render_test_png(void);
+extern int rust_load_and_render_png(const char *filename, int x, int y);
 
 // ============================================================
 // Network / DNS / TCP
@@ -525,6 +527,14 @@ void rash(int argc, char *argv[])
 
 void rie(int argc, char *argv[]) { rust_image_editor(); }
 
+void cmd_png(int argc, char *argv[]) {
+    if (argc < 2) {
+        rust_render_test_png();
+        return;
+    }
+    rust_load_and_render_png(argv[1], 0, 0);
+}
+
 // ============================================================
 // Network commands
 // ============================================================
@@ -873,6 +883,7 @@ void registerCommands(void)
     register_command("rshidt",       "Rash interactive development tool",              rshidt_command);
     register_command("rpkg", "Radium Package Manager", cmd_rpkg);
     register_command("rie",       "Rust image editor",              rie);
+    register_command("png",       "Render PNG (Mode 13h)",          cmd_png);
     register_command("help",      "Displays this message",          help_command);
     register_command("ls",        "List directory",                 ls_command);
     register_command("cat",       "Read text file",                 cat_command);

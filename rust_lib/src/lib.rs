@@ -4,6 +4,7 @@
 #![allow(unused_variables)]
 
 mod prp;
+mod png;
 #[cfg(target_os = "none")]
 mod rchat;
 extern crate alloc;

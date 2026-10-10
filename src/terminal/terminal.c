@@ -314,6 +314,147 @@ void vga_set_80x50(void) {
     outb(0x3CE, 0x06); outb(0x3CF, 0x0E); // graphics: map at B800
 }
 
+static void vga_seq(uint8_t index, uint8_t value) {
+    outb(0x3C4, index);
+    outb(0x3C5, value);
+}
+
+static void vga_crtc(uint8_t index, uint8_t value) {
+    outb(0x3D4, index);
+    outb(0x3D5, value);
+}
+
+static void vga_gc(uint8_t index, uint8_t value) {
+    outb(0x3CE, index);
+    outb(0x3CF, value);
+}
+
+static void vga_write_crtc_table(const uint8_t *vals) {
+    outb(0x3D4, 0x11);
+    outb(0x3D5, inb(0x3D5) & 0x7F);
+    for (int i = 0; i < 25; i++) {
+        vga_crtc((uint8_t)i, vals[i]);
+    }
+}
+
+static void vga_write_attr_table(const uint8_t *vals) {
+    (void)inb(0x3DA);
+    for (int i = 0; i < 21; i++) {
+        outb(0x3C0, (uint8_t)i);
+        outb(0x3C0, vals[i]);
+    }
+    outb(0x3C0, 0x20);
+}
+
+void vga_dac_set_palette(const uint8_t *rgb, int count) {
+    if (!rgb || count <= 0) {
+        return;
+    }
+    if (count > 256) {
+        count = 256;
+    }
+    outb(0x3C6, 0xFF);
+    outb(0x3C8, 0);
+    for (int i = 0; i < count; i++) {
+        outb(0x3C9, rgb[i * 3 + 0] >> 2);
+        outb(0x3C9, rgb[i * 3 + 1] >> 2);
+        outb(0x3C9, rgb[i * 3 + 2] >> 2);
+    }
+}
+
+void vga_set_mode13h(void) {
+    static const uint8_t crtc[25] = {
+        0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F,
+        0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x9C, 0x0E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3,
+        0xFF
+    };
+    static const uint8_t gc[9] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF
+    };
+    static const uint8_t attr[21] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x41, 0x00, 0x0F, 0x00, 0x00
+    };
+
+    asm volatile ("cli");
+
+    outb(0x3C2, 0x63);
+
+    vga_seq(0x00, 0x01);
+    vga_seq(0x01, 0x01);
+    vga_seq(0x02, 0x0F);
+    vga_seq(0x03, 0x00);
+    vga_seq(0x04, 0x0E);
+    vga_seq(0x00, 0x03);
+
+    vga_write_crtc_table(crtc);
+
+    for (int i = 0; i < 9; i++) {
+        vga_gc((uint8_t)i, gc[i]);
+    }
+
+    outb(0x3C6, 0xFF);
+    vga_write_attr_table(attr);
+
+    volatile uint8_t *vram = (volatile uint8_t *)0xA0000;
+    for (int i = 0; i < 320 * 200; i++) {
+        vram[i] = 0;
+    }
+
+    asm volatile ("sti");
+}
+
+void vga_restore_text_80x50(void) {
+    static const uint8_t crtc[25] = {
+        0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F,
+        0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x50,
+        0x9C, 0x0E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3,
+        0xFF
+    };
+    static const uint8_t gc[9] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF
+    };
+    static const uint8_t attr[21] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x0C, 0x00, 0x0F, 0x08, 0x00
+    };
+    static const uint8_t text_dac[16 * 3] = {
+        0, 0, 0,       0, 0, 170,     0, 170, 0,      0, 170, 170,
+        170, 0, 0,     170, 0, 170,   170, 85, 0,     170, 170, 170,
+        85, 85, 85,    85, 85, 255,   85, 255, 85,    85, 255, 255,
+        255, 85, 85,   255, 85, 255,  255, 255, 85,   255, 255, 255
+    };
+
+    asm volatile ("cli");
+
+    outb(0x3C2, 0x67);
+
+    vga_seq(0x00, 0x01);
+    vga_seq(0x01, 0x00);
+    vga_seq(0x02, 0x03);
+    vga_seq(0x03, 0x00);
+    vga_seq(0x04, 0x03);
+    vga_seq(0x00, 0x03);
+
+    vga_write_crtc_table(crtc);
+
+    for (int i = 0; i < 9; i++) {
+        vga_gc((uint8_t)i, gc[i]);
+    }
+
+    outb(0x3C6, 0xFF);
+    vga_write_attr_table(attr);
+    vga_dac_set_palette(text_dac, 16);
+
+    asm volatile ("sti");
+
+    vga_set_80x50();
+    terminal_initialize();
+}
+
 
 
 void terminal_initialize(void) {
