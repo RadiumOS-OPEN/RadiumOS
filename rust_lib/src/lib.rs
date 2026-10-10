@@ -4,13 +4,12 @@
 #![allow(unused_variables)]
 
 mod prp;
+mod png;
 #[cfg(target_os = "none")]
 mod rchat;
 extern crate alloc;
 mod fetch;
 mod heap;
-mod aegis;
-mod helios;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 static FETCH_NETWORK_SILENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -24,9 +23,6 @@ use linked_list_allocator::LockedHeap;
 
 
 extern "C" {
-        fn rust_https_get(url: *const u8) -> i32;
-    fn rust_fetch(argc: i32, argv: *const *const u8) -> i32;
-
     // Terminal functions
     fn terminal_putchar(c: u8);
     fn terminal_clear() -> u32;
@@ -43,11 +39,11 @@ extern "C" {
     fn avfs_write_file(name: *const u8, buffer: *const u8, size: u32, offset: u32) -> i32;
     fn avfs_read_file(name: *const u8, buffer: *mut u8, size: u32, offset: u32) -> i32;
     fn avfs_append_file(name: *const u8, buffer: *const u8, size: u32) -> i32;
+    fn avfs_remove_file(name: *const u8) -> i32;
     fn avfs_get_filesize(name: *const u8) -> i32;
     fn avfs_file_exists(name: *const u8) -> bool;
     fn avfs_create_file_dir(path: *const u8) -> i32;
     fn avfs_list_directory(path: *const u8, entries: *mut u8, max_entries: i32) -> i32;
-    fn avfs_remove_file(name: *const u8) -> i32;
 pub fn get_cpu_info_struct() -> *const CPUInfo;
     // I/O functions
     fn outb(port: u16, val: u8);
@@ -13635,8 +13631,20 @@ pub extern "C" fn rust_start_demo_tasks() {
         init_net_defaults(); 
         draw_separator();
         rust_create_task_ex(keyboard_handler as u32, true, 10,  0, 0);
+        rust_create_task_ex(watchdog_task    as u32, true, 10,  0, 0);
+        
         rust_create_task_ex(heartbeat_task   as u32, true,  8,  0, 0);
         rust_create_task_ex(timed_message    as u32, true,  4,  0, 0);
+        
+        // --- NEW TASK ADDED HERE ---
+        
+        // ---------------------------
+
+        rust_create_task_ex(thermal_task     as u32, true,  7,  1, 0); 
+        rust_create_task_ex(io_stress_task   as u32, true,  5,  2, 0); 
+        rust_create_task_ex(reaper_task      as u32, true,  9,  0, 0);
+        rust_create_task_ex(affinity_task    as u32, true,  6,  0, 0);
+        rust_create_task_ex(ipc_monitor_task as u32, true,  7,  0, 0);
     }
 }
 
@@ -16988,6 +16996,7 @@ fn dispatch_cmd(
                 unsafe{terminal_setcolor(0x09);}
                 rust_print(b"Info: ");
                 let mut i=1;
+                while i<argc{rust_print(arg!(i));if i+1<argc{rust_print(b" ");}i+=1;}
                 rust_print(b"\n");
                 unsafe{terminal_setcolor(0x07);}
             }
@@ -17005,20 +17014,6 @@ fn dispatch_cmd(
                 let v=ctx.get_var(arg!(2)).unwrap_or(b"0")==b"1";
                 ctx.set_var(b"?", if v{b"1"}else{b"0"});
             }
-        }
-        b"mem.write" => {
-            // mem.write ADDR VALUE  (both hex ok)
-            if argc < 3 { rust_print(b"Usage: mem.write ADDR VAL\n"); return -1; }
-            let addr = parse_int(val!(1)) as usize;
-            let val  = parse_int(val!(2)) as u32;
-            unsafe { core::ptr::write_volatile(addr as *mut u32, val); }
-        }
-        b"mem.read" => {
-            // mem.read ADDR OUTVAR
-            if argc < 3 { rust_print(b"Usage: mem.read ADDR VAR\n"); return -1; }
-            let addr = parse_int(val!(1)) as usize;
-            let v = unsafe { core::ptr::read_volatile(addr as *const u32) };
-            ctx.set_var_int(arg!(2), v as i64);
         }
         b"^include"|b"^entrypoint" => {}
 
@@ -20798,60 +20793,43 @@ unsafe fn http_decode_chunked(body: &[u8], out: &mut [u8]) -> usize {
     }
     dst
 }
-
 //=============================================================================
-// RADIUM BROWSER (RBR) -- w3m Text Browser + ASCII Video + Form Input Edition
+// RADIUM BROWSER (RBR) -- w3m-style text browser
+// Basic-color HTML rendering + pager + link list + tiny history stack,
+// built entirely on top of the HTTP client and the existing HTML parser.
 //=============================================================================
 
 const RBR_COL_TEXT:   u8 = 0x07;
-const RBR_COL_H1:     u8 = 0x0F;
-const RBR_COL_H2:     u8 = 0x07;
-const RBR_COL_H3:     u8 = 0x07;
-const RBR_COL_LINK:   u8 = 0x0F;
+const RBR_COL_H1:     u8 = 0x0E;
+const RBR_COL_H2:     u8 = 0x0A;
+const RBR_COL_H3:     u8 = 0x0B;
+const RBR_COL_LINK:   u8 = 0x09;
 const RBR_COL_BOLD:   u8 = 0x0F;
-const RBR_COL_ITALIC: u8 = 0x07;
-const RBR_COL_CODE:   u8 = 0x07;
-const RBR_COL_QUOTE:  u8 = 0x07;
+const RBR_COL_ITALIC: u8 = 0x08;
+const RBR_COL_CODE:   u8 = 0x0D;
+const RBR_COL_QUOTE:  u8 = 0x06;
 const RBR_COL_LI:     u8 = 0x07;
 const RBR_COL_HR:     u8 = 0x08;
 const RBR_COL_STATUS: u8 = 0x70;
-const RBR_COL_ERR:    u8 = 0x04;
-const RBR_COL_VIDEO:  u8 = 0x0F;
-const RBR_COL_INPUT:  u8 = 0x70; // same as status — bright inverse for fields
-const RBR_COL_INPUT_ACTIVE: u8 = 0x3F; // cyan bg, white text when focused
+const RBR_COL_ERR:    u8 = 0x4F;
 
-const RBR_MAX_LINES:     usize = 8192;
-const RBR_LINE_LEN:      usize = 512;
-const RBR_MAX_LINKS:     usize = 512;
-const RBR_LINK_LEN:      usize = 1024;
-const RBR_MAX_HISTORY:   usize = 64;
-const RBR_URL_LEN:       usize = 1024;
-const RBR_PAGE_ROWS:     usize = 48;
-const RBR_CACHE_FILE:    &[u8] = b"/rbr_cache.html\0";
-const RBR_MAX_REDIRECTS: usize = 10;
-
-// Form input fields
-const RBR_MAX_FIELDS:    usize = 32;
-const RBR_FIELD_VAL_LEN: usize = 256;
-const RBR_FIELD_NAME_LEN:usize = 64;
-
-// ── Line ─────────────────────────────────────────────────────────────────────
+const RBR_MAX_LINES:    usize = 512;
+const RBR_LINE_LEN:     usize = 128;
+const RBR_MAX_LINKS:    usize = 64;
+const RBR_LINK_LEN:     usize = 192;
+const RBR_MAX_HISTORY:  usize = 8;
+const RBR_URL_LEN:      usize = 256;
+const RBR_PAGE_ROWS:    usize = 23; // leaves 1 status row + 1 input row on 25-line VGA text
 
 #[derive(Copy, Clone)]
 struct RbrLine {
-    text:  [u8; RBR_LINE_LEN],
-    len:   usize,
+    text: [u8; RBR_LINE_LEN],
+    len:  usize,
     color: u8,
-    // if >= 0, this line IS an input field (index into RBR_FIELDS)
-    field_idx: i32,
 }
 impl RbrLine {
-    const fn blank() -> Self {
-        Self { text: [0; RBR_LINE_LEN], len: 0, color: RBR_COL_TEXT, field_idx: -1 }
-    }
+    const fn blank() -> Self { Self { text: [0; RBR_LINE_LEN], len: 0, color: RBR_COL_TEXT } }
 }
-
-// ── Link ─────────────────────────────────────────────────────────────────────
 
 #[derive(Copy, Clone)]
 struct RbrLink {
@@ -20862,66 +20840,27 @@ impl RbrLink {
     const fn blank() -> Self { Self { url: [0; RBR_LINK_LEN], len: 0 } }
 }
 
-// ── Form field ───────────────────────────────────────────────────────────────
-
-#[derive(Copy, Clone)]
-enum RbrFieldKind { Text, Password, Submit, Checkbox }
-
-#[derive(Copy, Clone)]
-struct RbrField {
-    name:     [u8; RBR_FIELD_NAME_LEN],
-    name_len: usize,
-    value:    [u8; RBR_FIELD_VAL_LEN],
-    val_len:  usize,
-    kind:     RbrFieldKind,
-    // form action URL (shared across fields of the same form, stored on each)
-    action:   [u8; RBR_URL_LEN],
-    action_len: usize,
-    checked:  bool, // for checkbox
-}
-impl RbrField {
-    const fn blank() -> Self {
-        Self {
-            name: [0; RBR_FIELD_NAME_LEN], name_len: 0,
-            value: [0; RBR_FIELD_VAL_LEN], val_len: 0,
-            kind: RbrFieldKind::Text,
-            action: [0; RBR_URL_LEN], action_len: 0,
-            checked: false,
-        }
-    }
-}
-
-// ── Statics ───────────────────────────────────────────────────────────────────
-
-static mut RBR_LINES:           [RbrLine; RBR_MAX_LINES] = [RbrLine::blank(); RBR_MAX_LINES];
-static mut RBR_LINE_COUNT:      usize = 0;
-static mut RBR_LINKS:           [RbrLink; RBR_MAX_LINKS] = [RbrLink::blank(); RBR_MAX_LINKS];
-static mut RBR_LINK_COUNT:      usize = 0;
-static mut RBR_FIELDS:          [RbrField; RBR_MAX_FIELDS] = [RbrField::blank(); RBR_MAX_FIELDS];
-static mut RBR_FIELD_COUNT:     usize = 0;
-static mut RBR_SCROLL:          usize = 0;
-static mut RBR_STATUS:          [u8; 128] = [0; 128];
-static mut RBR_STATUS_LEN:      usize = 0;
-static mut RBR_HISTORY:         [[u8; RBR_URL_LEN]; RBR_MAX_HISTORY] = [[0; RBR_URL_LEN]; RBR_MAX_HISTORY];
-static mut RBR_HISTORY_LEN:     [usize; RBR_MAX_HISTORY] = [0; RBR_MAX_HISTORY];
-static mut RBR_HISTORY_POS:     usize = 0;
-static mut RBR_CURRENT_URL:     [u8; RBR_URL_LEN] = [0; RBR_URL_LEN];
+static mut RBR_LINES:       [RbrLine; RBR_MAX_LINES] = [RbrLine::blank(); RBR_MAX_LINES];
+static mut RBR_LINE_COUNT:  usize = 0;
+static mut RBR_LINKS:       [RbrLink; RBR_MAX_LINKS] = [RbrLink::blank(); RBR_MAX_LINKS];
+static mut RBR_LINK_COUNT:  usize = 0;
+static mut RBR_SCROLL:      usize = 0;
+static mut RBR_STATUS:      [u8; 128] = [0; 128];
+static mut RBR_STATUS_LEN:  usize = 0;
+static mut RBR_HISTORY:     [[u8; RBR_URL_LEN]; RBR_MAX_HISTORY] = [[0; RBR_URL_LEN]; RBR_MAX_HISTORY];
+static mut RBR_HISTORY_LEN: [usize; RBR_MAX_HISTORY] = [0; RBR_MAX_HISTORY];
+static mut RBR_HISTORY_POS: usize = 0;
+static mut RBR_CURRENT_URL: [u8; RBR_URL_LEN] = [0; RBR_URL_LEN];
 static mut RBR_CURRENT_URL_LEN: usize = 0;
-static mut RBR_LINK_LINE:       [usize; RBR_MAX_LINKS] = [0; RBR_MAX_LINKS];
-static mut RBR_HIGHLIGHT_IDX:   i32 = -1;  // currently highlighted link
-static mut RBR_FOCUS_FIELD:     i32 = -1;  // currently focused form field (-1 = none)
-
-// ── Status bar ───────────────────────────────────────────────────────────────
 
 unsafe fn rbr_set_status(s: &[u8]) {
-    let n = s.len().min(RBR_STATUS.len());
+    let n = s.len().min(RBR_STATUS.len() - 1);
     RBR_STATUS[..n].copy_from_slice(&s[..n]);
     RBR_STATUS_LEN = n;
 }
 
-// ── Line management ──────────────────────────────────────────────────────────
-
 unsafe fn rbr_push_line(text: &[u8], color: u8) {
+    // word-wrap to RBR_LINE_LEN, appending into RBR_LINES
     if text.is_empty() {
         if RBR_LINE_COUNT < RBR_MAX_LINES {
             RBR_LINES[RBR_LINE_COUNT] = RbrLine::blank();
@@ -20933,6 +20872,7 @@ unsafe fn rbr_push_line(text: &[u8], color: u8) {
     while pos < text.len() {
         let remaining = text.len() - pos;
         let take = remaining.min(RBR_LINE_LEN - 1);
+        // break on last space if we're mid-word and there's more text
         let mut cut = take;
         if pos + take < text.len() {
             if let Some(sp) = text[pos..pos + take].iter().rposition(|&c| c == b' ') {
@@ -20943,429 +20883,26 @@ unsafe fn rbr_push_line(text: &[u8], color: u8) {
         let line = &mut RBR_LINES[RBR_LINE_COUNT];
         let n = cut.min(RBR_LINE_LEN - 1);
         line.text[..n].copy_from_slice(&text[pos..pos + n]);
-        line.len       = n;
-        line.color     = color;
-        line.field_idx = -1;
+        line.len = n;
+        line.color = color;
         RBR_LINE_COUNT += 1;
         pos += cut;
         while pos < text.len() && text[pos] == b' ' { pos += 1; }
     }
 }
 
-unsafe fn rbr_push_field_line(field_idx: usize) {
-    if RBR_LINE_COUNT >= RBR_MAX_LINES { return; }
-    let f = &RBR_FIELDS[field_idx];
-    let mut buf = [0u8; RBR_LINE_LEN];
-    let mut idx = 0;
-
-    match f.kind {
-        RbrFieldKind::Submit => {
-            // [ Submit ] or [ button label ]
-            let label = if f.val_len > 0 { &f.value[..f.val_len] } else { b"Submit" };
-            let push = |b: &mut [u8; RBR_LINE_LEN], i: &mut usize, s: &[u8]| {
-                for &c in s { if *i < b.len() { b[*i] = c; *i += 1; } }
-            };
-            push(&mut buf, &mut idx, b"[ ");
-            push(&mut buf, &mut idx, label);
-            push(&mut buf, &mut idx, b" ]");
-        }
-        RbrFieldKind::Checkbox => {
-            let mark = if f.checked { b"[X]" as &[u8] } else { b"[ ]" };
-            for &c in mark { if idx < buf.len() { buf[idx] = c; idx += 1; } }
-            if f.name_len > 0 {
-                if idx < buf.len() { buf[idx] = b' '; idx += 1; }
-                let n = f.name_len.min(buf.len() - idx);
-                buf[idx..idx + n].copy_from_slice(&f.name[..n]);
-                idx += n;
-            }
-        }
-        RbrFieldKind::Password => {
-            // name: [****]
-            if f.name_len > 0 {
-                let n = f.name_len.min(buf.len() - idx);
-                buf[idx..idx + n].copy_from_slice(&f.name[..n]);
-                idx += n;
-                if idx + 2 < buf.len() { buf[idx] = b':'; idx += 1; buf[idx] = b' '; idx += 1; }
-            }
-            if idx < buf.len() { buf[idx] = b'['; idx += 1; }
-            let stars = f.val_len.min(buf.len().saturating_sub(idx + 1));
-            for _ in 0..stars { if idx < buf.len() { buf[idx] = b'*'; idx += 1; } }
-            // pad to 20 chars
-            let pad = (20usize).saturating_sub(stars);
-            for _ in 0..pad { if idx < buf.len() { buf[idx] = b'_'; idx += 1; } }
-            if idx < buf.len() { buf[idx] = b']'; idx += 1; }
-        }
-        RbrFieldKind::Text => {
-            // name: [value_________]
-            if f.name_len > 0 {
-                let n = f.name_len.min(buf.len() - idx);
-                buf[idx..idx + n].copy_from_slice(&f.name[..n]);
-                idx += n;
-                if idx + 2 < buf.len() { buf[idx] = b':'; idx += 1; buf[idx] = b' '; idx += 1; }
-            }
-            if idx < buf.len() { buf[idx] = b'['; idx += 1; }
-            let val_n = f.val_len.min(buf.len().saturating_sub(idx + 1));
-            buf[idx..idx + val_n].copy_from_slice(&f.value[..val_n]);
-            idx += val_n;
-            let pad = (20usize).saturating_sub(val_n);
-            for _ in 0..pad { if idx < buf.len() { buf[idx] = b'_'; idx += 1; } }
-            if idx < buf.len() { buf[idx] = b']'; idx += 1; }
-        }
-    }
-
-    let line = &mut RBR_LINES[RBR_LINE_COUNT];
-    let n = idx.min(RBR_LINE_LEN - 1);
-    line.text[..n].copy_from_slice(&buf[..n]);
-    line.len       = n;
-    line.color     = RBR_COL_INPUT;
-    line.field_idx = field_idx as i32;
-    RBR_LINE_COUNT += 1;
-}
-
 unsafe fn rbr_reset_document() {
-    RBR_LINE_COUNT    = 0;
-    RBR_LINK_COUNT    = 0;
-    RBR_FIELD_COUNT   = 0;
-    RBR_SCROLL        = 0;
-    RBR_HIGHLIGHT_IDX = -1;
-    RBR_FOCUS_FIELD   = -1;
-    for i in 0..RBR_MAX_LINKS  { RBR_LINKS[i]  = RbrLink::blank();  RBR_LINK_LINE[i] = 0; }
-    for i in 0..RBR_MAX_FIELDS { RBR_FIELDS[i] = RbrField::blank(); }
+    RBR_LINE_COUNT = 0;
+    RBR_LINK_COUNT = 0;
+    RBR_SCROLL = 0;
 }
 
-// ── JavaScript / style stripping ─────────────────────────────────────────────
-
-fn rbr_strip_javascript(input: &[u8]) -> alloc::vec::Vec<u8> {
-    let mut result = alloc::vec::Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        let is_script = i + 7 <= input.len()
-            && input[i] == b'<'
-            && (input[i+1]|0x20)==b's' && (input[i+2]|0x20)==b'c'
-            && (input[i+3]|0x20)==b'r' && (input[i+4]|0x20)==b'i'
-            && (input[i+5]|0x20)==b'p' && (input[i+6]|0x20)==b't';
-        let is_style = i + 6 <= input.len()
-            && input[i] == b'<'
-            && (input[i+1]|0x20)==b's' && (input[i+2]|0x20)==b't'
-            && (input[i+3]|0x20)==b'y' && (input[i+4]|0x20)==b'l'
-            && (input[i+5]|0x20)==b'e';
-
-        if is_script || is_style {
-            let tag_len = if is_script { 7 } else { 6 };
-            let end_tag: &[u8] = if is_script { b"script" } else { b"style" };
-            let mut j = i + tag_len;
-            let mut found = false;
-            while j + end_tag.len() + 2 < input.len() {
-                if input[j] == b'<' && input[j+1] == b'/' {
-                    let mut ok = true;
-                    for k in 0..end_tag.len() {
-                        if j+2+k >= input.len() || (input[j+2+k]|0x20) != end_tag[k] { ok=false; break; }
-                    }
-                    if ok {
-                        found = true;
-                        while j < input.len() && input[j] != b'>' { j += 1; }
-                        if j < input.len() { j += 1; }
-                        i = j;
-                        break;
-                    }
-                }
-                j += 1;
-            }
-            if !found { i += tag_len; }
-        } else {
-            result.push(input[i]);
-            i += 1;
-        }
-    }
-    result
-}
-
-// ── Raw attribute extractor ───────────────────────────────────────────────────
-// Finds attr="value" or attr=value inside a tag's attribute string.
-// Returns a Vec with the value bytes, or empty.
-
-fn rbr_get_attr<'a>(attrs: &'a [u8], name: &[u8]) -> alloc::vec::Vec<u8> {
-    let mut i = 0;
-    while i < attrs.len() {
-        // skip whitespace
-        while i < attrs.len() && (attrs[i] == b' ' || attrs[i] == b'\t'
-                || attrs[i] == b'\r' || attrs[i] == b'\n') { i += 1; }
-        if i >= attrs.len() { break; }
-        // read attribute name
-        let name_start = i;
-        while i < attrs.len() && attrs[i] != b'=' && attrs[i] != b' '
-                && attrs[i] != b'>' && attrs[i] != b'/' { i += 1; }
-        let attr_name = &attrs[name_start..i];
-        // case-insensitive compare
-        if attr_name.len() == name.len() {
-            let mut eq = true;
-            for k in 0..name.len() {
-                if (attr_name[k]|0x20) != (name[k]|0x20) { eq = false; break; }
-            }
-            if eq {
-                // skip whitespace and '='
-                while i < attrs.len() && (attrs[i] == b' ' || attrs[i] == b'=') { i += 1; }
-                let mut val = alloc::vec::Vec::new();
-                if i < attrs.len() && (attrs[i] == b'"' || attrs[i] == b'\'') {
-                    let quote = attrs[i]; i += 1;
-                    while i < attrs.len() && attrs[i] != quote { val.push(attrs[i]); i += 1; }
-                } else {
-                    while i < attrs.len() && attrs[i] != b' ' && attrs[i] != b'>' { val.push(attrs[i]); i += 1; }
-                }
-                return val;
-            }
-        }
-        // skip to next attr (past any value)
-        if i < attrs.len() && attrs[i] == b'=' {
-            i += 1;
-            if i < attrs.len() && (attrs[i] == b'"' || attrs[i] == b'\'') {
-                let q = attrs[i]; i += 1;
-                while i < attrs.len() && attrs[i] != q { i += 1; }
-                if i < attrs.len() { i += 1; }
-            } else {
-                while i < attrs.len() && attrs[i] != b' ' && attrs[i] != b'>' { i += 1; }
-            }
-        }
-    }
-    alloc::vec::Vec::new()
-}
-
-// ── Fallback raw HTML link + form scanner ─────────────────────────────────────
-// Called after rbr_build_document when link/field counts are still 0,
-// or always for forms since the HTML element parser likely doesn't handle them.
-// Scans raw HTML for <a href>, <form action>, <input>, <textarea>, <button>.
-
-unsafe fn rbr_scan_raw_html(html: &[u8]) {
-    let mut i = 0;
-    // current form action
-    let mut form_action     = [0u8; RBR_URL_LEN];
-    let mut form_action_len = 0usize;
-    let mut form_method     = false; // false=GET, true=POST
-
-    while i < html.len() {
-        if html[i] != b'<' { i += 1; continue; }
-        i += 1; // skip '<'
-        if i >= html.len() { break; }
-
-        // closing tag — skip
-        if html[i] == b'/' {
-            while i < html.len() && html[i] != b'>' { i += 1; }
-            if i < html.len() { i += 1; }
-            continue;
-        }
-
-        // read tag name
-        let tag_start = i;
-        while i < html.len() && html[i] != b' ' && html[i] != b'>' && html[i] != b'\t'
-                && html[i] != b'\r' && html[i] != b'\n' && html[i] != b'/' { i += 1; }
-        let tag = &html[tag_start..i];
-
-        // read attribute string (everything until '>')
-        let attr_start = i;
-        let mut depth = 0i32;
-        while i < html.len() {
-            if html[i] == b'"' || html[i] == b'\'' {
-                let q = html[i]; i += 1;
-                while i < html.len() && html[i] != q { i += 1; }
-            }
-            if i < html.len() && html[i] == b'>' { i += 1; break; }
-            if i < html.len() { i += 1; }
-        }
-        let attrs = if attr_start < i.saturating_sub(1) { &html[attr_start..i-1] } else { b"" };
-
-        // ── <a href="...">
-        let is_a = tag.len() == 1 && (tag[0]|0x20) == b'a';
-        if is_a {
-            let href = rbr_get_attr(attrs, b"href");
-            if !href.is_empty() && RBR_LINK_COUNT < RBR_MAX_LINKS {
-                // collect link text (until </a>)
-                let text_start = i;
-                let mut j = i;
-                while j + 3 < html.len() {
-                    if html[j]==b'<' && html[j+1]==b'/' && (html[j+2]|0x20)==b'a' { break; }
-                    j += 1;
-                }
-                let raw_text = &html[text_start..j];
-                // strip any inner tags from text
-                let text = rbr_strip_tags(raw_text);
-                let text_clean = text.trim_ascii();
-                if text_clean.is_empty() { continue; }
-
-                let link_id = RBR_LINK_COUNT;
-                let l = &mut RBR_LINKS[link_id];
-                let n = href.len().min(RBR_LINK_LEN - 1);
-                l.url[..n].copy_from_slice(&href[..n]);
-                l.len = n;
-                RBR_LINK_LINE[link_id] = RBR_LINE_COUNT;
-                RBR_LINK_COUNT += 1;
-
-                let mut buf = [0u8; RBR_LINE_LEN];
-                let mut idx = 0;
-                buf[idx] = b'['; idx += 1;
-                let mut nb = [0u8; 12];
-                let ns = u32_to_dec(link_id as u32, &mut nb);
-                for &c in ns { if idx < buf.len() { buf[idx] = c; idx += 1; } }
-                if idx < buf.len() { buf[idx] = b']'; idx += 1; }
-                if idx < buf.len() { buf[idx] = b' '; idx += 1; }
-                let tn = text_clean.len().min(buf.len().saturating_sub(idx));
-                buf[idx..idx+tn].copy_from_slice(&text_clean[..tn]);
-                idx += tn;
-                rbr_push_line(&buf[..idx], RBR_COL_LINK);
-            }
-            continue;
-        }
-
-        // ── <form action="..." method="...">
-        let is_form = tag.len() == 4
-            && (tag[0]|0x20)==b'f' && (tag[1]|0x20)==b'o'
-            && (tag[2]|0x20)==b'r' && (tag[3]|0x20)==b'm';
-        if is_form {
-            let action = rbr_get_attr(attrs, b"action");
-            let method = rbr_get_attr(attrs, b"method");
-            let n = action.len().min(RBR_URL_LEN - 1);
-            form_action[..n].copy_from_slice(&action[..n]);
-            form_action_len = n;
-            form_method = method.len() >= 4
-                && (method[0]|0x20)==b'p' && (method[1]|0x20)==b'o'
-                && (method[2]|0x20)==b's' && (method[3]|0x20)==b't';
-            continue;
-        }
-
-        // ── <input ...>
-        let is_input = tag.len() == 5
-            && (tag[0]|0x20)==b'i' && (tag[1]|0x20)==b'n'
-            && (tag[2]|0x20)==b'p' && (tag[3]|0x20)==b'u'
-            && (tag[4]|0x20)==b't';
-        if is_input && RBR_FIELD_COUNT < RBR_MAX_FIELDS {
-            let type_v  = rbr_get_attr(attrs, b"type");
-            let name_v  = rbr_get_attr(attrs, b"name");
-            let value_v = rbr_get_attr(attrs, b"value");
-            let ph_v    = rbr_get_attr(attrs, b"placeholder");
-
-            // determine kind
-            let kind = if type_v.len() >= 6
-                    && (type_v[0]|0x20)==b's' && (type_v[1]|0x20)==b'u'
-                    && (type_v[2]|0x20)==b'b' && (type_v[3]|0x20)==b'm'
-                    && (type_v[4]|0x20)==b'i' && (type_v[5]|0x20)==b't' {
-                RbrFieldKind::Submit
-            } else if type_v.len() >= 4
-                    && (type_v[0]|0x20)==b'p' && (type_v[1]|0x20)==b'a'
-                    && (type_v[2]|0x20)==b's' && (type_v[3]|0x20)==b's' {
-                RbrFieldKind::Password
-            } else if type_v.len() >= 6
-                    && (type_v[0]|0x20)==b'c' && (type_v[1]|0x20)==b'h'
-                    && (type_v[2]|0x20)==b'e' && (type_v[3]|0x20)==b'c'
-                    && (type_v[4]|0x20)==b'k' {
-                RbrFieldKind::Checkbox
-            } else if type_v.len() >= 6
-                    && (type_v[0]|0x20)==b'h' && (type_v[1]|0x20)==b'i'
-                    && (type_v[2]|0x20)==b'd' {
-                // hidden — skip rendering but might need for submit
-                continue;
-            } else {
-                RbrFieldKind::Text
-            };
-
-            let fi = RBR_FIELD_COUNT;
-            let f  = &mut RBR_FIELDS[fi];
-            f.kind = kind;
-
-            // name
-            let nn = name_v.len().min(RBR_FIELD_NAME_LEN - 1);
-            f.name[..nn].copy_from_slice(&name_v[..nn]);
-            f.name_len = nn;
-
-            // value / placeholder
-            let src = if !value_v.is_empty() { &value_v } else { &ph_v };
-            let vn = src.len().min(RBR_FIELD_VAL_LEN - 1);
-            f.value[..vn].copy_from_slice(&src[..vn]);
-            f.val_len = if !value_v.is_empty() { vn } else { 0 };
-
-            // action
-            let an = form_action_len.min(RBR_URL_LEN - 1);
-            f.action[..an].copy_from_slice(&form_action[..an]);
-            f.action_len = an;
-
-            RBR_FIELD_COUNT += 1;
-            rbr_push_field_line(fi);
-            continue;
-        }
-
-        // ── <textarea name="...">
-        let is_ta = tag.len() == 8
-            && (tag[0]|0x20)==b't' && (tag[1]|0x20)==b'e'
-            && (tag[2]|0x20)==b'x' && (tag[3]|0x20)==b't'
-            && (tag[4]|0x20)==b'a' && (tag[5]|0x20)==b'r'
-            && (tag[6]|0x20)==b'e' && (tag[7]|0x20)==b'a';
-        if is_ta && RBR_FIELD_COUNT < RBR_MAX_FIELDS {
-            let name_v = rbr_get_attr(attrs, b"name");
-            let fi = RBR_FIELD_COUNT;
-            let f  = &mut RBR_FIELDS[fi];
-            f.kind = RbrFieldKind::Text;
-            let nn = name_v.len().min(RBR_FIELD_NAME_LEN - 1);
-            f.name[..nn].copy_from_slice(&name_v[..nn]);
-            f.name_len = nn;
-            let an = form_action_len.min(RBR_URL_LEN - 1);
-            f.action[..an].copy_from_slice(&form_action[..an]);
-            f.action_len = an;
-            RBR_FIELD_COUNT += 1;
-            rbr_push_field_line(fi);
-            continue;
-        }
-
-        // ── <button type="submit" ...>
-        let is_btn = tag.len() == 6
-            && (tag[0]|0x20)==b'b' && (tag[1]|0x20)==b'u'
-            && (tag[2]|0x20)==b't' && (tag[3]|0x20)==b't'
-            && (tag[4]|0x20)==b'o' && (tag[5]|0x20)==b'n';
-        if is_btn && RBR_FIELD_COUNT < RBR_MAX_FIELDS {
-            let type_v  = rbr_get_attr(attrs, b"type");
-            let name_v  = rbr_get_attr(attrs, b"name");
-            let value_v = rbr_get_attr(attrs, b"value");
-            let is_submit = type_v.is_empty() || (type_v.len() >= 6
-                && (type_v[0]|0x20)==b's' && (type_v[1]|0x20)==b'u'
-                && (type_v[2]|0x20)==b'b');
-            if is_submit {
-                let fi = RBR_FIELD_COUNT;
-                let f  = &mut RBR_FIELDS[fi];
-                f.kind = RbrFieldKind::Submit;
-                let nn = name_v.len().min(RBR_FIELD_NAME_LEN - 1);
-                f.name[..nn].copy_from_slice(&name_v[..nn]);
-                f.name_len = nn;
-                let vn = value_v.len().min(RBR_FIELD_VAL_LEN - 1);
-                f.value[..vn].copy_from_slice(&value_v[..vn]);
-                f.val_len = vn;
-                let an = form_action_len.min(RBR_URL_LEN - 1);
-                f.action[..an].copy_from_slice(&form_action[..an]);
-                f.action_len = an;
-                RBR_FIELD_COUNT += 1;
-                rbr_push_field_line(fi);
-            }
-            continue;
-        }
-    }
-}
-
-// Strip HTML tags from a byte slice, returning plain text
-fn rbr_strip_tags(input: &[u8]) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(input.len());
-    let mut in_tag = false;
-    for &c in input {
-        if c == b'<' { in_tag = true; continue; }
-        if c == b'>' { in_tag = false; continue; }
-        if !in_tag { out.push(c); }
-    }
-    out
-}
-
-// ── Document builder ─────────────────────────────────────────────────────────
-
+/// Parses a fetched response body into RBR's line buffer + link table.
+/// Reuses the shared parse_html()/get_element()/get_text() machinery.
 unsafe fn rbr_build_document(body: &[u8]) {
     rbr_reset_document();
-    let clean_body = rbr_strip_javascript(body);
+    let count = parse_html(body);
 
-    // First pass: use the HTML element parser
-    let count = parse_html(&clean_body);
     for i in 0..count {
         let e = match get_element(i) { Some(e) => *e, None => continue };
         let text = get_text(e.text_start, e.text_len);
@@ -21377,16 +20914,16 @@ unsafe fn rbr_build_document(body: &[u8]) {
                 let mut buf = [0u8; RBR_LINE_LEN];
                 let n = text.len().min(RBR_LINE_LEN - 3);
                 buf[0] = b'#'; buf[1] = b' ';
-                buf[2..2+n].copy_from_slice(&text[..n]);
-                rbr_push_line(&buf[..2+n], RBR_COL_H1);
+                buf[2..2 + n].copy_from_slice(&text[..n]);
+                rbr_push_line(&buf[..2 + n], RBR_COL_H1);
             }
             HtmlElementType::Header2 => {
                 rbr_push_line(b"", RBR_COL_TEXT);
                 let mut buf = [0u8; RBR_LINE_LEN];
                 let n = text.len().min(RBR_LINE_LEN - 4);
-                buf[0]=b'#'; buf[1]=b'#'; buf[2]=b' ';
-                buf[3..3+n].copy_from_slice(&text[..n]);
-                rbr_push_line(&buf[..3+n], RBR_COL_H2);
+                buf[0] = b'#'; buf[1] = b'#'; buf[2] = b' ';
+                buf[3..3 + n].copy_from_slice(&text[..n]);
+                rbr_push_line(&buf[..3 + n], RBR_COL_H2);
             }
             HtmlElementType::Header3
             | HtmlElementType::Header4
@@ -21394,9 +20931,9 @@ unsafe fn rbr_build_document(body: &[u8]) {
             | HtmlElementType::Header6 => {
                 let mut buf = [0u8; RBR_LINE_LEN];
                 let n = text.len().min(RBR_LINE_LEN - 5);
-                buf[0]=b'#'; buf[1]=b'#'; buf[2]=b'#'; buf[3]=b' ';
-                buf[4..4+n].copy_from_slice(&text[..n]);
-                rbr_push_line(&buf[..4+n], RBR_COL_H3);
+                buf[0] = b'#'; buf[1] = b'#'; buf[2] = b'#'; buf[3] = b' ';
+                buf[4..4 + n].copy_from_slice(&text[..n]);
+                rbr_push_line(&buf[..4 + n], RBR_COL_H3);
             }
             HtmlElementType::Link => {
                 let link_id = RBR_LINK_COUNT;
@@ -21406,95 +20943,64 @@ unsafe fn rbr_build_document(body: &[u8]) {
                     let n = href.len().min(RBR_LINK_LEN - 1);
                     l.url[..n].copy_from_slice(&href[..n]);
                     l.len = n;
-                    RBR_LINK_LINE[link_id] = RBR_LINE_COUNT;
                     RBR_LINK_COUNT += 1;
+
                     let mut buf = [0u8; RBR_LINE_LEN];
                     let mut idx = 0;
-                    buf[idx]=b'['; idx+=1;
-                    let mut nb=[0u8;12];
-                    let ns=u32_to_dec(link_id as u32,&mut nb);
-                    for &c in ns { if idx<buf.len(){buf[idx]=c;idx+=1;} }
-                    if idx<buf.len(){buf[idx]=b']';idx+=1;}
-                    if idx<buf.len(){buf[idx]=b' ';idx+=1;}
-                    let tn=text.len().min(buf.len().saturating_sub(idx));
-                    buf[idx..idx+tn].copy_from_slice(&text[..tn]);
-                    idx+=tn;
+                    buf[idx] = b'['; idx += 1;
+                    let mut nb = [0u8; 12];
+                    let ns = u32_to_dec(link_id as u32, &mut nb);
+                    for &c in ns { if idx < buf.len() { buf[idx] = c; idx += 1; } }
+                    buf[idx] = b']'; idx += 1;
+                    buf[idx] = b' '; idx += 1;
+                    let tn = text.len().min(buf.len().saturating_sub(idx));
+                    buf[idx..idx + tn].copy_from_slice(&text[..tn]);
+                    idx += tn;
                     rbr_push_line(&buf[..idx], RBR_COL_LINK);
                 } else {
                     rbr_push_line(text, RBR_COL_LINK);
                 }
             }
-            HtmlElementType::Bold        => rbr_push_line(text, RBR_COL_BOLD),
-            HtmlElementType::Italic      => rbr_push_line(text, RBR_COL_ITALIC),
-            HtmlElementType::Code
-            | HtmlElementType::Preformatted => rbr_push_line(text, RBR_COL_CODE),
-            HtmlElementType::Blockquote  => {
+            HtmlElementType::Bold => rbr_push_line(text, RBR_COL_BOLD),
+            HtmlElementType::Italic => rbr_push_line(text, RBR_COL_ITALIC),
+            HtmlElementType::Code | HtmlElementType::Preformatted => rbr_push_line(text, RBR_COL_CODE),
+            HtmlElementType::Blockquote => {
                 let mut buf = [0u8; RBR_LINE_LEN];
                 let n = text.len().min(RBR_LINE_LEN - 2);
-                buf[0]=b'>'; buf[1]=b' ';
-                buf[2..2+n].copy_from_slice(&text[..n]);
-                rbr_push_line(&buf[..2+n], RBR_COL_QUOTE);
+                buf[0] = b'>'; buf[1] = b' ';
+                buf[2..2 + n].copy_from_slice(&text[..n]);
+                rbr_push_line(&buf[..2 + n], RBR_COL_QUOTE);
             }
-            HtmlElementType::ListItem
-            | HtmlElementType::OrderedListItem => {
+            HtmlElementType::ListItem | HtmlElementType::OrderedListItem => {
                 let mut buf = [0u8; RBR_LINE_LEN];
                 let n = text.len().min(RBR_LINE_LEN - 3);
-                buf[0]=b' '; buf[1]=b'*'; buf[2]=b' ';
-                buf[3..3+n].copy_from_slice(&text[..n]);
-                rbr_push_line(&buf[..3+n], RBR_COL_LI);
+                buf[0] = b' '; buf[1] = b'*'; buf[2] = b' ';
+                buf[3..3 + n].copy_from_slice(&text[..n]);
+                rbr_push_line(&buf[..3 + n], RBR_COL_LI);
             }
-            HtmlElementType::Paragraph
-            | HtmlElementType::Div => {
+            HtmlElementType::Paragraph | HtmlElementType::Div => {
                 rbr_push_line(text, RBR_COL_TEXT);
                 rbr_push_line(b"", RBR_COL_TEXT);
             }
             HtmlElementType::HorizontalRule => {
-                let buf = [b'-'; 60];
-                rbr_push_line(&buf, RBR_COL_HR);
+                let mut buf = [0u8; RBR_LINE_LEN];
+                for b in buf.iter_mut() { *b = b'-'; }
+                rbr_push_line(&buf[..RBR_LINE_LEN.min(60)], RBR_COL_HR);
             }
             _ => rbr_push_line(text, RBR_COL_TEXT),
         }
     }
-
-    // Second pass: always scan raw HTML for links (fallback) and forms (always needed).
-    // If the element parser already found links we still need forms; if it found 0 links
-    // the fallback scanner fills them in.
-    let pre_scan_links = RBR_LINK_COUNT;
-    rbr_scan_raw_html(&clean_body);
-
-    // If the fallback added duplicate links on top of what the parser found, deduplicate
-    // by keeping only the first occurrence of each URL.
-    // (Simple: if parser found links, remove what the scanner added that overlap.)
-    // Actually the scanner appended to the end — just clear duplicates.
-    if pre_scan_links > 0 {
-        // Scanner ran and may have added more links after pre_scan_links.
-        // Deduplicate: for each scanner-added link, check if its URL already exists.
-        let mut write_idx = pre_scan_links;
-        let total = RBR_LINK_COUNT;
-        for r in pre_scan_links..total {
-            let r_url = &RBR_LINKS[r].url[..RBR_LINKS[r].len];
-            let mut found = false;
-            for q in 0..write_idx {
-                if RBR_LINKS[q].len == r_url.len() && &RBR_LINKS[q].url[..RBR_LINKS[q].len] == r_url {
-                    found = true; break;
-                }
-            }
-            if !found {
-                if write_idx != r { RBR_LINKS[write_idx] = RBR_LINKS[r]; }
-                write_idx += 1;
-            }
-        }
-        RBR_LINK_COUNT = write_idx;
-    }
 }
 
-// ── History ───────────────────────────────────────────────────────────────────
+//-----------------------------------------------------------------------------
+// History
+//-----------------------------------------------------------------------------
 
 unsafe fn rbr_history_push(url: &[u8]) {
     if RBR_HISTORY_POS >= RBR_MAX_HISTORY {
         for i in 1..RBR_MAX_HISTORY {
-            RBR_HISTORY[i-1]     = RBR_HISTORY[i];
-            RBR_HISTORY_LEN[i-1] = RBR_HISTORY_LEN[i];
+            RBR_HISTORY[i - 1] = RBR_HISTORY[i];
+            RBR_HISTORY_LEN[i - 1] = RBR_HISTORY_LEN[i];
         }
         RBR_HISTORY_POS = RBR_MAX_HISTORY - 1;
     }
@@ -21504,98 +21010,73 @@ unsafe fn rbr_history_push(url: &[u8]) {
     RBR_HISTORY_POS += 1;
 }
 
+/// Navigates back one page in history, if any. Returns true if it moved.
 #[no_mangle]
 pub extern "C" fn rbr_back() -> bool {
     unsafe {
         if RBR_HISTORY_POS < 2 { return false; }
-        let prev = RBR_HISTORY_POS - 2;
-        let len  = RBR_HISTORY_LEN[prev];
-        if len == 0 { return false; }
-        let mut url = [0u8; RBR_URL_LEN];
-        url[..len].copy_from_slice(&RBR_HISTORY[prev][..len]);
+        RBR_HISTORY_POS -= 2;
+        let idx = RBR_HISTORY_POS;
+        let len = RBR_HISTORY_LEN[idx];
+        let mut url = [0u8; RBR_URL_LEN + 1];
+        url[..len].copy_from_slice(&RBR_HISTORY[idx][..len]);
+        url[len] = 0;
+        RBR_HISTORY_POS += 1; // rbr_open will push again; keep pos consistent
         RBR_HISTORY_POS -= 1;
         rbr_open_internal(&url[..len], false)
     }
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+//-----------------------------------------------------------------------------
+// Rendering (VGA text mode, 80x25)
+//-----------------------------------------------------------------------------
 
 unsafe fn rbr_draw(col: u8) { terminal_setcolor(col); }
 
 unsafe fn rbr_render_page() {
     terminal_clear();
 
-    // Top status / URL bar
+    // Title bar
     rbr_draw(RBR_COL_STATUS);
-    rust_print(b" Radium Browser | ");
-    rust_print(&RBR_CURRENT_URL[..RBR_CURRENT_URL_LEN.min(RBR_URL_LEN)]);
+    rust_print(b" Radium Browser (RBR) ");
+    let mut ub = [0u8; RBR_URL_LEN];
+    let ulen = RBR_CURRENT_URL_LEN.min(ub.len());
+    ub[..ulen].copy_from_slice(&RBR_CURRENT_URL[..ulen]);
+    rust_print(&ub[..ulen]);
     rust_print(b"\n");
     rbr_draw(RBR_COL_TEXT);
 
-    let scroll = RBR_SCROLL.min(RBR_LINE_COUNT);
-    let end    = scroll.saturating_add(RBR_PAGE_ROWS).min(RBR_LINE_COUNT).min(RBR_MAX_LINES);
-
-    for i in scroll..end {
-        let l        = &RBR_LINES[i];
-        let safe_len = l.len.min(RBR_LINE_LEN);
-
-        // Is this line a focused form field?
-        let is_field_line = l.field_idx >= 0;
-        let is_focused    = is_field_line && RBR_FOCUS_FIELD == l.field_idx;
-
-        // Is this line a highlighted link?
-        let is_link_hl = !is_field_line && RBR_HIGHLIGHT_IDX >= 0 && {
-            let hidx = RBR_HIGHLIGHT_IDX as usize;
-            hidx < RBR_LINK_COUNT && hidx < RBR_MAX_LINKS && RBR_LINK_LINE[hidx] == i
-        };
-
-        if is_link_hl {
-            rbr_draw(RBR_COL_STATUS);
-            terminal_putchar(b'>');
-            terminal_putchar(b' ');
-        } else if is_focused {
-            rbr_draw(RBR_COL_INPUT_ACTIVE);
-            terminal_putchar(b'>');
-            terminal_putchar(b' ');
-        } else if is_field_line {
-            rbr_draw(RBR_COL_INPUT);
-            terminal_putchar(b' ');
-            terminal_putchar(b' ');
-        }
-
-        let col = if is_focused { RBR_COL_INPUT_ACTIVE } else { l.color };
-        rbr_draw(col);
-        for &c in &l.text[..safe_len] { terminal_putchar(c); }
+    let end = (RBR_SCROLL + RBR_PAGE_ROWS).min(RBR_LINE_COUNT);
+    for i in RBR_SCROLL..end {
+        let l = &RBR_LINES[i];
+        rbr_draw(l.color);
+        for &c in &l.text[..l.len] { terminal_putchar(c); }
         terminal_putchar(b'\n');
-
-        if is_link_hl || is_focused { rbr_draw(RBR_COL_TEXT); }
     }
-
     rbr_draw(RBR_COL_TEXT);
-    let lines_drawn = end.saturating_sub(scroll);
-    for _ in lines_drawn..RBR_PAGE_ROWS { terminal_putchar(b'\n'); }
 
-    // Bottom status bar
+    // Status line
     rbr_draw(RBR_COL_STATUS);
-    let slen = RBR_STATUS_LEN.min(RBR_STATUS.len());
-    if slen > 0 {
-        rust_print(&RBR_STATUS[..slen]);
-    } else if RBR_FOCUS_FIELD >= 0 {
-        rust_print(b" [Tab:Next Field  Enter:Submit  Esc:Unfocus  Backspace:Delete] ");
+    for r in 0..80 { let _ = r; } // no direct col control needed; print status text
+    if RBR_STATUS_LEN > 0 {
+        rust_print(&RBR_STATUS[..RBR_STATUS_LEN]);
     } else {
-        rust_print(b" [Arrows:Links  Space/Enter:Follow  Tab:Fields  b:Back  g:URL  v:Video  q:Quit] ");
+        let mut lb = [0u8; 12];
+        rust_print(b"Lines ");
+        print_num((RBR_SCROLL + 1) as i32);
+        rust_print(b"-");
+        print_num(end as i32);
+        rust_print(b"/");
+        print_num(RBR_LINE_COUNT as i32);
+        rust_print(b"  [j/k scroll] [1-9 link] [b back] [q quit]");
     }
     rbr_draw(RBR_COL_TEXT);
 }
 
-// ── Scroll helpers ────────────────────────────────────────────────────────────
-
 #[no_mangle]
 pub extern "C" fn rbr_scroll_down() {
     unsafe {
-        if RBR_LINE_COUNT > RBR_PAGE_ROWS && RBR_SCROLL + RBR_PAGE_ROWS < RBR_LINE_COUNT {
-            RBR_SCROLL += 1;
-        }
+        if RBR_SCROLL + RBR_PAGE_ROWS < RBR_LINE_COUNT { RBR_SCROLL += 1; }
         rbr_render_page();
     }
 }
@@ -21611,8 +21092,8 @@ pub extern "C" fn rbr_scroll_up() {
 #[no_mangle]
 pub extern "C" fn rbr_page_down() {
     unsafe {
-        let max = RBR_LINE_COUNT.saturating_sub(RBR_PAGE_ROWS);
-        RBR_SCROLL = (RBR_SCROLL + RBR_PAGE_ROWS).min(max);
+        let max_scroll = RBR_LINE_COUNT.saturating_sub(RBR_PAGE_ROWS);
+        RBR_SCROLL = (RBR_SCROLL + RBR_PAGE_ROWS).min(max_scroll);
         rbr_render_page();
     }
 }
@@ -21625,768 +21106,145 @@ pub extern "C" fn rbr_page_up() {
     }
 }
 
-// ── Scroll viewport to keep a line visible ────────────────────────────────────
-
-unsafe fn rbr_scroll_to_line(line: usize) {
-    if line >= RBR_SCROLL + RBR_PAGE_ROWS {
-        RBR_SCROLL = line.saturating_sub(RBR_PAGE_ROWS / 2);
-    }
-    if line < RBR_SCROLL {
-        RBR_SCROLL = line.saturating_sub(RBR_PAGE_ROWS / 4);
-    }
-}
-
-// ── ASCII video ───────────────────────────────────────────────────────────────
-
-unsafe fn rbr_play_ascii_video() {
-    let mut fc: u32 = 0;
-    let shades = [b' ',b'.',b':',b'-',b'=',b'+',b'*',b'#',b'%',b'@',176u8,177,178,219];
-    loop {
-        terminal_clear();
-        rbr_draw(RBR_COL_VIDEO);
-        rust_print(b"+-----------------------------------------------------------------+\n");
-        rust_print(b"|                  >>> RADIUM ASCII VIDEO PLAYER <<<              |\n");
-        rust_print(b"+-----------------------------------------------------------------+\n");
-        for r in 0..12u32 {
-            rust_print(b"| ");
-            for c in 0..63u32 {
-                let pi = ((r+fc+(c^fc)) % shades.len() as u32) as usize;
-                terminal_putchar(shades[pi]);
-            }
-            rust_print(b" |\n");
-        }
-        rust_print(b"+-----------------------------------------------------------------+\n");
-        rust_print(b"| STATUS: Playing Stream...           Press ANY KEY to Exit Video |\n");
-        rust_print(b"+-----------------------------------------------------------------+\n");
-        rbr_draw(RBR_COL_TEXT);
-        fc = fc.wrapping_add(1);
-        if keyboard_wait_for_key(5) != 0 { break; }
-    }
-    rbr_render_page();
-}
-
-// ── URL helpers ───────────────────────────────────────────────────────────────
-
-unsafe fn rbr_is_likely_url(s: &[u8]) -> bool {
-    if s.is_empty() { return false; }
-    if s.starts_with(b"http://") || s.starts_with(b"https://")
-        || s.starts_with(b"ftp://") || s.starts_with(b"//") { return true; }
-    if s.starts_with(b"www.") || s.windows(3).any(|w| w==b"://") { return true; }
-    s.iter().any(|&c|c==b'.') && !s.iter().any(|&c|c==b' ')
-}
-
-unsafe fn rbr_is_local_html_path(s: &[u8]) -> bool {
-    let t = s.trim_ascii();
-    if t.is_empty() { return false; }
-    if t.starts_with(b"file://") {
-        let p = if t.starts_with(b"file:///") { &t[8..] } else { &t[7..] };
-        return p.len()>=5 && (p.ends_with(b".html")||p.ends_with(b".htm"));
-    }
-    (t.starts_with(b"/")||t.starts_with(b"./")||t.starts_with(b"../"))
-        && (t.ends_with(b".html")||t.ends_with(b".htm"))
-}
-
-unsafe fn rbr_local_path_from_input(input: &[u8]) -> alloc::vec::Vec<u8> {
-    let t = input.trim_ascii();
-    if t.is_empty() { return alloc::vec::Vec::new(); }
-    if t.starts_with(b"file://") {
-        return if t.starts_with(b"file:///") { t[8..].to_vec() } else { t[7..].to_vec() };
-    }
-    if t.starts_with(b"./")||t.starts_with(b"../")||t.starts_with(b"/") { return t.to_vec(); }
-    alloc::vec::Vec::new()
-}
-
-unsafe fn rbr_url_from_input(input: &[u8]) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(RBR_URL_LEN);
-    let t = input.trim_ascii();
-    if t.is_empty() { return out; }
-    if t.starts_with(b"http://")||t.starts_with(b"https://")||t.starts_with(b"ftp://")||t.starts_with(b"file://") {
-        out.extend_from_slice(t); return out;
-    }
-    if t.starts_with(b"/")||t.starts_with(b"./")||t.starts_with(b"../") {
-        let lp = rbr_local_path_from_input(t);
-        if !lp.is_empty() && rbr_is_local_html_path(t) {
-            out.extend_from_slice(b"file://");
-            if !lp.starts_with(b"/") { out.push(b'/'); }
-            out.extend_from_slice(&lp); return out;
-        }
-    }
-    if rbr_is_local_html_path(t) {
-        let lp = rbr_local_path_from_input(t);
-        out.extend_from_slice(b"file://");
-        if !lp.starts_with(b"/") { out.push(b'/'); }
-        out.extend_from_slice(&lp); return out;
-    }
-    if rbr_is_likely_url(t) {
-        out.extend_from_slice(b"http://"); out.extend_from_slice(t); return out;
-    }
-    out.extend_from_slice(b"http://www.google.com/search?q=");
-    for &c in t { if c==b' ' { out.push(b'+'); } else { out.push(c); } }
-    out
-}
-
-unsafe fn rbr_resolve_relative_url(base: &[u8], relative: &[u8]) -> alloc::vec::Vec<u8> {
-    if relative.is_empty() { return base.to_vec(); }
-    if relative.starts_with(b"http://")||relative.starts_with(b"https://")||relative.starts_with(b"ftp://") {
-        return relative.to_vec();
-    }
-    if relative.starts_with(b"//") {
-        let scheme: &[u8] = if base.starts_with(b"https://") { b"https:" } else { b"http:" };
-        let mut o = alloc::vec::Vec::with_capacity(RBR_URL_LEN);
-        o.extend_from_slice(scheme); o.extend_from_slice(relative); return o;
-    }
-    let base_url = match http_parse_url(base) { Some(p)=>p, None=>return relative.to_vec() };
-    let mut out = alloc::vec::Vec::with_capacity(RBR_URL_LEN);
-    let scheme: &[u8] = if base.starts_with(b"https://") { b"https://" } else { b"http://" };
-    out.extend_from_slice(scheme);
-    out.extend_from_slice(&base_url.host[..base_url.host_len]);
-    let mut path = if base_url.path_len>0 { base_url.path[..base_url.path_len].to_vec() } else { b"/".to_vec() };
-    if relative.starts_with(b"/") { out.extend_from_slice(relative); return out; }
-    if relative.starts_with(b"?")||relative.starts_with(b"#") {
-        let q = path.iter().position(|&c|c==b'?').unwrap_or(path.len());
-        let h = path.iter().position(|&c|c==b'#').unwrap_or(path.len());
-        path.truncate(q.min(h));
-        out.extend_from_slice(&path); out.extend_from_slice(relative); return out;
-    }
-    let ls = path.iter().rposition(|&c|c==b'/').unwrap_or(0);
-    path.truncate(ls+1);
-    let mut rel = relative.to_vec();
-    while rel.starts_with(b"../") {
-        if path.len()>1 {
-            let e=path.len()-1; let mut k=e;
-            while k>0&&path[k-1]!=b'/' { k-=1; }
-            path.truncate(k); if path.is_empty(){path.push(b'/');}
-        }
-        rel=rel[3..].to_vec();
-    }
-    while rel.starts_with(b"./") { rel=rel[2..].to_vec(); }
-    if !path.ends_with(b"/") { path.push(b'/'); }
-    out.extend_from_slice(&path); out.extend_from_slice(&rel); out
-}
-
-// ── Form submission ───────────────────────────────────────────────────────────
-
-unsafe fn rbr_submit_form(field_idx: usize, record_history: bool) -> bool {
-    let f = &RBR_FIELDS[field_idx];
-    // Build action URL: resolve relative to current page
-    let raw_action = &f.action[..f.action_len];
-    let action = if f.action_len == 0 {
-        // submit to current URL
-        RBR_CURRENT_URL[..RBR_CURRENT_URL_LEN].to_vec()
-    } else {
-        rbr_resolve_relative_url(&RBR_CURRENT_URL[..RBR_CURRENT_URL_LEN], raw_action)
-    };
-
-    // Build query string from all fields sharing this action
-    let mut query = alloc::vec::Vec::with_capacity(256);
-    let mut first = true;
-    for fi in 0..RBR_FIELD_COUNT {
-        let ff = &RBR_FIELDS[fi];
-        match ff.kind {
-            RbrFieldKind::Submit | RbrFieldKind::Checkbox => {
-                if let RbrFieldKind::Checkbox = ff.kind { if !ff.checked { continue; } }
-            }
-            _ => {}
-        }
-        if ff.name_len == 0 { continue; }
-        if !first { query.push(b'&'); } else { first = false; }
-        // URL-encode name
-        for &c in &ff.name[..ff.name_len] { rbr_url_encode_char(c, &mut query); }
-        query.push(b'=');
-        for &c in &ff.value[..ff.val_len] { rbr_url_encode_char(c, &mut query); }
-    }
-
-    // Append query to action
-    let mut url = action.clone();
-    if !query.is_empty() {
-        if url.iter().any(|&c|c==b'?') { url.push(b'&'); } else { url.push(b'?'); }
-        url.extend_from_slice(&query);
-    }
-
-    RBR_FOCUS_FIELD = -1;
-    rbr_open_internal(&url, record_history)
-}
-
-fn rbr_url_encode_char(c: u8, out: &mut alloc::vec::Vec<u8>) {
-    match c {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-        | b'-' | b'_' | b'.' | b'~' => out.push(c),
-        b' ' => out.push(b'+'),
-        _ => {
-            out.push(b'%');
-            let hi = (c >> 4) & 0xF;
-            let lo = c & 0xF;
-            out.push(if hi < 10 { b'0'+hi } else { b'a'+hi-10 });
-            out.push(if lo < 10 { b'0'+lo } else { b'a'+lo-10 });
-        }
-    }
-}
-
-// ── Redraw a single field line in place ──────────────────────────────────────
-
-unsafe fn rbr_refresh_field_line(field_idx: usize) {
-    // Find the line that belongs to this field and update its text in-place
-    for li in 0..RBR_LINE_COUNT {
-        if RBR_LINES[li].field_idx == field_idx as i32 {
-            // Re-render the field text into that line slot
-            let fi = field_idx;
-            let f = &RBR_FIELDS[fi];
-            let mut buf = [0u8; RBR_LINE_LEN];
-            let mut idx = 0;
-            match f.kind {
-                RbrFieldKind::Submit => {
-                    let label = if f.val_len>0 { &f.value[..f.val_len] } else { b"Submit" };
-                    let parts: &[&[u8]] = &[b"[ ", label, b" ]"];
-                    for s in parts { for &c in *s { if idx<buf.len(){buf[idx]=c;idx+=1;} } }
-                }
-                RbrFieldKind::Checkbox => {
-                    let mark = if f.checked { b"[X]" as &[u8] } else { b"[ ]" };
-                    for &c in mark { if idx<buf.len(){buf[idx]=c;idx+=1;} }
-                    if f.name_len>0 {
-                        if idx<buf.len(){buf[idx]=b' ';idx+=1;}
-                        let n=f.name_len.min(buf.len()-idx);
-                        buf[idx..idx+n].copy_from_slice(&f.name[..n]); idx+=n;
-                    }
-                }
-                RbrFieldKind::Password => {
-                    if f.name_len>0 {
-                        let n=f.name_len.min(buf.len()-idx);
-                        buf[idx..idx+n].copy_from_slice(&f.name[..n]); idx+=n;
-                        if idx+2<buf.len(){buf[idx]=b':';idx+=1;buf[idx]=b' ';idx+=1;}
-                    }
-                    if idx<buf.len(){buf[idx]=b'[';idx+=1;}
-                    let stars=f.val_len.min(buf.len().saturating_sub(idx+1));
-                    for _ in 0..stars { if idx<buf.len(){buf[idx]=b'*';idx+=1;} }
-                    let pad=(20usize).saturating_sub(stars);
-                    for _ in 0..pad { if idx<buf.len(){buf[idx]=b'_';idx+=1;} }
-                    if idx<buf.len(){buf[idx]=b']';idx+=1;}
-                }
-                RbrFieldKind::Text => {
-                    if f.name_len>0 {
-                        let n=f.name_len.min(buf.len()-idx);
-                        buf[idx..idx+n].copy_from_slice(&f.name[..n]); idx+=n;
-                        if idx+2<buf.len(){buf[idx]=b':';idx+=1;buf[idx]=b' ';idx+=1;}
-                    }
-                    if idx<buf.len(){buf[idx]=b'[';idx+=1;}
-                    let vn=f.val_len.min(buf.len().saturating_sub(idx+1));
-                    buf[idx..idx+vn].copy_from_slice(&f.value[..vn]); idx+=vn;
-                    let pad=(20usize).saturating_sub(vn);
-                    for _ in 0..pad { if idx<buf.len(){buf[idx]=b'_';idx+=1;} }
-                    if idx<buf.len(){buf[idx]=b']';idx+=1;}
-                }
-            }
-            let n = idx.min(RBR_LINE_LEN-1);
-            RBR_LINES[li].text[..n].copy_from_slice(&buf[..n]);
-            RBR_LINES[li].len = n;
-            break;
-        }
-    }
-}
-
-// ── Navigation helpers ────────────────────────────────────────────────────────
-
-unsafe fn rbr_reload_current() -> bool {
-    if RBR_CURRENT_URL_LEN == 0 { return false; }
-    let mut url = [0u8; RBR_URL_LEN];
-    let n = RBR_CURRENT_URL_LEN;
-    url[..n].copy_from_slice(&RBR_CURRENT_URL[..n]);
-    rbr_open_internal(&url[..n], false)
-}
-
-unsafe fn rbr_home() -> bool {
-    rbr_open_internal(b"https://example.com/", true)
-}
-
-// ── Core page loader ──────────────────────────────────────────────────────────
+//-----------------------------------------------------------------------------
+// Navigation
+//-----------------------------------------------------------------------------
 
 unsafe fn rbr_open_internal(url: &[u8], record_history: bool) -> bool {
-    let mut cur_buf = [0u8; RBR_URL_LEN];
-    let mut cur_len = url.len().min(RBR_URL_LEN - 1);
-    cur_buf[..cur_len].copy_from_slice(&url[..cur_len]);
-    let mut redirect_depth = 0usize;
+    rbr_set_status(b"Loading...");
+    let n = url.len().min(RBR_URL_LEN - 1);
+    RBR_CURRENT_URL[..n].copy_from_slice(&url[..n]);
+    RBR_CURRENT_URL_LEN = n;
 
-    loop {
-        rbr_set_status(b"Loading...");
+    let mut url_z = [0u8; RBR_URL_LEN + 1];
+    url_z[..n].copy_from_slice(&url[..n]);
+    url_z[n] = 0;
+
+    let resp = http_go(http(b"GET\0".as_ptr(), url_z.as_ptr()));
+    if resp < 0 || !http_response_ok(resp) {
+        rbr_reset_document();
+        rbr_push_line(b"Failed to load page.", RBR_COL_ERR);
+        rbr_set_status(b"Error: request failed");
+        if resp >= 0 { http_free_response(resp); }
         rbr_render_page();
-
-        // ── Local file ──────────────────────────────────────────────────────
-        if cur_buf[..cur_len].starts_with(b"file://") {
-            let off = if cur_buf[..cur_len].starts_with(b"file:///") { 8 } else { 7 };
-            let plen = cur_len.saturating_sub(off);
-            let mut pb = [0u8; RBR_URL_LEN];
-            let n = plen.min(pb.len()-1);
-            pb[..n].copy_from_slice(&cur_buf[off..off+n]);
-            pb[n] = 0;
-            let sz = avfs_get_filesize(pb.as_ptr());
-            if sz <= 0 {
-                rbr_reset_document(); rbr_push_line(b"Local file not found.", RBR_COL_ERR);
-                rbr_set_status(b"Error: file not found"); rbr_render_page(); return false;
-            }
-            let mut body = alloc::vec![0u8; sz as usize];
-            if avfs_read_file(pb.as_ptr(), body.as_mut_ptr(), sz as u32, 0) != 0 {
-                rbr_reset_document(); rbr_push_line(b"Failed to read local file.", RBR_COL_ERR);
-                rbr_set_status(b"Error: read failed"); rbr_render_page(); return false;
-            }
-            let cleaned = rbr_strip_javascript(&body);
-            rbr_build_document(&cleaned);
-            RBR_CURRENT_URL[..cur_len].copy_from_slice(&cur_buf[..cur_len]);
-            RBR_CURRENT_URL_LEN = cur_len;
-            rbr_set_status(b"");
-            if record_history { rbr_history_push(&cur_buf[..cur_len]); }
-            rbr_render_page();
-            return true;
-        }
-
-        // ── Network fetch ───────────────────────────────────────────────────
-        let mut url_z = [0u8; RBR_URL_LEN+1];
-        url_z[..cur_len].copy_from_slice(&cur_buf[..cur_len]);
-        url_z[cur_len] = 0;
-        let fetch_args = [
-            b"fetch\0".as_ptr(), b"--output\0".as_ptr(), RBR_CACHE_FILE.as_ptr(),
-            b"--overwrite\0".as_ptr(), b"--timeout\0".as_ptr(), b"15\0".as_ptr(),
-            url_z.as_ptr(),
-        ];
-        let res = rust_fetch(7, fetch_args.as_ptr());
-        if res < 0 {
-            rbr_reset_document(); rbr_push_line(b"Failed to load page (Timeout or Network Error).", RBR_COL_ERR);
-            rbr_set_status(b"Error: request failed"); rbr_render_page(); return false;
-        }
-        let sz = avfs_get_filesize(RBR_CACHE_FILE.as_ptr());
-        if sz <= 0 {
-            rbr_reset_document(); rbr_push_line(b"Empty response or file error.", RBR_COL_ERR);
-            rbr_set_status(b"Error: empty response"); rbr_render_page(); return false;
-        }
-        let mut body = alloc::vec![0u8; sz as usize];
-        if avfs_read_file(RBR_CACHE_FILE.as_ptr(), body.as_mut_ptr(), sz as u32, 0) != 0 {
-            rbr_reset_document(); rbr_push_line(b"Failed to read cache file.", RBR_COL_ERR);
-            rbr_set_status(b"Error: cache read failed"); rbr_render_page(); return false;
-        }
-
-        // ── Redirect check ──────────────────────────────────────────────────
-        if body.len() > 12 && body.starts_with(b"HTTP/1.") {
-            let mut p = 0;
-            while p < body.len() && body[p] != b' ' { p += 1; }
-            if p+4 < body.len() {
-                let c1=body[p+1]; let c2=body[p+2]; let c3=body[p+3];
-                if c1==b'3' && c2==b'0' && matches!(c3, b'1'|b'2'|b'3'|b'7'|b'8') {
-                    if redirect_depth >= RBR_MAX_REDIRECTS {
-                        rbr_reset_document(); rbr_push_line(b"Too many redirects.", RBR_COL_ERR);
-                        rbr_set_status(b"Error: redirect loop"); rbr_render_page(); return false;
-                    }
-                    let needle = b"location:";
-                    let mut found = false;
-                    let mut k = 0;
-                    while k + needle.len() < body.len() {
-                        let mut ok = true;
-                        for j in 0..needle.len() {
-                            if (body[k+j]|0x20) != needle[j] { ok=false; break; }
-                        }
-                        if ok {
-                            let mut s = k + needle.len();
-                            while s < body.len() && (body[s]==b' '||body[s]==b'\t') { s+=1; }
-                            let mut e = s;
-                            while e < body.len() && body[e]!=b'\r' && body[e]!=b'\n' { e+=1; }
-                            let resolved = rbr_resolve_relative_url(&cur_buf[..cur_len], &body[s..e]);
-                            let nl = resolved.len().min(RBR_URL_LEN-1);
-                            cur_buf = [0u8; RBR_URL_LEN];
-                            cur_buf[..nl].copy_from_slice(&resolved[..nl]);
-                            cur_len = nl;
-                            redirect_depth += 1;
-                            found = true;
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if found { continue; }
-                }
-            }
-        }
-
-        // ── Render ──────────────────────────────────────────────────────────
-        let cleaned = rbr_strip_javascript(&body);
-        rbr_build_document(&cleaned);
-
-        RBR_CURRENT_URL[..cur_len].copy_from_slice(&cur_buf[..cur_len]);
-        RBR_CURRENT_URL_LEN = cur_len;
-        rbr_set_status(b"");
-        if record_history { rbr_history_push(&cur_buf[..cur_len]); }
-        rbr_render_page();
-        return true;
+        return false;
     }
+
+    let status = http_response_status(resp);
+    let body_len = http_response_body_len(resp).max(0) as usize;
+    let mut body = [0u8; HTTP_MAX_BODY_IN];
+    let copied = http_response_body(resp, body.as_mut_ptr(), body.len() as u32).max(0) as usize;
+    http_free_response(resp);
+
+    rbr_build_document(&body[..copied.min(body_len).min(body.len())]);
+
+    let mut sb = [0u8; 12];
+    rbr_set_status(b""); // let default status line show line counts
+    let _ = u32_to_dec(status as u32, &mut sb);
+
+    if record_history { rbr_history_push(url); }
+    rbr_render_page();
+    true
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
+/// Open a URL fresh (clears scroll, records history). Entry point for
+/// external callers (RSH command, desktop shortcut, etc).
 #[no_mangle]
 pub extern "C" fn rbr_open(url: *const u8) -> i32 {
     unsafe {
-        let u = cstr_slice(url, RBR_URL_LEN-1);
+        let u = cstr_slice(url, RBR_URL_LEN - 1);
         if u.is_empty() { return -1; }
-        let r = rbr_url_from_input(u);
-        if rbr_open_internal(&r, true) { 0 } else { -1 }
+        if rbr_open_internal(u, true) { 0 } else { -1 }
     }
 }
 
+/// Follow link N (0-indexed) from the currently rendered page.
 #[no_mangle]
 pub extern "C" fn rbr_follow(link_id: i32) -> i32 {
     unsafe {
         if link_id < 0 || (link_id as usize) >= RBR_LINK_COUNT { return -1; }
-        let l   = RBR_LINKS[link_id as usize];
+        let l = RBR_LINKS[link_id as usize];
         let url = &l.url[..l.len];
-        let r   = rbr_resolve_relative_url(&RBR_CURRENT_URL[..RBR_CURRENT_URL_LEN], url);
-        if rbr_open_internal(&r, true) { 0 } else { -1 }
-    }
-}
 
-// ── Link highlight / selection ────────────────────────────────────────────────
-
-/// Set highlight to clamped idx, scroll to it, update status, render.
-/// Returns the clamped value, or -1 if no links.
-unsafe fn rbr_select_link(idx: i32) -> i32 {
-    if RBR_LINK_COUNT == 0 { RBR_HIGHLIGHT_IDX = -1; rbr_set_status(b""); rbr_render_page(); return -1; }
-    let c = if idx < 0 { 0i32 } else if idx as usize >= RBR_LINK_COUNT { (RBR_LINK_COUNT-1) as i32 } else { idx };
-    RBR_HIGHLIGHT_IDX = c;
-    // scroll to bring this link's line into view
-    let target_line = RBR_LINK_LINE[c as usize];
-    rbr_scroll_to_line(target_line);
-    // build status
-    let mut prompt = [0u8; 128];
-    let pre = b"=== Link [";
-    prompt[..pre.len()].copy_from_slice(pre);
-    let mut pos = pre.len();
-    let mut nb = [0u8; 12];
-    let ns = u32_to_dec(c as u32, &mut nb);
-    for &ch in ns { if pos < prompt.len() { prompt[pos]=ch; pos+=1; } }
-    let suf = b"] -> Space/Enter to follow";
-    for &ch in suf { if pos < prompt.len() { prompt[pos]=ch; pos+=1; } }
-    rbr_set_status(&prompt[..pos]);
-    rbr_render_page();
-    c
-}
-
-// ── Field focus ───────────────────────────────────────────────────────────────
-
-unsafe fn rbr_focus_field(idx: i32) -> i32 {
-    if RBR_FIELD_COUNT == 0 { return -1; }
-    let c = if idx < 0 { 0i32 }
-            else if idx as usize >= RBR_FIELD_COUNT { (RBR_FIELD_COUNT-1) as i32 }
-            else { idx };
-    RBR_FOCUS_FIELD   = c;
-    RBR_HIGHLIGHT_IDX = -1; // unfocus links when a field is focused
-    // scroll to field line
-    for li in 0..RBR_LINE_COUNT {
-        if RBR_LINES[li].field_idx == c { rbr_scroll_to_line(li); break; }
-    }
-    let mut prompt = [0u8; 128];
-    let f = &RBR_FIELDS[c as usize];
-    match f.kind {
-        RbrFieldKind::Submit => rbr_set_status(b"Enter: Submit form"),
-        RbrFieldKind::Checkbox => rbr_set_status(b"Space: Toggle checkbox  Tab: Next field"),
-        _ => {
-            let pre = b"Typing into field [";
-            prompt[..pre.len()].copy_from_slice(pre);
-            let mut pos = pre.len();
-            let nn = f.name_len.min(prompt.len()-pos-2);
-            prompt[pos..pos+nn].copy_from_slice(&f.name[..nn]); pos+=nn;
-            if pos<prompt.len(){prompt[pos]=b']';pos+=1;}
-            rbr_set_status(&prompt[..pos]);
+        // Resolve relative paths against current host if needed
+        if url.starts_with(b"http://") || url.starts_with(b"https://") {
+            if rbr_open_internal(url, true) { 0 } else { -1 }
+        } else {
+            // best-effort: same-host relative path
+            let cur = &RBR_CURRENT_URL[..RBR_CURRENT_URL_LEN];
+            let parts = match http_parse_url(cur) { Some(p) => p, None => return -1 };
+            let mut full = [0u8; RBR_URL_LEN];
+            let mut idx = 0;
+            for &c in b"http://" { full[idx] = c; idx += 1; }
+            for &c in &parts.host[..parts.host_len] { if idx < full.len() { full[idx] = c; idx += 1; } }
+            if !url.starts_with(b"/") { full[idx] = b'/'; idx += 1; }
+            for &c in url { if idx < full.len() { full[idx] = c; idx += 1; } }
+            if rbr_open_internal(&full[..idx], true) { 0 } else { -1 }
         }
     }
-    rbr_render_page();
-    c
 }
 
-// ── Main event loop ───────────────────────────────────────────────────────────
-
+/// Basic keyboard-driven session loop. Blocking; returns when 'q' pressed.
 #[no_mangle]
 pub extern "C" fn rbr_run(start_url: *const u8) -> i32 {
     unsafe {
         rbr_open(start_url);
-
-        // Initialise selection: prefer first link, highlight it
-        let mut sel: i32 = -1;
-        if RBR_LINK_COUNT > 0 { sel = rbr_select_link(0); }
-
-        let mut input_mode = false;
-        let mut input_buf  = [0u8; RBR_URL_LEN];
-        let mut input_len  = 0usize;
-        let mut extended   = false;
-
         loop {
-            while (inb(0x64) & 0x01) == 0 { /* spin */ }
-            let scan = inb(0x60);
-
-            if scan == 0xE0 { extended = true; continue; }
-            if (scan & 0x80) != 0 { extended = false; continue; }
-
-            // ── Extended (arrow) keys ──────────────────────────────────────
-            if extended {
-                extended = false;
-                if input_mode { continue; } // ignore arrows in URL bar
-                match scan {
-                    0x48 => { // Up Arrow
-                        if RBR_FOCUS_FIELD >= 0 {
-                            // move to previous field
-                            let nf = rbr_focus_field(RBR_FOCUS_FIELD - 1);
-                            // no change to sel
-                        } else if RBR_LINK_COUNT > 0 {
-                            sel = rbr_select_link(sel - 1);
-                        }
-                    }
-                    0x50 => { // Down Arrow
-                        if RBR_FOCUS_FIELD >= 0 {
-                            let nf = rbr_focus_field(RBR_FOCUS_FIELD + 1);
-                        } else if RBR_LINK_COUNT > 0 {
-                            sel = rbr_select_link(sel + 1);
-                        }
-                    }
-                    0x4B => { // Left Arrow — back
-                        RBR_FOCUS_FIELD = -1;
-                        rbr_back();
-                        sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                    }
-                    0x4D => { // Right Arrow — follow selected link
-                        if RBR_FOCUS_FIELD < 0 && RBR_HIGHLIGHT_IDX >= 0 {
-                            rbr_follow(RBR_HIGHLIGHT_IDX);
-                            sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                        }
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // ── URL input mode ─────────────────────────────────────────────
-            if input_mode {
-                match scan {
-                    0x01 => { // ESC
-                        input_mode=false; input_len=0;
-                        rbr_set_status(b""); rbr_render_page();
-                    }
-                    0x1C => { // Enter
-                        if input_len > 0 {
-                            let t = rbr_url_from_input(&input_buf[..input_len]);
-                            rbr_open_internal(&t, true);
-                            sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                        }
-                        input_mode=false; input_len=0;
-                        for b in input_buf.iter_mut() { *b=0; }
-                    }
-                    0x0E => { // Backspace
-                        if input_len>0 { input_len-=1; input_buf[input_len]=0; }
-                        rbr_show_url_prompt(&input_buf, input_len);
-                    }
-                    _ => {
-                        let ch = rbr_scan_to_char(scan);
-                        if ch!=0 && input_len<RBR_URL_LEN-1 {
-                            input_buf[input_len]=ch; input_len+=1;
-                            rbr_show_url_prompt(&input_buf, input_len);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // ── Field-focused mode ─────────────────────────────────────────
-            if RBR_FOCUS_FIELD >= 0 {
-                let fi = RBR_FOCUS_FIELD as usize;
-                match scan {
-                    0x01 => { // ESC — unfocus
-                        RBR_FOCUS_FIELD = -1;
-                        rbr_set_status(b"");
-                        // re-highlight last selected link
-                        if RBR_LINK_COUNT > 0 { sel = rbr_select_link(sel.max(0)); }
-                        else { rbr_render_page(); }
-                    }
-                    0x0F => { // Tab — next field
-                        let next = (fi + 1) % RBR_FIELD_COUNT.max(1);
-                        rbr_focus_field(next as i32);
-                    }
-                    0x1C => { // Enter — submit or toggle
-                        match RBR_FIELDS[fi].kind {
-                            RbrFieldKind::Submit => {
-                                rbr_submit_form(fi, true);
-                                sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                            }
-                            RbrFieldKind::Checkbox => {
-                                RBR_FIELDS[fi].checked = !RBR_FIELDS[fi].checked;
-                                rbr_refresh_field_line(fi);
-                                rbr_render_page();
-                            }
-                            _ => {
-                                // Enter on text field: submit form
-                                rbr_submit_form(fi, true);
-                                sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                            }
-                        }
-                    }
-                    0x39 => { // Space — toggle checkbox, or type space in text
-                        match RBR_FIELDS[fi].kind {
-                            RbrFieldKind::Checkbox => {
-                                RBR_FIELDS[fi].checked = !RBR_FIELDS[fi].checked;
-                                rbr_refresh_field_line(fi);
-                                rbr_render_page();
-                            }
-                            RbrFieldKind::Submit => {
-                                rbr_submit_form(fi, true);
-                                sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                            }
-                            _ => {
-                                let f = &mut RBR_FIELDS[fi];
-                                if f.val_len < RBR_FIELD_VAL_LEN - 1 {
-                                    f.value[f.val_len] = b' '; f.val_len += 1;
-                                    rbr_refresh_field_line(fi); rbr_render_page();
-                                }
-                            }
-                        }
-                    }
-                    0x0E => { // Backspace
-                        let f = &mut RBR_FIELDS[fi];
-                        match f.kind {
-                            RbrFieldKind::Text | RbrFieldKind::Password => {
-                                if f.val_len>0 { f.val_len-=1; f.value[f.val_len]=0; }
-                                rbr_refresh_field_line(fi); rbr_render_page();
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {
-                        let ch = rbr_scan_to_char(scan);
-                        if ch != 0 {
-                            let f = &mut RBR_FIELDS[fi];
-                            match f.kind {
-                                RbrFieldKind::Text | RbrFieldKind::Password => {
-                                    if f.val_len < RBR_FIELD_VAL_LEN - 1 {
-                                        f.value[f.val_len] = ch; f.val_len += 1;
-                                        rbr_refresh_field_line(fi); rbr_render_page();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // ── Normal browse mode ─────────────────────────────────────────
+            let scan = keyboard_wait_for_key(0);
             match scan {
-                0x10 => break, // Q — quit
-
-                // Scroll with J/K (vi)
-                0x24 => { rbr_scroll_down(); }
-                0x25 => { rbr_scroll_up(); }
-                // PageUp / PageDown bare scancodes (some BIOSes)
-                0x49 => { rbr_page_up(); }
-
-                // Tab — focus first form field (or cycle)
-                0x0F => {
-                    if RBR_FIELD_COUNT > 0 {
-                        rbr_focus_field(0);
-                    }
-                }
-
-                // Follow selected link
-                0x39 | 0x1C => { // Space or Enter
-                    if RBR_HIGHLIGHT_IDX >= 0 && RBR_LINK_COUNT > 0 {
-                        rbr_follow(RBR_HIGHLIGHT_IDX);
-                        sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                    } else if RBR_LINK_COUNT == 0 {
-                        rbr_reload_current();
-                    }
-                }
-
-                // Back
-                0x30 => { // B
-                    rbr_back();
-                    sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                }
-
-                // Home
-                0x21 => { // H
-                    rbr_home();
-                    sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                }
-
-                // Reload
-                0x13 => { // R
-                    rbr_reload_current();
-                    sel = if RBR_LINK_COUNT>0 { rbr_select_link(0) } else { -1 };
-                }
-
-                // URL / search bar
-                0x22 | 0x35 => { // G or /
-                    input_mode=true; input_len=0;
-                    for b in input_buf.iter_mut() { *b=0; }
-                    rbr_set_status(b"Search/URL: ");
-                    rbr_render_page();
-                }
-
-                // Video
-                0x2F => { rbr_play_ascii_video(); }
-
+                b'q' | b'Q' => break,
+                b'j' => rbr_scroll_down(),
+                b'k' => rbr_scroll_up(),
+                b' ' => rbr_page_down(),
+                b'u' => rbr_page_up(),
+                b'b' | b'B' => { rbr_back(); }
+                b'1'..=b'9' => { rbr_follow((scan - b'1') as i32); }
                 _ => {}
             }
-        }
-
-        if avfs_file_exists(RBR_CACHE_FILE.as_ptr()) {
-            let _ = avfs_remove_file(RBR_CACHE_FILE.as_ptr());
         }
         terminal_clear();
         0
     }
 }
 
-// ── Input helpers ─────────────────────────────────────────────────────────────
-
-unsafe fn rbr_show_url_prompt(buf: &[u8], len: usize) {
-    let mut p = [0u8; 128];
-    let pre = b"Search/URL: ";
-    p[..pre.len()].copy_from_slice(pre);
-    let cn = len.min(p.len()-pre.len());
-    p[pre.len()..pre.len()+cn].copy_from_slice(&buf[..cn]);
-    rbr_set_status(&p[..pre.len()+cn]);
-    rbr_render_page();
-}
-
-unsafe fn rbr_scan_to_char(scan: u8) -> u8 {
-    let ch = keyboard_to_char(scan, shift_active(), caps_lock_active());
-    if ch != 0 { return ch; }
-    match scan {
-        0x1E=>b'a', 0x30=>b'b', 0x2E=>b'c', 0x20=>b'd', 0x12=>b'e',
-        0x21=>b'f', 0x22=>b'g', 0x23=>b'h', 0x17=>b'i', 0x24=>b'j',
-        0x25=>b'k', 0x26=>b'l', 0x32=>b'm', 0x31=>b'n', 0x18=>b'o',
-        0x19=>b'p', 0x10=>b'q', 0x13=>b'r', 0x1F=>b's', 0x14=>b't',
-        0x16=>b'u', 0x2F=>b'v', 0x11=>b'w', 0x2D=>b'x', 0x15=>b'y',
-        0x2C=>b'z',
-        0x02=>b'1', 0x03=>b'2', 0x04=>b'3', 0x05=>b'4', 0x06=>b'5',
-        0x07=>b'6', 0x08=>b'7', 0x09=>b'8', 0x0A=>b'9', 0x0B=>b'0',
-        0x35=>b'/', 0x34=>b'.', 0x0C=>b'-', 0x0D=>b'=', 0x27=>b':',
-        0x28=>b'\'',0x29=>b'`', 0x2B=>b'\\',0x33=>b',', 0x39=>b' ',
-        _ => 0,
-    }
-}
-
-// ── RASH-SG ───────────────────────────────────────────────────────────────────
-
+// ── RASH-SG (Rash Size Graph) Custom RadiumOS Units Engine ────────────────
 unsafe fn rash_sg_print_size(bytes: usize) {
-    let mut unit: &[u8] = b"rB   ";
+    let mut unit_bytes = b"rB   " as &[u8];
     let mut scaled = bytes as f32;
-    if bytes >= 1024*1024 { scaled=bytes as f32/(1024.0*1024.0); unit=b"rSec "; }
-    else if bytes >= 1024  { scaled=bytes as f32/1024.0;          unit=b"rCh  "; }
-    print_num(scaled as i32); rust_print(b" "); rust_print(unit);
+    
+    if bytes >= 1024 * 1024 {
+        scaled = bytes as f32 / (1024.0 * 1024.0);
+        unit_bytes = b"rSec ";
+    } else if bytes >= 1024 {
+        scaled = bytes as f32 / 1024.0;
+        unit_bytes = b"rCh  ";
+    }
+
+    print_num(scaled as i32);
+    rust_print(b" ");
+    rust_print(unit_bytes);
+
     rust_print(b"[");
-    let filled=((bytes as f32/1_048_576.0).min(1.0)*10.0) as usize;
-    for k in 0..10 { if k<filled { rust_print(b"#"); } else { rust_print(b"-"); } }
+    let max_bar = 10;
+    let filled = ((bytes as f32 / 1048576.0).min(1.0) * max_bar as f32) as usize;
+    for k in 0..max_bar {
+        if k < filled {
+            rust_print(b"#");
+        } else {
+            rust_print(b"-");
+        }
+    }
     rust_print(b"]");
 }
 
+// Helper to extract argument bytes safely
 unsafe fn get_arg_bytes(arg_ptr: *const u8) -> &'static [u8] {
-    let mut len=0isize;
-    while *arg_ptr.offset(len)!=0 { len+=1; }
+    let mut len = 0;
+    while *arg_ptr.offset(len) != 0 {
+        len += 1;
+    }
     core::slice::from_raw_parts(arg_ptr, len as usize)
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn rshPKG(argc: i32, argv: *const *const u8) -> i32 {
@@ -23134,10 +21992,6 @@ pub unsafe extern "C" fn radium_register_device(
         sleep_ms(8000);
     }
 }
-
-
-
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Return codes:

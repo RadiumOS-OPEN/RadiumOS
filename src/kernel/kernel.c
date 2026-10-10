@@ -24,15 +24,11 @@
 #include "../cpu/cpu.h"
 #include "../keyboard/keyboard.h"
 #include "../commands/cowsay.h"
+#include "../commands/bootsplash.h"
 #include "../rshplugin/rshplugin.h"
 #include "../http/http.h"
 
 extern void script_init();
-
-// Helios compiler (rust_lib/src/helios.rs)
-// Custom C-like language → .rxe bytecode → runs via ./filename on RadiumOS
-extern void helios_init(void);
-extern int  helios_exec_file(const char *path);
 
 // Rust multitasking
 
@@ -484,85 +480,44 @@ void set_flashy_net_info(void) {
     set_net_info(hostname, "10.0.135.22", status); 
     // Note: Use the calculated 'ip_address' var if you implemented the full itoa logic
 }
-static void kernel_debug_stage(const char* stage, const char* message) {
-    terminal_setcolor(VGA_COLOR_LIGHT_CYAN);
-    print("[DEBUG] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
-    print(stage);
-    terminal_setcolor(VGA_COLOR_WHITE);
-    print(" : ");
-    print(message);
-    print("\n");
-}
-
-static void kernel_debug_ok(const char* label, bool success) {
-    terminal_setcolor(success ? VGA_COLOR_LIGHT_GREEN : VGA_COLOR_LIGHT_RED);
-    print(success ? "[OK] " : "[FAIL] ");
-    terminal_setcolor(VGA_COLOR_WHITE);
-    print(label);
-    print("\n");
-}
-
 void kernel_main(void) {
+
     terminal_initialize();
-    terminal_clear();
-    terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-
-    print("\n====================================================\n");
-    print("RadiumOS kernel startup\n");
-    print("====================================================\n\n");
-
-    kernel_debug_stage("BOOT", "initializing terminal in 80x50 text mode");
-    vga_set_80x50();
-    terminal_clear();
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-    print("RadiumOS console active: 80x50 text mode\n\n");
-
-    kernel_debug_stage("INIT", "starting system subsystems");
+    show_boot_splash();
     history_init();
     avfs_init();
     script_init();
-    
     registerCommands();
     createFiles();
     
-    kernel_debug_ok("history/avfs/script/commands/files/helios", true);
-
     print("\n");
-    kernel_debug_stage("GDT", "loading global descriptor table");
+    // Initialize GDT and IDT
     if (!setup_gdt()) {
-        kernel_debug_ok("GDT setup", false);
         print("ERROR: GDT setup failed\n");
-        while (1) asm("hlt");
+        while(1) asm("hlt");
     }
-    kernel_debug_ok("GDT setup", true);
-
-    kernel_debug_stage("IDT", "loading interrupt descriptor table");
+    
     if (!setup_interrupts()) {
-        kernel_debug_ok("IDT setup", false);
         print("ERROR: IDT setup failed\n");
-        while (1) asm("hlt");
+        while(1) asm("hlt");
     }
-    kernel_debug_ok("IDT setup", true);
-
-    kernel_debug_stage("INPUT", "waiting for key to confirm 80x50 VGA transition");
     keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
-
-    kernel_debug_stage("NET", "scanning PCI devices for RTL8139");
-    if (scan_and_init_rtl8139()) {
-        kernel_debug_ok("RTL8139 detection", true);
-
+    // Initialize network
+    if (scan_and_init_rtl8139()) {  
+        print("Network card ready!\n");
+        
+        // Configure network settings
         uint8_t local_ip[4] = {10, 0, 2, 15};
         uint8_t gateway[4] = {10, 0, 2, 2};
         uint8_t dns[4] = {10, 0, 2, 3};
-
-        kernel_debug_stage("NET", "configuring network settings");
+        
         rust_set_network_config(local_ip, gateway, dns);
-        kernel_debug_ok("network config", true);
-
+        
+        // DEBUG: Check if device is really initialized
         print("DEBUG: Checking device initialization...\n");
         rust_rtl8139_check_init();
-
+        
+        // Verify RTL8139 is initialized
         print("Checking RTL8139 status...\n");
         uint8_t mac[6];
         if (rust_rtl8139_get_mac(mac) == 0) {
@@ -572,91 +527,74 @@ void kernel_main(void) {
                 if (i < 5) print(":");
             }
             print("\n");
-
+            
+            // Test 1: Raw packet send
             print("\n=== TEST 1: Raw Packet ===\n");
             rust_test_raw_send();
-
+            
+            // Test 2: ARP request
             print("\n=== TEST 2: ARP Request ===\n");
             rust_test_network_simple();
+            
         } else {
             print("RTL8139 not initialized!\n");
         }
     } else {
-        kernel_debug_ok("RTL8139 detection", false);
         print("No network card found\n");
     }
-
-    kernel_debug_stage("TASKS", "initializing Rust multitasking and PIT");
+    
+    // Initialize Rust multitasking
     rust_init_multitasking();
-    rust_setup_pit(1000);
+    rust_setup_pit(1000);  
     rust_start_demo_tasks();
-    kernel_debug_ok("multitasking/PIT", true);
-
-    kernel_debug_stage("SERIAL", "initializing debug serial output");
     init_serial_port(0x3F8);
-    init_keyboard();
-    serial_write_string(0x3F8, "Developed and Maintained by scp_2801");
-    kernel_debug_ok("serial keyboard", true);
-
-    kernel_debug_stage("MM", "enabling paging" );
+init_keyboard();
     enable_paging_from_c();
-    kernel_debug_ok("paging", true);
+serial_write_string(0x3F8, "Developed and Maintained by scp_2801");
+initialize_cpu_info();
+cmd_sysprobe(1, NULL);
 
-    kernel_debug_stage("CPU", "collecting CPU diagnostics");
-    initialize_cpu_info();
-    cmd_sysprobe(1, NULL);
+CPUInfo* info = get_cpu_info_struct();
+ 
 
-    CPUInfo* info = get_cpu_info_struct();
+// Use the address of the struct itself as the "proof"
     uintptr_t proof_addr = (uintptr_t)info;
+    
+    // Show the message FIRST
+    // Force visible color before the message
+    extern void rust_dungeon();
+    //rust_dungeon();
 
-    terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-    keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
+terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
 
+keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
     terminal_clear();
     vga_set_80x50();
-        // --- Clean Standard ASCII Banner: RADIUMOS ---
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-    print(" ######     #    ######  ### #     # #     #  #####   #####  \n");
-    print(" #     #   # #   #     #  #  #     # ##   ## #     # #     # \n");
-    print(" #     #  #   #  #     #  #  #     # # # # # #     # #       \n");
-    print(" ######  #     # #     #  #  #     # #  #  # #     #  #####  \n");
-    print(" #   #   ####### #     #  #  #     # #     # #     #       # \n");
-    print(" #    #  #     # #     #  #  #     # #     # #     # #     # \n");
-    print(" #     # #     # ######  ###  #####  #     #  #####   #####  \n");
-
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-    print(" =============================================================\n");
-    print("   RadiumOS Online | x86 Dual-Kernel Architecture (C / Rust)  \n");
-    print(" =============================================================\n\n");
-
-    terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-    print("\n[80x50] VGA text mode confirmed\n\n");
-    terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-
     if (info->is_64bit) {
-        print("System is running in Long Mode (64-bit).\n");
+        print("\nSystem is running in Long Mode (64-bit).\n");
+        
+        // Proof 1: Pointer Size
         printr("Proof: Pointer width is %d bytes.\n", sizeof(void*));
+        
+        // Proof 2: The Address
+        // In x86_64 Long Mode, kernel addresses are usually mapped to the higher half 
+        // (canonical addresses starting with 0xFFFF). We print all 16 hex digits.
         printr("Proof Addr: 0x%016llx\n", (unsigned long long)proof_addr);
+        
     } else {
-        print("System is running in 32-bit Protected Mode.\n");
+        printr("\nSystem is running in 32-bit Protected Mode.\n");
+        
+        // Proof 1: Pointer Size
         printr("Proof: Pointer width is %d bytes.\n", sizeof(void*));
+        
+        // Proof 2: The Address
+        // In 32-bit mode, addresses are limited to 8 hex digits (4 bytes).
         printr("Proof Addr: 0x%08x\n", (unsigned int)proof_addr);
     }
+        set_flashy_net_info();
 
-    kernel_debug_stage("NET", "loading network status banner");
-    set_flashy_net_info();
-    kernel_debug_ok("network banner", true);
-
-    kernel_debug_stage("INT", "enabling interrupts");
+       //outb(0x21, inb(0x21) | 0x01); 
     enable_interrupts();
-    kernel_debug_ok("interrupts", true);
-
-    kernel_debug_stage("HALT", "kernel entering idle loop");
-    print("Kernel fully initialized. Entering main loop...\n\n");
-helios_init();
-
     while (1) {
         halt();
     }

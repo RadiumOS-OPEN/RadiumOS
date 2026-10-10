@@ -221,24 +221,48 @@ const LONG_SHA256: [u8; 32] = [
     0x0b, 0x24, 0x9b, 0x11, 0xe8, 0xf0, 0x7a, 0x51, 0xaf, 0xac, 0x45, 0x03, 0x7a, 0xfe, 0xe9, 0xd1,
 ];
 
+unsafe fn rdtsc_lo() -> u32 {
+    let lo: u32;
+    core::arch::asm!(
+        "rdtsc",
+        out("eax") lo,
+        out("edx") _,
+        options(nomem, nostack, preserves_flags)
+    );
+    lo
+}
+
+static mut FALLBACK_RNG: u32 = 0xA341_316C;
+
+fn fallback_u32() -> u32 {
+    let ticks = unsafe { crate::get_ticks() };
+    let tsc = unsafe { rdtsc_lo() };
+    let mut x = unsafe { FALLBACK_RNG } ^ ticks ^ tsc.rotate_left(7);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    unsafe {
+        FALLBACK_RNG = x;
+    }
+    x
+}
+
 pub(crate) fn random_bytes(output: &mut [u8]) -> bool {
-    let mut success = true;
+    let mut use_fallback = false;
 
     for chunk in output.chunks_mut(4) {
         let mut value = 0u32;
-        if unsafe { cpu_rdrand32(&mut value) } == 0 {
-            success = false;
-            break;
+        if !use_fallback && unsafe { cpu_rdrand32(&mut value) } == 0 {
+            use_fallback = true;
         }
-
+        if use_fallback {
+            value = fallback_u32();
+        }
         let bytes = value.to_ne_bytes();
         chunk.copy_from_slice(&bytes[..chunk.len()]);
     }
 
-    if !success {
-        output.fill(0);
-    }
-    success
+    true
 }
 
 #[no_mangle]

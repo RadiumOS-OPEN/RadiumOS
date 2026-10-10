@@ -1,3 +1,4 @@
+
 #include "../Avfs/Avfs.h"
 #include "../terminal/terminal.h"
 #include "../utility/utility.h"
@@ -10,13 +11,13 @@
 #define COL_HIDDEN  0x08
 #define COL_SIZE    0x0B
 #define COL_HEADER  0x0E
-#define COL_HLS     0x0D  // Vibrant Light Magenta for Helios source
-#define COL_RXE     0x0C  // Vibrant Light Red for RXE executables
-#define COL_HTML    0x03  // Vibrant Cyan for HTML files
 
+#define LS_COLS      4
+#define LS_COL_WIDTH 18
 #define MAX_LS_FILES  256
 
 /* ── File entry storage ───────────────────────────────────────────── */
+// These must be declared globally so all helper functions can see them
 static DirectoryEntry ls_entries[MAX_LS_FILES];
 static char ls_full_paths[MAX_LS_FILES][AVFS_FILENAME_MAX];
 static int  ls_count = 0;
@@ -30,6 +31,7 @@ typedef struct {
     int reverse;
     int size_sort;
     int no_sort;
+    int one_col;
     int classify;
     int inode;
     int color;
@@ -51,13 +53,6 @@ static int ls_str_len(const char* s) {
 static int ls_char_in(const char* s, char c) {
     while (*s) { if (*s == c) return 1; s++; }
     return 0;
-}
-
-static int ls_has_ext(const char* name, const char* ext) {
-    int n_len = ls_str_len(name);
-    int e_len = ls_str_len(ext);
-    if (n_len < e_len) return 0;
-    return ls_str_eq(name + n_len - e_len, ext);
 }
 
 static const char* ls_basename(const char* path) {
@@ -90,6 +85,12 @@ static void ls_print_human(int sz) {
     if (sz < 1024)           { ls_print_int(sz);               print("B  "); }
     else if (sz < 1024*1024) { ls_print_int(sz / 1024);        print("K  "); }
     else                     { ls_print_int(sz / (1024*1024));  print("M  "); }
+}
+
+static void ls_print_padded(const char* s, int width) {
+    int l = ls_str_len(s);
+    print(s);
+    for (int i = l; i < width; i++) print(" ");
 }
 
 /* ── Summary Implementation ───────────────────────────────────────── */
@@ -196,10 +197,10 @@ static int ls_authenticate_system(void) {
 
 /* ── Executable detection ─────────────────────────────────────────── */
 static int ls_is_exec(const char* name) {
-    if (ls_has_ext(name, ".rsh")) return 1;
-    if (ls_has_ext(name, ".rxe")) return 1;
-    if (ls_has_ext(name, ".bin")) return 1;
-    if (ls_has_ext(name, ".rash")) return 1;
+    int l = ls_str_len(name);
+    if (l >= 4 && ls_str_eq(name + l - 4, ".rsh"))  return 1;
+    if (l >= 4 && ls_str_eq(name + l - 4, ".bin"))  return 1;
+    if (l >= 5 && ls_str_eq(name + l - 5, ".rash")) return 1;
     if (!ls_char_in(name, '.')) return 1;
     return 0;
 }
@@ -207,7 +208,6 @@ static int ls_is_exec(const char* name) {
 static LsOpts ls_default_opts(void) {
     LsOpts o = {0};
     o.color = 1;
-    o.long_fmt = 1; // Forced -l format
     return o;
 }
 
@@ -300,19 +300,9 @@ static void ls_print_long(const LsOpts* o) {
         DirectoryEntry* e = &ls_entries[i];
         ls_print_field(o->inode ? e->index : i, 3); print("  ");
         
-        if (e->is_directory) { 
-            set_text_color(COL_DIR); 
-            print("dir   "); 
-        } else if (ls_is_exec(e->name)) { 
-            if (ls_has_ext(e->name, ".rxe")) set_text_color(COL_RXE);
-            else set_text_color(COL_EXEC);
-            print("exec  "); 
-        } else { 
-            if (ls_has_ext(e->name, ".hls")) set_text_color(COL_HLS);
-            else if (ls_has_ext(e->name, ".html")) set_text_color(COL_HTML);
-            else reset_text_color();
-            print("file  "); 
-        }
+        if (e->is_directory) { set_text_color(COL_DIR); print("dir   "); }
+        else if (ls_is_exec(e->name)) { set_text_color(COL_EXEC); print("exec  "); }
+        else { reset_text_color(); print("file  "); }
         reset_text_color();
 
         if (e->is_directory) print("       -  ");
@@ -327,9 +317,6 @@ static void ls_print_long(const LsOpts* o) {
         if (o->color) {
             if (e->name[0] == '.') set_text_color(COL_HIDDEN);
             else if (e->is_directory) set_text_color(COL_DIR);
-            else if (ls_has_ext(e->name, ".hls")) set_text_color(COL_HLS);
-            else if (ls_has_ext(e->name, ".html")) set_text_color(COL_HTML);
-            else if (ls_has_ext(e->name, ".rxe")) set_text_color(COL_RXE);
             else if (ls_is_exec(e->name)) set_text_color(COL_EXEC);
             else reset_text_color();
         }
@@ -338,6 +325,27 @@ static void ls_print_long(const LsOpts* o) {
         if (o->classify) { if (e->is_directory) print("/"); else if (ls_is_exec(e->name)) print("*"); }
         print("\n");
     }
+}
+
+static void ls_print_short(const LsOpts* o) {
+    int col = 0;
+    for (int i = 0; i < ls_count; i++) {
+        DirectoryEntry* e = &ls_entries[i];
+        if (o->color) {
+            if (e->name[0] == '.') set_text_color(COL_HIDDEN);
+            else if (e->is_directory) set_text_color(COL_DIR);
+            else if (ls_is_exec(e->name)) set_text_color(COL_EXEC);
+        }
+        if (o->one_col) {
+            print(e->name); reset_text_color();
+            if (o->classify) { if (e->is_directory) print("/"); else if (ls_is_exec(e->name)) print("*"); }
+            print("\n");
+        } else {
+            ls_print_padded(e->name, LS_COL_WIDTH); reset_text_color();
+            if (++col >= LS_COLS) { print("\n"); col = 0; }
+        }
+    }
+    if (!o->one_col && col > 0) print("\n");
 }
 
 /* ── Argument Parser ──────────────────────────────────────────────── */
@@ -361,6 +369,7 @@ static LsOpts ls_parse_opts(int argc, char* argv[]) {
                     case 'R': o.recursive = 1; break;
                     case 'S': o.size_sort = 1; break;
                     case 'r': o.reverse = 1; break;
+                    case '1': o.one_col = 1; break;
                 }
             }
         }
@@ -405,9 +414,10 @@ void ls_command(int argc, char* argv[]) {
 
     ls_sort(&o);
 
-    // Forced long format execution
     ls_print_long(&o);
+    
 
     ls_summary(target);
     print("\n");
 }
+

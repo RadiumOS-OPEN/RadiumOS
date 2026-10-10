@@ -12,8 +12,8 @@ src/kernel/kernel.o: src/kernel/kernel.c src/kernel/registerCommands.h \
   src/kernel/../network/nic.h src/kernel/../network/netstack.h \
   src/kernel/../timers/timer.h src/kernel/../scheduler/task.h \
   src/kernel/../io/io.h src/kernel/../errors/error.h \
-  src/kernel/../commands/cowsay.h src/kernel/../rshplugin/rshplugin.h \
-  src/kernel/../http/http.h
+  src/kernel/../commands/cowsay.h src/kernel/../commands/bootsplash.h \
+  src/kernel/../rshplugin/rshplugin.h src/kernel/../http/http.h
 src/kernel/registerCommands.h:
 src/kernel/createFiles.h:
 src/kernel/../vga/vga.h:
@@ -40,5 +40,6 @@ src/kernel/../scheduler/task.h:
 src/kernel/../io/io.h:
 src/kernel/../errors/error.h:
 src/kernel/../commands/cowsay.h:
+src/kernel/../commands/bootsplash.h:
 src/kernel/../rshplugin/rshplugin.h:
 src/kernel/../http/http.h:

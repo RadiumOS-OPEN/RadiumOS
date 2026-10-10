@@ -1,4 +1,3 @@
-
 #[cfg(target_os = "none")]
 mod command;
 #[cfg(target_os = "none")]
@@ -16,8 +15,15 @@ use alloc::{
 };
 use core::fmt;
 use rustls::{
-    client::UnbufferedClientConnection, pki_types::ServerName, time_provider::TimeProvider,
-    unbuffered::ConnectionState, ClientConfig, RootCertStore,
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        WebPkiServerVerifier,
+    },
+    client::UnbufferedClientConnection,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    time_provider::TimeProvider,
+    unbuffered::ConnectionState,
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
 };
 
 #[derive(Debug)]
@@ -176,6 +182,7 @@ impl Url {
     }
 }
 
+/// Builds a TLS client configuration that validates certificates against `roots`.
 pub fn configuration(
     time: Arc<dyn TimeProvider>,
     roots: RootCertStore,
@@ -184,10 +191,78 @@ pub fn configuration(
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
         .with_no_client_auth();
+    finish_client_config(&mut config);
+    Ok(Arc::new(config))
+}
+
+/// Builds a TLS client configuration that skips server certificate validation.
+pub fn configuration_insecure(time: Arc<dyn TimeProvider>) -> Result<Arc<ClientConfig>, Error> {
+    let signatures = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(public_roots()),
+        Arc::new(provider::provider()),
+    )
+    .build()
+    .map_err(|_| Error::Message("TLS verifier setup failed"))?;
+    let mut config = ClientConfig::builder_with_details(Arc::new(provider::provider()), time)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier { signatures }))
+        .with_no_client_auth();
+    finish_client_config(&mut config);
+    Ok(Arc::new(config))
+}
+
+/// Applies the protocol settings shared by verified and insecure TLS clients.
+fn finish_client_config(config: &mut ClientConfig) {
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     config.max_fragment_size = Some(1200);
-    Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+struct InsecureVerifier {
+    signatures: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for InsecureVerifier {
+    /// Accepts the server certificate without validating its identity or trust chain.
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    /// Verifies TLS 1.2 handshake signatures using the standard signature verifier.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.signatures
+            .verify_tls12_signature(message, cert, dss)
+    }
+
+    /// Verifies TLS 1.3 handshake signatures using the standard signature verifier.
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.signatures
+            .verify_tls13_signature(message, cert, dss)
+    }
+
+    /// Returns the signature schemes supported by the standard verifier.
+    fn supported_verify_schemes(&self) -> alloc::vec::Vec<SignatureScheme> {
+        self.signatures.supported_verify_schemes()
+    }
 }
 
 pub fn public_roots() -> RootCertStore {
@@ -229,14 +304,9 @@ pub(crate) fn exchange_plain<T: Transport>(
     max_size: usize,
 ) -> Result<Response, Error> {
     transport.write(request)?;
-    let is_unlimited = max_size == 0 || max_size == usize::MAX;
-    let limit = if is_unlimited {
-        usize::MAX
-    } else {
-        max_size
-            .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
-            .ok_or(Error::Message("invalid size limit"))?
-    };
+    let limit = max_size
+        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
+        .ok_or(Error::Message("invalid size limit"))?;
     let mut incoming = [0u8; 4096];
     let mut response = Vec::new();
     loop {
@@ -248,7 +318,7 @@ pub(crate) fn exchange_plain<T: Transport>(
             return parse_response(&response, head, max_size, true)?
                 .ok_or(Error::Message("incomplete HTTP response"));
         }
-        if !is_unlimited && count > limit.saturating_sub(response.len()) {
+        if count > limit.saturating_sub(response.len()) {
             return Err(Error::Message("response exceeds --max-size"));
         }
         response.extend_from_slice(&incoming[..count]);
@@ -283,8 +353,6 @@ pub(crate) fn exchange_tls<T: Transport>(
     let mut written = 0;
     let mut sent = false;
     let mut response = Vec::new();
-    let is_unlimited = max_size == 0 || max_size == usize::MAX;
-
     loop {
         let status = connection.process_tls_records(&mut incoming[..used]);
         let mut discard = status.discard;
@@ -314,13 +382,11 @@ pub(crate) fn exchange_tls<T: Transport>(
                 while let Some(record) = state.next_record() {
                     let record = record?;
                     discard += record.discard;
-                    if !is_unlimited {
-                        let limit = max_size
-                            .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
-                            .ok_or(Error::Message("invalid size limit"))?;
-                        if record.payload.len() > limit.saturating_sub(response.len()) {
-                            return Err(Error::Message("response exceeds --max-size"));
-                        }
+                    let limit = max_size
+                        .checked_add(WIRE_OVERHEAD_LIMIT + HEADER_LIMIT)
+                        .ok_or(Error::Message("invalid size limit"))?;
+                    if record.payload.len() > limit.saturating_sub(response.len()) {
+                        return Err(Error::Message("response exceeds --max-size"));
                     }
                     response.extend_from_slice(record.payload);
                 }
@@ -466,7 +532,6 @@ fn parse_response_at(
     if length.is_some() && chunked {
         return Err(Error::Message("ambiguous HTTP response framing"));
     }
-    let is_unlimited = max_size == 0 || max_size == usize::MAX;
     let data = &bytes[end..];
     let body = if head || status == 204 || status == 304 {
         Vec::new()
@@ -476,7 +541,7 @@ fn parse_response_at(
             None => return Ok(None),
         }
     } else if let Some(length) = length {
-        if !is_unlimited && length > max_size {
+        if length > max_size {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if data.len() < length {
@@ -484,7 +549,7 @@ fn parse_response_at(
         }
         data[..length].to_vec()
     } else {
-        if !is_unlimited && data.len() > max_size {
+        if data.len() > max_size {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if !closed {
@@ -501,7 +566,6 @@ fn parse_response_at(
 }
 
 fn decode_chunks(mut bytes: &[u8], max_size: usize) -> Result<Option<Vec<u8>>, Error> {
-    let is_unlimited = max_size == 0 || max_size == usize::MAX;
     let mut body = Vec::new();
     loop {
         let end = match bytes.windows(2).position(|w| w == b"\r\n") {
@@ -527,7 +591,7 @@ fn decode_chunks(mut bytes: &[u8], max_size: usize) -> Result<Option<Vec<u8>>, E
                 _ => Ok(None),
             };
         }
-        if !is_unlimited && size > max_size.saturating_sub(body.len()) {
+        if size > max_size.saturating_sub(body.len()) {
             return Err(Error::Message("response exceeds --max-size"));
         }
         if bytes.len() < size + 2 {
@@ -626,4 +690,3 @@ mod tests {
             .is_empty());
     }
 }
-
