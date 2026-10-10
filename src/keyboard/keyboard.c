@@ -1907,3 +1907,16 @@ void history_reset(void) {
     history_view_offset = 0;
     memset(history_buffer, 0, sizeof(history_buffer));
 }
+
+int keyboard_poll_scancode(void) {
+    if (!is_key_pressed()) return -1;
+    return (int)inb(0x60);
+}
+
+void keyboard_scancode_capture_begin(void) {
+    drain_keyboard_buffer();
+}
+
+void keyboard_scancode_capture_end(void) {
+    drain_keyboard_buffer();
+}
