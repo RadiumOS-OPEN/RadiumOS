@@ -675,22 +675,27 @@ int avfs_append_file(const char* name, const void* buffer, uint32_t size) {
     if (new_blocks == 0) new_blocks = 1;
 
     if (new_blocks > old_blocks) {
-        // Need more blocks — find a new contiguous run and relocate
-        for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++)
-            avfs.block_bitmap[i] = 0;
-
+        uint32_t old_start = f->start_block;
         int new_start = avfs_find_free_blocks(new_blocks);
         if (new_start < 0) {
-            // Re-mark old blocks; can't grow
-            for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++)
-                avfs.block_bitmap[i] = 1;
-            return -2;
+            for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                avfs.block_bitmap[i] = 0;
+            new_start = avfs_find_free_blocks(new_blocks);
+            if (new_start < 0) {
+                for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                    avfs.block_bitmap[i] = 1;
+                return -2;
+            }
+            memmove(&avfs.data[new_start * AVFS_BLOCK_SIZE],
+                    &avfs.data[old_start * AVFS_BLOCK_SIZE],
+                    old_size);
+        } else {
+            memcpy(&avfs.data[new_start * AVFS_BLOCK_SIZE],
+                   &avfs.data[old_start * AVFS_BLOCK_SIZE],
+                   old_size);
+            for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                avfs.block_bitmap[i] = 0;
         }
-
-        // Copy existing data to the new location
-        memcpy(&avfs.data[new_start * AVFS_BLOCK_SIZE],
-               &avfs.data[f->start_block * AVFS_BLOCK_SIZE],
-               old_size);
 
         for (int i = new_start; i < new_start + new_blocks; i++)
             avfs.block_bitmap[i] = 1;
@@ -886,21 +891,27 @@ int avfs_truncate(const char* name, int newsize) {
             for (int i = (int)f->start_block + old_blocks; i < (int)f->start_block + new_blocks; i++)
                 avfs.block_bitmap[i] = 1;
         } else {
-            // Relocate: free old run, find a new contiguous run, copy data over
-            for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++)
-                avfs.block_bitmap[i] = 0;
-
+            uint32_t old_start = f->start_block;
             int new_start = avfs_find_free_blocks(new_blocks);
             if (new_start < 0) {
-                // Can't grow - restore old blocks and fail
-                for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++)
-                    avfs.block_bitmap[i] = 1;
-                return -2;
+                for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                    avfs.block_bitmap[i] = 0;
+                new_start = avfs_find_free_blocks(new_blocks);
+                if (new_start < 0) {
+                    for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                        avfs.block_bitmap[i] = 1;
+                    return -2;
+                }
+                memmove(&avfs.data[new_start * AVFS_BLOCK_SIZE],
+                        &avfs.data[old_start * AVFS_BLOCK_SIZE],
+                        old_size);
+            } else {
+                memcpy(&avfs.data[new_start * AVFS_BLOCK_SIZE],
+                       &avfs.data[old_start * AVFS_BLOCK_SIZE],
+                       old_size);
+                for (int i = (int)old_start; i < (int)old_start + old_blocks; i++)
+                    avfs.block_bitmap[i] = 0;
             }
-
-            memcpy(&avfs.data[new_start * AVFS_BLOCK_SIZE],
-                   &avfs.data[f->start_block * AVFS_BLOCK_SIZE],
-                   old_size);
 
             for (int i = new_start; i < new_start + new_blocks; i++)
                 avfs.block_bitmap[i] = 1;
