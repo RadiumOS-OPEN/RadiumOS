@@ -15429,15 +15429,28 @@ fn parse_lines(data: &[u8], lines: &mut [Line; MAX_LINES]) -> usize {
 }
 
 fn resolve_path(path: &[u8], out: &mut [u8; 256]) -> bool {
-    let len = path.len().min(255);
-    out[..len].copy_from_slice(&path[..len]);
-    out[len] = 0;
-    if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
-    if len + 4 < 256 {
-        out[len..len+4].copy_from_slice(b".rsh");
-        out[len+4] = 0;
-        if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+    fn try_path(bytes: &[u8], out: &mut [u8; 256]) -> bool {
+        let len = bytes.len().min(255);
+        out[..len].copy_from_slice(&bytes[..len]);
         out[len] = 0;
+        if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+        if len + 4 < 256 {
+            out[len..len+4].copy_from_slice(b".rsh");
+            out[len+4] = 0;
+            if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+            out[len] = 0;
+        }
+        false
+    }
+    if try_path(path, out) { return true; }
+    if !path.starts_with(b"/") {
+        let mut prefixed = [0u8; 256];
+        let pfx = b"/bin/";
+        if pfx.len() + path.len() < 256 {
+            prefixed[..pfx.len()].copy_from_slice(pfx);
+            prefixed[pfx.len()..pfx.len()+path.len()].copy_from_slice(path);
+            if try_path(&prefixed[..pfx.len()+path.len()], out) { return true; }
+        }
     }
     false
 }
