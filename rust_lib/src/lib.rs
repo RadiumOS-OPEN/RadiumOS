@@ -14710,7 +14710,7 @@ impl ScriptFunction {
 pub struct CallFrame {
     pub func_name:     FuncName,
     pub saved_vars:    [Variable; MAX_VARS],
-    pub saved_indices: [u8; MAX_VARS],
+    pub saved_indices: [u16; MAX_VARS],
     pub saved_count:   usize,
 }
 impl CallFrame {
@@ -14718,7 +14718,7 @@ impl CallFrame {
         Self {
             func_name:     Str::new(),
             saved_vars:    [Variable::new(); MAX_VARS],
-            saved_indices: [0u8; MAX_VARS],
+            saved_indices: [0u16; MAX_VARS],
             saved_count:   0,
         }
     }
@@ -15490,7 +15490,7 @@ fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
                 let sc = frame.saved_count;
                 if sc < MAX_VARS {
                     frame.saved_vars[sc]    = ctx.vars[i];
-                    frame.saved_indices[sc] = i as u8;
+                    frame.saved_indices[sc] = i as u16;
                     frame.saved_count += 1;
                 }
             }
