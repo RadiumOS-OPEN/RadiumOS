@@ -69,7 +69,7 @@ QEMU_FLAGS = -display sdl \
 
 # Default target
 .PHONY: all
-all: check-rust-status verify-sources $(ISO_FILE) $(DISK_IMG) verify-symbols
+all: check-rust-status verify-sources $(ISO_FILE) verify-symbols
 	@echo "✓ Build complete and verified"
 
 # Check Rust status
