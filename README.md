@@ -5,7 +5,7 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 ## Features
 
 - **Kernel**: Preemptive multitasking scheduler with watchdog
-- **Graphics**: VBE 800×600 framebuffer + VGA text mode (80×25)
+- **Graphics**: VGA text mode (80×50) and Mode 13h (320×200)
 - **Networking**: RTL8139 NIC with custom TCP/IP stack, DNS, HTTPS proxy
 - **Filesystem**: AVFS (Actual Virtual FileSystem) RAM disk
 - **Scripting**: RSH v2.3 (RadiumOS Shell Language)
