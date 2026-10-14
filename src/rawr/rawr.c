@@ -16,7 +16,6 @@
 #include "../rawr/rawr.h"
 
 #include "../user/login.h"
-#include "../user/sudo.h"
 
 #include "../cpu/cpu.h"
 #include "../utility/utility.h"
