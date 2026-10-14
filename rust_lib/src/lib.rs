@@ -211,11 +211,23 @@ unsafe fn term_putc(c: u8) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rust_print(s: &[u8]) {
+fn rust_print(s: &[u8]) {
     if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
     unsafe {
         for &c in s { terminal_putchar(c); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_c_print(s: *const u8) {
+    if s.is_null() { return; }
+    if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
+    unsafe {
+        let mut p = s;
+        while *p != 0 {
+            terminal_putchar(*p);
+            p = p.add(1);
+        }
     }
 }
 
