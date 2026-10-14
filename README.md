@@ -51,7 +51,8 @@ Rust toolchain — required for the Rust component (`rust_lib/`):
   rustup component add rust-src --toolchain nightly
   ```
 
-- Rust crate dependencies (currently just `linked_list_allocator`, pinned in
+- Rust crate dependencies (`linked_list_allocator`, `rustls`, `aes-gcm`,
+  `p256`/`p384`, `rsa`, `sha2`, `webpki-roots`, `zeroize`, pinned in
   `rust_lib/Cargo.lock`) are fetched automatically by Cargo on first build —
   no manual step needed.
 
@@ -111,7 +112,7 @@ Run `make help` for the full list. Highlights:
 
 - `src/` — Kernel and core OS code (C)
 - `rust_lib/` — Rust standard library components (With Rust SRC)
-- `packages/` — RSH scripts and modules
+- `packages/` — extra files; runtime RSH scripts are created in AVFS by `src/kernel/createFiles.c`
 - `makefile` — Build system
 - `linker.ld` — Linker configuration for i686
 
