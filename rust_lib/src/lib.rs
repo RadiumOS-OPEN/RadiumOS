@@ -9339,10 +9339,20 @@ impl<T> Vec<T> {
         if capacity == 0 {
             return Vec::new();
         }
+        if core::mem::size_of::<T>() == 0 {
+            return Vec {
+                ptr: core::ptr::NonNull::<T>::dangling().as_ptr(),
+                len: 0,
+                capacity,
+            };
+        }
         
         unsafe {
             let size = capacity * core::mem::size_of::<T>();
-            let ptr = malloc(size as u32) as *mut T;
+            let align = core::mem::align_of::<T>().max(1);
+            let layout = core::alloc::Layout::from_size_align(size, align)
+                .expect("vec layout");
+            let ptr = alloc::alloc::alloc(layout) as *mut T;
             
             if ptr.is_null() {
                 panic!("Failed to allocate memory for Vec");
@@ -9590,19 +9600,35 @@ impl<T> Vec<T> {
         if new_capacity <= self.capacity {
             return;
         }
+        if core::mem::size_of::<T>() == 0 {
+            if self.ptr.is_null() {
+                self.ptr = core::ptr::NonNull::<T>::dangling().as_ptr();
+            }
+            self.capacity = new_capacity;
+            return;
+        }
         
         unsafe {
             let new_size = new_capacity * core::mem::size_of::<T>();
-            let new_ptr = malloc(new_size as u32) as *mut T;
+            let align = core::mem::align_of::<T>().max(1);
+            let layout = core::alloc::Layout::from_size_align(new_size, align)
+                .expect("vec grow layout");
+            let new_ptr = alloc::alloc::alloc(layout) as *mut T;
             
             if new_ptr.is_null() {
                 panic!("Failed to allocate memory for Vec growth");
             }
             
-            // Copy old data
             if self.len > 0 && !self.ptr.is_null() {
                 core::ptr::copy_nonoverlapping(self.ptr, new_ptr, self.len);
-                free(self.ptr as *mut u8);
+            }
+            if !self.ptr.is_null() {
+                let old_size = self.capacity * core::mem::size_of::<T>();
+                if old_size > 0 {
+                    let old_layout = core::alloc::Layout::from_size_align(old_size, align)
+                        .expect("vec old layout");
+                    alloc::alloc::dealloc(self.ptr as *mut u8, old_layout);
+                }
             }
             
             self.ptr = new_ptr;
@@ -9647,9 +9673,12 @@ impl<T> Drop for Vec<T> {
                 core::ptr::drop_in_place(self.ptr.add(i));
             }
             
-            // Free memory
-            if !self.ptr.is_null() {
-                free(self.ptr as *mut u8);
+            if core::mem::size_of::<T>() != 0 && !self.ptr.is_null() && self.capacity > 0 {
+                let size = self.capacity * core::mem::size_of::<T>();
+                let align = core::mem::align_of::<T>().max(1);
+                if let Ok(layout) = core::alloc::Layout::from_size_align(size, align) {
+                    alloc::alloc::dealloc(self.ptr as *mut u8, layout);
+                }
             }
         }
     }
