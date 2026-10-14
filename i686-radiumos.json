@@ -10,6 +10,7 @@
   "linker": "ld.lld",
   "panic-strategy": "abort",
   "disable-redzone": true,
+  "features": "-mmx,-sse",
   "relocation-model": "static",
   "code-model": "kernel"
 }
