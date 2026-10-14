@@ -48,6 +48,13 @@ KERNEL_BIN = os.bin
 ISO_FILE = os.iso
 DISK_IMG = disk.img
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  QEMU_AUDIODEV = coreaudio
+else
+  QEMU_AUDIODEV = pa
+endif
+
 QEMU_FLAGS = -display sdl \
   -rtc base=utc,clock=host,driftfix=slew \
   -m 4G \
@@ -63,7 +70,7 @@ QEMU_FLAGS = -display sdl \
   -device rtl8139,netdev=net0 \
   -vga std \
   -global VGA.vgamem_mb=16 \
-  -audiodev pa,id=audio0 \
+  -audiodev $(QEMU_AUDIODEV),id=audio0 \
   -machine pcspk-audiodev=audio0 \
   -d guest_errors
 
