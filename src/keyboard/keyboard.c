@@ -787,14 +787,14 @@ static void scroll_byy(int delta) {
 // Terminal / prompt helpers
 // ============================================================
 void init_keyboard(void) {
-    kbd_wait_cmd(); outb(0x60, 0xAD);
+    kbd_wait_cmd(); outb(0x64, 0xAD);
     drain_keyboard_buffer();
     kbd_wait_cmd(); outb(0x64, 0xAA);
     kbd_wait_data();
     uint8_t status = inb(0x60);
     if (status != 0x55) print("Keyboard Self-Test Failed\n");
     drain_keyboard_buffer();
-    kbd_wait_cmd(); outb(0x60, 0xAE);
+    kbd_wait_cmd(); outb(0x64, 0xAE);
 }
 
 
