@@ -12,7 +12,7 @@ NM = $(shell command -v llvm-nm 2>/dev/null || command -v llvm-nm-19 2>/dev/null
 NASMFLAGS = -f elf32
 CFLAGS = -c -target i686-none-elf -ffreestanding -mno-sse -Wall -Wextra -Werror=implicit-function-declaration -MMD -MP
 # Added --unresolved-symbols=ignore-all so the binary is produced for our NM verification script
-LDFLAGS = -T linker.ld -static -nostdlib --unresolved-symbols=ignore-all --fatal-warnings
+LDFLAGS = -T linker.ld -static -nostdlib --fatal-warnings
 
 # Directories
 SRC_DIR = src
