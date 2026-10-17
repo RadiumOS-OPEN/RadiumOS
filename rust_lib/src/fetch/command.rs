@@ -372,6 +372,112 @@ fn execute(args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
+fn http_body(url_text: &str, cap: usize) -> Result<Vec<u8>, Error> {
+    let mut url = Url::parse(url_text)?;
+    let started = unsafe { crate::get_ticks() };
+    let timeout = 20000u32;
+    let mut config = None;
+    let mut redirects = 0u32;
+    let response = loop {
+        let remaining = timeout.saturating_sub(unsafe { crate::get_ticks() }.wrapping_sub(started));
+        if remaining == 0 {
+            return Err(Error::Message("fetch timed out"));
+        }
+        let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;
+        let response = if url.is_https {
+            if config.is_none() {
+                config = Some(if Rtc.current_time().is_none() {
+                    configuration_insecure(Arc::new(Rtc))?
+                } else {
+                    configuration(Arc::new(Rtc), public_roots())?
+                });
+            }
+            get(
+                &mut tcp,
+                &url,
+                config.as_ref().unwrap().clone(),
+                false,
+                cap,
+            )?
+        } else {
+            get_plain(&mut tcp, &url, false, cap)?
+        };
+        drop(tcp);
+        if [301, 302, 303, 307, 308].contains(&response.status) {
+            if redirects == 5 {
+                return Err(Error::Message("too many redirects"));
+            }
+            let location = response
+                .location
+                .as_deref()
+                .ok_or(Error::Message("redirect has no Location header"))?;
+            url = url.redirect(location)?;
+            redirects += 1;
+            continue;
+        }
+        break response;
+    };
+    Ok(response.body)
+}
+
+fn write_out(out: *mut u8, cap: i32, text: &str) {
+    let n = text.len().min((cap as usize) - 1);
+    unsafe {
+        if n > 0 {
+            core::ptr::copy_nonoverlapping(text.as_ptr(), out, n);
+        }
+        *out.add(n) = 0;
+    }
+}
+
+const BROWSER_BODY_LIMIT: usize = 1024 * 1024;
+const NIC_UNAVAILABLE: &str = "HTTP needs the network stack. Check the URL, NIC, and DNS.";
+
+/// GET a page for rbrowse. Returns the body length, or a negative error.
+/// The body is truncated to `cap` so a long page still opens. On failure the
+/// reason is written into `out`. Certificate dates are checked when the RTC
+/// is valid; otherwise HTTPS proceeds without date checks.
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_http_get(url: *const u8, out: *mut u8, cap: i32) -> i32 {
+    if url.is_null() || out.is_null() || cap < 2 {
+        return -1;
+    }
+    if !crate::nic_is_ready() {
+        write_out(out, cap, NIC_UNAVAILABLE);
+        return -1;
+    }
+    if BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        write_out(out, cap, "another fetch is running");
+        return -2;
+    }
+    let flags: u32;
+    core::arch::asm!("pushfd", "pop {}", out(reg) flags);
+    let _guard = CommandGuard(flags);
+    core::arch::asm!("sti");
+    crate::FETCH_NETWORK_SILENT.store(true, Ordering::Relaxed);
+    let result = (|| {
+        let text = unsafe { argument(url) }?;
+        http_body(text, BROWSER_BODY_LIMIT)
+    })();
+    match result {
+        Ok(body) => {
+            let n = body.len().min((cap as usize) - 1);
+            if n > 0 {
+                core::ptr::copy_nonoverlapping(body.as_ptr(), out, n);
+            }
+            *out.add(n) = 0;
+            n as i32
+        }
+        Err(error) => {
+            write_out(out, cap, &alloc::format!("{error}"));
+            -2
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_fetch(argc: i32, argv: *const *const u8) -> i32 {
     if BUSY

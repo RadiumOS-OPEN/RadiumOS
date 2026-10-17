@@ -108,6 +108,7 @@ extern int32_t net_wol(int32_t argc, const uint8_t *const *argv);
 // Browser
 // ============================================================
 extern int graphical_browser(void);
+extern void rbrowse(int argc, char *argv[]);
 
 // ============================================================
 // JSON
@@ -1098,6 +1099,7 @@ void registerCommands(void)
     // -- Browser --------------------------------------------------------------
     register_command("gbrowser",  "Graphical web browser",          cmd_gbrowser);
     register_command("gb",        "Graphical browser (alias)",      cmd_gbrowser);
+    register_command("rbrowse",   "Web browser (VGA mode 13h)",     rbrowse);
 
     // -- JSON -----------------------------------------------------------------
     register_command("jsontest",  "Test JSON parser",               cmd_json_test);

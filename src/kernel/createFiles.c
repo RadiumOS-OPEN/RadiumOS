@@ -5261,6 +5261,38 @@ const char* hello_html =
 avfs_create_file("/home/user/hello.html", strlen(hello_html));
 avfs_write_file("/home/user/hello.html", hello_html, strlen(hello_html), 0);
 done("Updated hello world with CSS & New Tags", "hello.html");
+
+    const char *rbrowse_html =
+        "<!DOCTYPE html><html><head><title>rbrowse</title><style>"
+        "body{background-color:#120C06;color:#DDCCBB;}"
+        "h1{color:#FF4400;}"
+        "a{color:#FF7722;}"
+        ".note{color:#FFAA55;}"
+        "#status{color:#00ff00;}"
+        "button{background-color:#5C2200;color:#FFCCAA;}"
+        "</style></head><body>"
+        "<h1>rbrowse</h1>"
+        "<p id=\"status\">Starting</p>"
+        "<p class=\"note\">Mode 13h. Tab moves focus. Click a link or the button.</p>"
+        "<p><a href=\"/home/user/hello.html\">Hello page</a></p>"
+        "<p><a href=\"/home/user/rbrowse-next.html\">Next page</a></p>"
+        "<p><button onclick=\"document.getElementById('status').textContent='Clicked';\">Click</button></p>"
+        "<p><input value=\"edit me\"></p>"
+        "<script>document.getElementById('status').textContent='Ready';</script>"
+        "</body></html>";
+    avfs_create_file("/home/user/rbrowse.html", strlen(rbrowse_html));
+    avfs_write_file("/home/user/rbrowse.html", rbrowse_html, strlen(rbrowse_html), 0);
+    done("Created rbrowse demo", "rbrowse.html");
+
+    const char *rbrowse_next =
+        "<!DOCTYPE html><html><head><title>Next</title></head>"
+        "<body style=\"background-color:#120C06;color:#DDCCBB;\">"
+        "<h1>Next</h1><p>Use the back button to return.</p>"
+        "<p><a href=\"/home/user/rbrowse.html\">Home</a></p>"
+        "</body></html>";
+    avfs_create_file("/home/user/rbrowse-next.html", strlen(rbrowse_next));
+    avfs_write_file("/home/user/rbrowse-next.html", rbrowse_next, strlen(rbrowse_next), 0);
+    done("Created rbrowse next page", "rbrowse-next.html");
     install_helios_apps(g_disk_current);
     if (!g_disk_current) avfs_save_file(DISK_STAMP_FILE, BUILD_STAMP, (uint32_t)strlen(BUILD_STAMP), true);
     avfs_chdir("/home/user");
