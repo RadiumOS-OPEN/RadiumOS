@@ -306,6 +306,19 @@ void rsh_plugin_unload(const char *cmd_name) {
         print("\n");
         return;
     }
+    // The command table points at g_plugins[slot].cmd_name, so unregister
+    // while the name is still intact, and keep a local copy for the print.
+    char name_copy[64];
+    {
+        int i = 0;
+        while (i < (int)sizeof(name_copy) - 1 && g_plugins[slot].cmd_name[i]) {
+            name_copy[i] = g_plugins[slot].cmd_name[i];
+            i++;
+        }
+        name_copy[i] = '\0';
+    }
+    unregister_command(g_plugins[slot].cmd_name);
+
     // Zero-wipe the context so stale state can't leak if the slot is reused.
     unsigned char *ctx = (unsigned char *)ctx_for(slot);
     for (int i = 0; i < RSH_CTX_SIZE_BYTES; i++) ctx[i] = 0;
@@ -315,10 +328,8 @@ void rsh_plugin_unload(const char *cmd_name) {
     g_plugins[slot].cmd_name[0] = '\0';
     g_plugins[slot].path[0]     = '\0';
 
-    unregister_command(cmd_name);
-
     print("[rsh] unloaded plugin: ");
-    print(cmd_name);
+    print(name_copy);
     print("\n");
 }
 
