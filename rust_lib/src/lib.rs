@@ -14754,6 +14754,7 @@ pub struct ScriptCtx {
     pub exit_code:     i32,
     pub active_map:    Str<32>,
     pub with_map:      Str<32>,
+    pub main_called:   bool,
 }
 
 impl ScriptCtx {
@@ -14773,6 +14774,7 @@ impl ScriptCtx {
             exit_code:     0,
             active_map:    Str::new(),
             with_map:      Str::new(),
+            main_called:   false,
         }
     }
 
@@ -15447,6 +15449,7 @@ fn resolve_path(path: &[u8], out: &mut [u8; 256]) -> bool {
 // =============================================================================
 
 fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
+    if name == b"main" { ctx.main_called = true; }
     let func_idx = match ctx.find_func(name) {
         Some(i) => i,
         None => {
@@ -15644,8 +15647,9 @@ pub fn exec_file(path: &[u8], ctx: &mut ScriptCtx) -> i32 {
             ctx.include_depth -= 1;
             return -1;
         }
-        let _ = setup;
-        call_function(b"main", &[], ctx)
+        if setup != 0 { setup }
+        else if ctx.main_called { 0 }
+        else { call_function(b"main", &[], ctx) }
     } else {
         setup
     };
