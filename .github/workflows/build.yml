@@ -1,24 +1,66 @@
 name: build
 
 on:
-  push:
   pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  kernel:
+  lint:
+    # Cheap checks on every PR: no kernel link, no ISO.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm clang lld llvm xorriso mtools
+          sudo apt-get install -y nasm clang
       - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal -c rust-src
+      - name: Check source discovery
+        run: make verify-sources
+      - name: Check C sources
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup toolchain install nightly
-          rustup component add rust-src --toolchain nightly
+          fail=0
+          while IFS= read -r f; do
+            clang -target i686-none-elf -ffreestanding -mno-sse -Wall -Wextra \
+              -Werror=implicit-function-declaration -fsyntax-only "$f" || fail=1
+          done < <(find src -name '*.c')
+          exit $fail
+      - name: Check assembly
+        run: |
+          nasm -f elf32 src/boot/boot.asm -o /dev/null
+          nasm -f elf32 src/grub/grub.asm -o /dev/null
+      - name: Check Rust
+        run: >
+          cd rust_lib && cargo +nightly check
+          -Zbuild-std=core,alloc,compiler_builtins
+          -Zbuild-std-features=compiler-builtins-mem
+          -Z json-target-spec --target ../i686-radiumos.json
+
+  build:
+    # Full kernel build and symbol check, only for releases.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang lld llvm
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal -c rust-src
       - name: Build kernel and verify symbols
         run: make verify-symbols
+      - uses: actions/upload-artifact@v4
+        with:
+          name: os.bin
+          path: os.bin
