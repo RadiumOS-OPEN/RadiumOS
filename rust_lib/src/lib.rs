@@ -33,6 +33,9 @@ extern "C" {
     // Memory functions
     fn malloc(size: u32) -> *mut u8;
     fn free(ptr: *mut u8);
+    fn pmm_get_total_memory() -> u32;
+    fn pmm_get_used_memory() -> u32;
+    fn pmm_get_free_memory() -> u32;
 
     // AVFS functions
     fn avfs_create_file(name: *const u8, size: u32) -> i32;
@@ -14464,6 +14467,10 @@ pub const MAX_MAP_VAL_LEN:   usize = 128;
 pub const MAX_FILE_SIZE:     usize = 32768;
 pub const MAX_ONCE_TAGS:     usize = 32;
 pub const MAX_ONCE_TAG_LEN:  usize = 32;
+pub const MAX_ALIASES:       usize = 32;
+pub const MAX_ALIAS_DEPTH:   usize = 4;
+pub const MAX_MEM_ALLOCS:    usize = 32;
+pub const MAX_MEM_ALLOC_SIZE: i64  = 65536;
 
 // ── Function body pool ────────────────────────────────────────────────────────
 // Stored OUTSIDE ScriptCtx to avoid BSS explosion.
@@ -14735,6 +14742,26 @@ impl OnceTag {
     pub const fn new() -> Self { Self { tag: Str::new(), used: false } }
 }
 
+// ── Alias table ───────────────────────────────────────────────────────────────
+// Kept separate from ctx.vars so aliases do not consume variable slots.
+// MAX_ALIASES * size_of::<AliasEntry>() bytes inside ScriptCtx.
+
+#[derive(Clone, Copy)]
+pub struct AliasEntry {
+    pub name:  VarName,
+    pub value: VarVal,
+    pub used:  bool,
+}
+
+impl AliasEntry {
+    pub const fn new() -> Self { Self { name: Str::new(), value: Str::new(), used: false } }
+}
+
+// Pointers handed out by mem_alloc (script-visible), so mem_free only frees
+// what mem_alloc returned.
+static mut MEM_ALLOCS: [usize; MAX_MEM_ALLOCS] = [0; MAX_MEM_ALLOCS];
+static mut ALIAS_DEPTH: usize = 0;
+
 // ── Script context ────────────────────────────────────────────────────────────
 // BSS footprint with pool fix: ~178 KB  (was ~2.1 MB)
 
@@ -14745,6 +14772,7 @@ pub struct ScriptCtx {
     pub maps:          [ScriptMap; MAX_MAPS],
     pub call_stack:    [CallFrame; MAX_CALL_STACK],
     pub once_tags:     [OnceTag; MAX_ONCE_TAGS],
+    pub aliases:       [AliasEntry; MAX_ALIASES],
     pub call_depth:    usize,
     pub in_function:   bool,
     pub break_flag:    bool,
@@ -14764,6 +14792,7 @@ impl ScriptCtx {
             maps:          [ScriptMap::new(); MAX_MAPS],
             call_stack:    [CallFrame::new(); MAX_CALL_STACK],
             once_tags:     [OnceTag::new(); MAX_ONCE_TAGS],
+            aliases:       [AliasEntry::new(); MAX_ALIASES],
             call_depth:    0,
             in_function:   false,
             break_flag:    false,
@@ -16114,9 +16143,43 @@ fn dispatch_cmd(
         }
         b"alias" => {
             if argc >= 3 {
-                let mut tmp = Line::new();
-                tmp.set(val!(2));
-                ctx.set_var(arg!(1), tmp.as_bytes());
+                let mut tmp = VarVal::new();
+                let mut i = 2;
+                while i < argc {
+                    if i > 2 { tmp.push(b' '); }
+                    tmp.append(arg!(i));
+                    i += 1;
+                }
+                let name = arg!(1);
+                let slot = ctx.aliases.iter().position(|a| a.used && a.name.as_bytes() == name)
+                    .or_else(|| ctx.aliases.iter().position(|a| !a.used));
+                match slot {
+                    Some(k) => {
+                        let a = &mut ctx.aliases[k];
+                        a.name.set(name);
+                        a.value.set(tmp.as_bytes());
+                        a.used = true;
+                    }
+                    None => rust_print(b"Error: alias table full\n"),
+                }
+            }
+        }
+        b"unalias" => {
+            if argc >= 2 {
+                let name = arg!(1);
+                for a in ctx.aliases.iter_mut() {
+                    if a.used && a.name.as_bytes() == name { a.used = false; }
+                }
+            }
+        }
+        b"aliases" => {
+            for a in ctx.aliases.iter() {
+                if a.used {
+                    rust_print(a.name.as_bytes());
+                    rust_print(b" = ");
+                    rust_print(a.value.as_bytes());
+                    rust_print(b"\n");
+                }
             }
         }
         b"concat" => {
@@ -16133,12 +16196,43 @@ fn dispatch_cmd(
         b"mem_alloc" => {
             if argc >= 3 {
                 let n = ival!(1);
-                let p = unsafe { simple_malloc(n as u32) };
+                let mut p: *mut u8 = core::ptr::null_mut();
+                if n > 0 && n <= MAX_MEM_ALLOC_SIZE {
+                    unsafe {
+                        if let Some(slot) = MEM_ALLOCS.iter().position(|&a| a == 0) {
+                            p = malloc(n as u32);
+                            MEM_ALLOCS[slot] = p as usize;
+                        }
+                    }
+                }
                 let mut buf = [0u8; 24];
-                ctx.set_var(arg!(2), int_to_str(p as i64, &mut buf));
+                ctx.set_var(arg!(2), int_to_str(p as usize as i64, &mut buf));
             }
         }
-        b"mem_free" => {}
+        b"mem_total" | b"mem_used" => {
+            // KB of physical memory, from the PMM
+            let bytes = unsafe { if cmd == b"mem_total" { pmm_get_total_memory() } else { pmm_get_used_memory() } };
+            ctx.set_var_int(if argc >= 2 { arg!(1) } else if cmd == b"mem_total" { b"MEM_TOTAL" } else { b"MEM_USED" }, (bytes / 1024) as i64);
+        }
+        b"mem_free" => {
+            // `mem_free PTR` frees a mem_alloc block; `mem_free NAME` (non-numeric)
+            // stores free physical memory (KB) in variable NAME.
+            let raw = if argc >= 2 { arg!(1) } else { b"MEM_FREE" };
+            if !raw.is_empty() && raw.iter().all(|c| c.is_ascii_digit()) {
+                let p = parse_int(raw) as usize;
+                if p != 0 {
+                    unsafe {
+                        if let Some(slot) = MEM_ALLOCS.iter().position(|&a| a == p) {
+                            MEM_ALLOCS[slot] = 0;
+                            free(p as *mut u8);
+                        }
+                    }
+                }
+            } else {
+                let kb = unsafe { pmm_get_free_memory() } / 1024;
+                ctx.set_var_int(raw, kb as i64);
+            }
+        }
         b"touch" => {
             if argc >= 2 {
                 let mut path = [0u8; 256];
@@ -17042,7 +17136,7 @@ fn dispatch_cmd(
             let sub=arg!(1);
             if sub==b"set" && argc>=4{
                 let v=arg!(3);
-                ctx.set_var(arg!(2), if v==b"TRUE"||v==b"true"||v==b"yes"||v==b"1"{b"1"}else{b"0"});
+                ctx.set_var(arg!(2), if v.eq_ignore_ascii_case(b"true")||v.eq_ignore_ascii_case(b"yes")||v==b"1"{b"1"}else{b"0"});
             } else if sub==b"toggle" && argc>=3{
                 let cur=ctx.get_var(arg!(2)).unwrap_or(b"0");
                 ctx.set_var(arg!(2), if cur==b"1"{b"0"}else{b"1"});
@@ -17091,6 +17185,33 @@ fn dispatch_cmd(
                         return 0;
                     }
                 }
+            }
+
+            // Alias expansion (bounded depth to stop alias loops)
+            if let Some(k) = ctx.aliases.iter().position(|a| a.used && a.name.as_bytes() == cmd) {
+                if unsafe { ALIAS_DEPTH } < MAX_ALIAS_DEPTH {
+                    let mut nl = Line::new();
+                    nl.append(ctx.aliases[k].value.as_bytes());
+                    if argc >= 2 {
+                        nl.push(b' ');
+                        nl.append(&line[starts[1] as usize..]);
+                    }
+                    let mut s2 = [0u16; MAX_ARGS];
+                    let mut l2 = [0u16; MAX_ARGS];
+                    let n2 = tokenize_offsets(nl.as_bytes(), &mut s2, &mut l2);
+                    if n2 > 0 {
+                        let c2 = &nl.as_bytes()[s2[0] as usize..(s2[0] + l2[0]) as usize];
+                        unsafe { ALIAS_DEPTH += 1; }
+                        let r = dispatch_cmd(c2, n2, nl.as_bytes(), &s2, &l2, ctx);
+                        unsafe { ALIAS_DEPTH -= 1; }
+                        return r;
+                    }
+                    return 0;
+                }
+                rust_print(b"Error: alias recursion too deep: ");
+                rust_print(cmd);
+                rust_print(b"\n");
+                return -1;
             }
 
             rust_print(b"Unknown command: ");
