@@ -11922,10 +11922,14 @@ pub extern "C" fn rust_aes_encrypt(data: *mut u8, len: u32) -> i32 {
         log_banner(b"AES-128 CBC  --  ENCRYPT", 0x0E);
         tp(b"\n    Input:  ", 0x0F); tp_num(len, 0x0F); tp(b" bytes\n", 0x07);
 
-        let remainder = len % 16;
-        let total_len = len + pkcs7_pad(remainder) as u32;
-        let layout = core::alloc::Layout::from_size_align(total_len as usize, 16)
-            .unwrap_or(core::alloc::Layout::from_size_align(16, 16).unwrap());
+        let total_len = match len.checked_add(pkcs7_pad(len % 16) as u32) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let layout = match core::alloc::Layout::from_size_align(total_len as usize, 16) {
+            Ok(l) => l,
+            Err(_) => return -1,
+        };
         let dst = alloc::alloc::alloc(layout);
         if dst.is_null() { return -1; }
         let out_len = cbc_encrypt(data, len, dst, trace());
@@ -11949,8 +11953,10 @@ pub extern "C" fn rust_aes_decrypt(data: *mut u8, len: u32) -> i32 {
         log_banner(b"AES-128 CBC  --  DECRYPT", 0x0E);
         tp(b"\n    Input:  ", 0x0F); tp_num(len, 0x0F); tp(b" bytes\n", 0x07);
 
-        let layout = core::alloc::Layout::from_size_align(len as usize, 16)
-            .unwrap_or(core::alloc::Layout::from_size_align(16, 16).unwrap());
+        let layout = match core::alloc::Layout::from_size_align(len as usize, 16) {
+            Ok(l) => l,
+            Err(_) => return -1,
+        };
         let dst = alloc::alloc::alloc(layout);
         if dst.is_null() { return -1; }
         let out_len = cbc_decrypt(data, len, dst, trace());
@@ -11962,66 +11968,85 @@ pub extern "C" fn rust_aes_decrypt(data: *mut u8, len: u32) -> i32 {
     }
 }
 
+/// Replace `filename` with `new_len` bytes from `new`. If create or write fails,
+/// restore `old_len` bytes from `old`. Returns true if the new contents were written.
+unsafe fn aes_replace_file(filename: *const u8, new: *const u8, new_len: u32,
+                           old: *const u8, old_len: u32) -> bool {
+    if avfs_remove_file(filename) != 0 {
+        tp(b"  [ERROR] Failed to remove original; file left unchanged.\n", 0x0C);
+        return false;
+    }
+    if avfs_create_file(filename, new_len) == 0
+        && (new_len == 0 || avfs_write_file(filename, new, new_len, 0) == 0)
+    {
+        return true;
+    }
+    tp(b"  [ERROR] Failed to write new file; restoring original.\n", 0x0C);
+    avfs_remove_file(filename);
+    if avfs_create_file(filename, old_len) == 0 {
+        avfs_write_file(filename, old, old_len, 0);
+    }
+    false
+}
+
 /// Encrypt an AVFS file by replacing the original with a newly created one.
 #[no_mangle]
 pub extern "C" fn rust_aes_encrypt_file(filename: *const u8) -> i32 {
     unsafe {
         if filename.is_null() { return -1; }
-        
-        // 1. Read the existing file into memory
+
         let sz = avfs_get_filesize(filename);
         if sz <= 0 {
             tp(b"  [ERROR] aes_encrypt_file: file not found\n", 0x0C);
             return -1;
         }
+        let sz = sz as u32;
 
         tp(b"\n    AVFS: encrypting \"", 0x0F);
         let mut p = filename;
         while *p != 0 { terminal_putchar(*p); p = p.add(1); }
-        tp(b"\"  (", 0x07); tp_num(sz as u32, 0x0B); tp(b" bytes)\n", 0x07);
+        tp(b"\"  (", 0x07); tp_num(sz, 0x0B); tp(b" bytes)\n", 0x07);
 
-        // Allocate buffer (aligned to 16 bytes for AES)
-        let buf = simple_malloc(((sz as usize + 15) & !15) as u32 + 16);
-        if buf.is_null() { 
-            tp(b"  [ERROR] malloc failed\n", 0x0C); 
-            return -1; 
-        }
-
-        let plain = simple_malloc(sz as u32);
+        let enc_len = match sz.checked_add(pkcs7_pad(sz % 16) as u32) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let (pl, el) = match (
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+            core::alloc::Layout::from_size_align(enc_len as usize, 16),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return -1,
+        };
+        let plain = alloc::alloc::alloc(pl);
         if plain.is_null() {
             tp(b"  [ERROR] malloc failed\n", 0x0C);
             return -1;
         }
-        avfs_read_file(filename, plain, sz as u32, 0);
-        core::ptr::copy_nonoverlapping(plain, buf, sz as usize);
+        let enc = alloc::alloc::alloc(el);
+        if enc.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            alloc::alloc::dealloc(plain, pl);
+            return -1;
+        }
 
-        let enc_len = rust_aes_encrypt(buf, sz as u32);
-
-        if enc_len <= 0 {
+        let mut ret = -1;
+        if avfs_read_file(filename, plain, sz, 0) != 0 {
+            tp(b"  [ERROR] aes_encrypt_file: read failed\n", 0x0C);
+        } else if cbc_encrypt(plain, sz, enc, trace()) != enc_len {
             tp(b"  [ERROR] Encryption failed.\n", 0x0C);
-            return -1;
+        } else if aes_replace_file(filename, enc, enc_len, plain, sz) {
+            tp(b"    Written ", 0x0A); tp_num(enc_len, 0x0A);
+            tp(b" encrypted bytes.\n", 0x0A);
+            ret = 0;
         }
 
-        extern "C" {
-            fn avfs_remove_file(filename: *const u8) -> i32;
-            fn avfs_create_file(filename: *const u8, size: u32) -> i32;
-        }
-
-        avfs_remove_file(filename);
-        if avfs_create_file(filename, enc_len as u32) != 0 {
-            tp(b"  [ERROR] Failed to create new file; restoring plaintext.\n", 0x0C);
-            if avfs_create_file(filename, sz as u32) == 0 {
-                avfs_write_file(filename, plain, sz as u32, 0);
-            }
-            return -1;
-        }
-        avfs_write_file(filename, buf, enc_len as u32, 0);
-
-        tp(b"    Written ", 0x0A); tp_num(enc_len as u32, 0x0A);
-        tp(b" encrypted bytes.\n", 0x0A);
-        0
+        alloc::alloc::dealloc(enc, el);
+        alloc::alloc::dealloc(plain, pl);
+        ret
     }
 }
+
 /// Decrypt an AVFS file in-place.
 #[no_mangle]
 pub extern "C" fn rust_aes_decrypt_file(filename: *const u8) -> i32 {
@@ -12032,20 +12057,45 @@ pub extern "C" fn rust_aes_decrypt_file(filename: *const u8) -> i32 {
             tp(b"  [ERROR] aes_decrypt_file: bad file (not found or not block-aligned)\n", 0x0C);
             return -1;
         }
+        let sz = sz as u32;
         tp(b"\n    AVFS: decrypting \"", 0x0F);
         let mut p = filename;
         while *p != 0 { terminal_putchar(*p); p = p.add(1); }
-        tp(b"\"  (", 0x07); tp_num(sz as u32, 0x0B); tp(b" bytes)\n", 0x07);
+        tp(b"\"  (", 0x07); tp_num(sz, 0x0B); tp(b" bytes)\n", 0x07);
 
-        let buf = simple_malloc(sz as u32);
-        if buf.is_null() { return -1; }
+        let (cl, pl) = match (
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return -1,
+        };
+        let cipher = alloc::alloc::alloc(cl);
+        if cipher.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            return -1;
+        }
+        let plain = alloc::alloc::alloc(pl);
+        if plain.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            alloc::alloc::dealloc(cipher, cl);
+            return -1;
+        }
 
-        avfs_read_file(filename, buf, sz as u32, 0);
-        rust_aes_decrypt(buf, sz as u32);
-        avfs_write_file(filename, buf, sz as u32, 0);
+        let mut ret = -1;
+        if avfs_read_file(filename, cipher, sz, 0) != 0 {
+            tp(b"  [ERROR] aes_decrypt_file: read failed\n", 0x0C);
+        } else {
+            let out_len = cbc_decrypt(cipher, sz, plain, trace());
+            if aes_replace_file(filename, plain, out_len, cipher, sz) {
+                tp(b"    File decrypted.\n", 0x0A);
+                ret = 0;
+            }
+        }
 
-        tp(b"    File decrypted.\n", 0x0A);
-        0
+        alloc::alloc::dealloc(plain, pl);
+        alloc::alloc::dealloc(cipher, cl);
+        ret
     }
 }
 
