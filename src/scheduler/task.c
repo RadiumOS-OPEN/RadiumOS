@@ -120,14 +120,15 @@ void handle_interrupt(TrapFrame regs) {
     }
 
     if (regs.interrupt < 32) {
-        print("CPU exception vector ");
-        print_decimal((int)regs.interrupt);
-        print("\n");
-        kernel_panic("CPU exception", "0x0E");
-        asm volatile("cli; hlt");
-        for (;;) asm volatile("hlt");
+        uint32_t cr2;
+        char code[8];
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        printr("CPU exception vector %u EIP=0x%08x ERR=0x%08x CR2=0x%08x\n",
+               regs.interrupt, regs.eip, regs.error, cr2);
+        snprintf(code, sizeof(code), "0x%02X", regs.interrupt);
+        kernel_panic("CPU exception", code);
     }
-    
+
     // Visual indicator at top of screen
     *(VGA_MEMORY + 79) = 0xF100 | 'T';
 
