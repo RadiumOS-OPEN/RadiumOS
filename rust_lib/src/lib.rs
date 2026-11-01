@@ -13835,7 +13835,7 @@ pub extern "C" fn watchdog_diagram() {
     rust_print(b"  SECTION 2: SCHEDULER MECHANICS\n");
     rust_print(b"  ================================\n");
     rust_print(b"\n");
-    rust_print(b"  rust_schedule() fires every PIT IRQ0 and executes 7 phases:\n");
+    rust_print(b"  rust_schedule() runs once per PIT tick from the kernel main loop (not IRQ0) and executes 7 phases:\n");
     rust_print(b"\n");
     rust_print(b"  PHASE 1 - Sleep wakeup\n");
     rust_print(b"    Scans all slots. Any task in Sleeping state with wake_at <=\n");
@@ -13851,7 +13851,7 @@ pub extern "C" fn watchdog_diagram() {
     rust_print(b"\n");
     rust_print(b"  PHASE 3 - Time-slice decrement\n");
     rust_print(b"    The currently running task's remaining_time is decremented.\n");
-    rust_print(b"    When it hits 0 the task is preempted on the next tick.\n");
+    rust_print(b"    When it hits 0 the task is switched out on the next scheduler pass.\n");
     rust_print(b"\n");
     rust_print(b"  PHASE 4 - Next task selection (two-pass)\n");
     rust_print(b"    Pass 1 (affinity-aware): scans all slots for Ready tasks whose\n");

@@ -5112,7 +5112,7 @@ const char* hello_html =
     "      <article style=\"display: block; margin-left: 15;\">\n"
     "        <b style=\"color: #FF7722;\">[KERNEL]</b>\n"
     "        <ul style=\"margin-left: 20;\">\n"
-    "          <li>Preemptive task scheduler</li>\n"
+    "          <li>Cooperative task scheduler</li>\n"
     "          <li>Custom AVFS filesystem</li>\n"
     "          <li style=\"color: #FFAA55;\">VBE 800x600x32 Framebuffer</li>\n"
     "          <li>PS/2 keyboard input</li>\n"
