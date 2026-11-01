@@ -506,7 +506,6 @@ void kernel_main(void) {
         uint8_t gateway[4] = {10, 0, 2, 2};
         uint8_t dns[4] = {10, 0, 2, 3};
         rust_set_network_config(local_ip, gateway, dns);
-        set_flashy_net_info();
     }
 
     rust_init_multitasking();
@@ -515,11 +514,13 @@ void kernel_main(void) {
     init_serial_port(0x3F8);
     init_keyboard();
     enable_paging_from_c();
+    serial_write_string(0x3F8, "Developed and Maintained by scp_2801");
     initialize_cpu_info();
 
     terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
     terminal_clear();
     vga_set_80x50();
+    set_flashy_net_info();
     enable_interrupts();
     while (1) {
         halt();
