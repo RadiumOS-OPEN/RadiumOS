@@ -595,8 +595,15 @@ keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to c
 
        //outb(0x21, inb(0x21) | 0x01); 
     enable_interrupts();
+    extern volatile uint32_t ticks;
+    uint32_t last_tick = ticks;
     while (1) {
-        rust_schedule();
+        // One scheduler pass per PIT tick; other IRQs must not advance it.
+        uint32_t now = ticks;
+        if (now != last_tick) {
+            last_tick = now;
+            rust_schedule();
+        }
         halt();
     }
 }

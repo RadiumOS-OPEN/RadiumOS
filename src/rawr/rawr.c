@@ -1168,7 +1168,7 @@ void rawr(void) {
                     vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_GREEN));
                 vga_win_puts(&main_win, 4, 11, "* x86 Protected Mode (32-bit)");
                 vga_win_puts(&main_win, 4, 12, "* Custom bootloader (GRUB compatible)");
-                vga_win_puts(&main_win, 4, 13, "* Preemptive multitasking scheduler");
+                vga_win_puts(&main_win, 4, 13, "* Cooperative multitasking scheduler");
                 vga_win_puts(&main_win, 4, 14, "* TCP/IP network stack");
                 vga_win_puts(&main_win, 4, 15, "* VGA text mode graphics");
                 vga_win_puts(&main_win, 4, 16, "* Virtual filesystem (AVFS)");
@@ -1278,7 +1278,7 @@ void rawr(void) {
                 vga_win_puts_colored(&main_win, 2, 5, "[OK] Kernel Features:", 
                     vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_DARK_GREY));
                 vga_win_puts(&main_win, 4, 6,  "* Protected mode with GDT/IDT");
-                vga_win_puts(&main_win, 4, 7,  "* Preemptive multitasking (round-robin)");
+                vga_win_puts(&main_win, 4, 7,  "* Cooperative multitasking (round-robin)");
                 vga_win_puts(&main_win, 4, 8,  "* Hardware interrupt handling");
                 vga_win_puts(&main_win, 4, 9,  "* Timer-based scheduling (1000Hz)");
                 
@@ -1438,7 +1438,7 @@ void rawr(void) {
                 vga_win_puts(&main_win, 4, 7,  "Time Slice:      10 ms per task");
                 vga_win_puts(&main_win, 4, 8,  "Max Tasks:       256");
                 vga_win_puts(&main_win, 4, 9,  "Stack Size:      4 KB per task");
-                vga_win_puts_colored(&main_win, 4, 10, "Preemption:      ENABLED", 
+                vga_win_puts_colored(&main_win, 4, 10, "Preemption:      DISABLED", 
                     vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_LIGHT_BLUE));
                 
                 vga_win_puts_colored(&main_win, 2, 12, "Memory Configuration:", 
