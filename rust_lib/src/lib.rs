@@ -14431,21 +14431,22 @@ pub extern "C" fn watchdog_diagram() {
 //   - Function bodies now stored in flat FUNC_BODY_POOL (external static)
 //   - ScriptFunction stores (pool_start: u16, body_count: u16) indices only
 //   - FUNC_BODY_BUF scratch removed from global; replaced by direct pool slice
-//   - GLOBAL_CTX BSS footprint: ~178 KB (was ~2.1 MB)
+//   - GLOBAL_CTX BSS footprint: see size_of::<ScriptCtx>() (was ~2.1 MB)
 //   - FUNC_BODY_POOL BSS: 768 KB (3072 lines × 256 bytes)
 //   - All other logic identical to v2.2
 //
 // SIZE BREAKDOWN (BSS):
 //   FUNC_BODY_POOL  [Line; 3072]        = 786,432 bytes
-//   GLOBAL_CTX      ScriptCtx           = ~178,000 bytes
+//   GLOBAL_CTX      ScriptCtx           = size_of::<ScriptCtx>() (~0.3 MB)
 //   LINES_D0..D3    [Line; 1000] × 4   = 1,024,000 bytes
 //   FBUF_D0..D3     [u8; 32768] × 4    = 131,072 bytes
 //   FREAD_SCRATCH   [u8; 4096]          = 4,096 bytes
-//   Total                               ≈ 2.1 MB  (was ≈ 4.2 MB, was crashing)
+//   Total                               ≈ 2.2 MB  (was ≈ 4.2 MB, was crashing)
 // =============================================================================
 
 // ── Size constants ────────────────────────────────────────────────────────────
 pub const MAX_VARS:          usize = 322;
+pub const SAVE_STACK_SIZE:   usize = 512;  // shared across all call frames
 pub const MAX_FUNCTIONS:     usize = 644;
 pub const MAX_CALL_STACK:    usize = 16;
 pub const MAX_LINES:         usize = 1000;
@@ -14703,22 +14704,21 @@ impl ScriptFunction {
 
 // ── CallFrame  (compact var save) ────────────────────────────────────────────
 // Saves only in-use variable slots (by index), not the full table.
-// Worst case: 32 slots × (32+128+1) bytes = ~5 KB per frame × 16 frames = 83 KB.
-// That's fine.  The key win was removing the body[] from ScriptFunction.
+// All frames share one save stack in ScriptCtx (save_vars/save_idx, SAVE_STACK_SIZE
+// entries); each frame records (base, count) into it.  A call fails cleanly if the
+// shared stack cannot hold the caller's live variables.
 
 #[derive(Clone, Copy)]
 pub struct CallFrame {
     pub func_name:     FuncName,
-    pub saved_vars:    [Variable; MAX_VARS],
-    pub saved_indices: [u8; MAX_VARS],
+    pub save_base:     usize,
     pub saved_count:   usize,
 }
 impl CallFrame {
     pub const fn new() -> Self {
         Self {
             func_name:     Str::new(),
-            saved_vars:    [Variable::new(); MAX_VARS],
-            saved_indices: [0u8; MAX_VARS],
+            save_base:     0,
             saved_count:   0,
         }
     }
@@ -14736,7 +14736,8 @@ impl OnceTag {
 }
 
 // ── Script context ────────────────────────────────────────────────────────────
-// BSS footprint with pool fix: ~178 KB  (was ~2.1 MB)
+// Size is authoritative via size_of::<ScriptCtx>() (see rsh_ctx_size() and the
+// const assert below); the C plugin pool (RSH_CTX_SIZE_BYTES) must be >= it.
 
 #[derive(Clone, Copy)]
 pub struct ScriptCtx {
@@ -14744,6 +14745,9 @@ pub struct ScriptCtx {
     pub funcs:         [ScriptFunction; MAX_FUNCTIONS],
     pub maps:          [ScriptMap; MAX_MAPS],
     pub call_stack:    [CallFrame; MAX_CALL_STACK],
+    pub save_vars:     [Variable; SAVE_STACK_SIZE],
+    pub save_idx:      [u16; SAVE_STACK_SIZE],
+    pub save_top:      usize,
     pub once_tags:     [OnceTag; MAX_ONCE_TAGS],
     pub call_depth:    usize,
     pub in_function:   bool,
@@ -14763,6 +14767,9 @@ impl ScriptCtx {
             funcs:         [ScriptFunction::new(); MAX_FUNCTIONS],
             maps:          [ScriptMap::new(); MAX_MAPS],
             call_stack:    [CallFrame::new(); MAX_CALL_STACK],
+            save_vars:     [Variable::new(); SAVE_STACK_SIZE],
+            save_idx:      [0u16; SAVE_STACK_SIZE],
+            save_top:      0,
             once_tags:     [OnceTag::new(); MAX_ONCE_TAGS],
             call_depth:    0,
             in_function:   false,
@@ -15482,19 +15489,28 @@ fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
 
     // ── Save only in-use variable slots (compact) ─────────────────────────────
     {
-        let frame = &mut ctx.call_stack[ctx.call_depth];
-        frame.func_name.set(name);
-        frame.saved_count = 0;
+        let mut live = 0usize;
+        for i in 0..MAX_VARS {
+            if ctx.vars[i].used { live += 1; }
+        }
+        if ctx.save_top + live > SAVE_STACK_SIZE {
+            rust_print(b"Error: too many live variables to save across call\n");
+            return -1;
+        }
+        let base = ctx.save_top;
+        let mut n = 0usize;
         for i in 0..MAX_VARS {
             if ctx.vars[i].used {
-                let sc = frame.saved_count;
-                if sc < MAX_VARS {
-                    frame.saved_vars[sc]    = ctx.vars[i];
-                    frame.saved_indices[sc] = i as u8;
-                    frame.saved_count += 1;
-                }
+                ctx.save_vars[base + n] = ctx.vars[i];
+                ctx.save_idx[base + n]  = i as u16;
+                n += 1;
             }
         }
+        ctx.save_top = base + n;
+        let frame = &mut ctx.call_stack[ctx.call_depth];
+        frame.func_name.set(name);
+        frame.save_base   = base;
+        frame.saved_count = n;
     }
     ctx.call_depth += 1;
 
@@ -15539,13 +15555,14 @@ fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
     // ── Restore saved variables ───────────────────────────────────────────────
     for v in ctx.vars.iter_mut() { v.used = false; }
     {
-        let frame = &ctx.call_stack[ctx.call_depth];
-        for i in 0..frame.saved_count {
-            let idx = frame.saved_indices[i] as usize;
+        let (base, n) = (ctx.call_stack[ctx.call_depth].save_base, ctx.call_stack[ctx.call_depth].saved_count);
+        for i in 0..n {
+            let idx = ctx.save_idx[base + i] as usize;
             if idx < MAX_VARS {
-                ctx.vars[idx] = frame.saved_vars[i];
+                ctx.vars[idx] = ctx.save_vars[base + i];
             }
         }
+        ctx.save_top = base;
     }
 
     result
@@ -17246,6 +17263,17 @@ unsafe fn ctx_from_ptr<'a>(ctx: *mut u8) -> &'a mut ScriptCtx {
 }
 
 // ── Per-context C interface ───────────────────────────────────────────────────
+
+/// Upper bound the C plugin pool (RSH_CTX_SIZE_BYTES in rshplugin.c) is sized for.
+/// Keep both in sync; growing ScriptCtx past this fails to compile.
+pub const RSH_CTX_MAX_BYTES: usize = 360448;
+const _: () = assert!(core::mem::size_of::<ScriptCtx>() <= RSH_CTX_MAX_BYTES);
+
+/// Authoritative ScriptCtx size, checked by the C plugin loader.
+#[no_mangle]
+pub extern "C" fn rsh_ctx_size() -> usize {
+    core::mem::size_of::<ScriptCtx>()
+}
 
 /// Zero-initialise a caller-owned ScriptCtx buffer.
 /// Must be the first call made on any buffer before using any other ctx API.
