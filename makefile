@@ -272,6 +272,8 @@ check-rust:
 	@if ! rustup component list --toolchain nightly | grep -q "rust-src (installed)"; then rustup component add rust-src --toolchain nightly; fi
 	@echo "✓ rust-src installed"
 
+RUST_MANIFEST = [package]\nname = "radiumos_rust"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["staticlib"]\n\n[profile.release]\npanic = "abort"\nlto = true\nopt-level = 2\n
+
 .PHONY: init-rust
 init-rust: check-rust
 	@echo "========================================="
@@ -279,15 +281,23 @@ init-rust: check-rust
 	@echo "========================================="
 	@mkdir -p .cargo
 	@if [ ! -f ".cargo/config.toml" ]; then \
-		printf '[unstable]\nbuild-std = ["core", "compiler_builtins"]\nbuild-std-features = ["compiler-builtins-mem"]\n\n[build]\ntarget = "i686-radiumos.json"\n\n[target.i686-radiumos]\nrustflags = [\n    "-C", "relocation-model=static",\n    "-C", "code-model=kernel",\n]\n' > .cargo/config.toml; \
+		printf '[unstable]\nbuild-std = ["core", "alloc", "compiler_builtins"]\nbuild-std-features = ["compiler-builtins-mem"]\n\n[build]\ntarget = "i686-radiumos.json"\n\n[target.i686-radiumos]\nrustflags = [\n    "-C", "relocation-model=static",\n    "-C", "code-model=kernel",\n]\n' > .cargo/config.toml; \
 		echo "✓ Created .cargo/config.toml"; \
 	fi
 	@if [ ! -f "i686-radiumos.json" ]; then \
-		printf '{\n  "llvm-target": "i686-unknown-none",\n  "data-layout": "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-f64:32:64-f80:32-n8:16:32-S128",\n  "arch": "x86",\n  "target-endian": "little",\n  "target-pointer-width": 32,\n  "target-c-int-width": 32,\n  "os": "none",\n  "linker-flavor": "ld.lld",\n  "linker": "ld.lld",\n  "panic-strategy": "abort",\n  "disable-redzone": true,\n  "features": "-mmx,-sse,+soft-float",\n  "relocation-model": "static",\n  "code-model": "kernel"\n}\n' > i686-radiumos.json; \
+		printf '{\n  "llvm-target": "i686-unknown-none",\n  "data-layout": "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-i128:128-f64:32:64-f80:32-n8:16:32-S128",\n  "arch": "x86",\n  "target-endian": "little",\n  "target-pointer-width": 32,\n  "target-c-int-width": 32,\n  "os": "none",\n  "linker-flavor": "ld.lld",\n  "linker": "ld.lld",\n  "panic-strategy": "abort",\n  "disable-redzone": true,\n  "relocation-model": "static",\n  "code-model": "kernel"\n}\n' > i686-radiumos.json; \
 		echo "✓ Created i686-radiumos.json"; \
 	fi
-	@if [ ! -d "$(RUST_LIB_DIR)" ]; then cargo new $(RUST_LIB_DIR) --lib --name radiumos_rust; fi
-	@printf '[package]\nname = "radiumos_rust"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["staticlib"]\n\n[profile.release]\npanic = "abort"\nlto = true\nopt-level = 2\n' > $(RUST_LIB_DIR)/Cargo.toml
+	@if [ ! -d "$(RUST_LIB_DIR)" ]; then \
+		cargo new $(RUST_LIB_DIR) --lib --name radiumos_rust && \
+		printf '$(RUST_MANIFEST)' > $(RUST_LIB_DIR)/Cargo.toml && \
+		echo "✓ Created $(RUST_LIB_DIR)/Cargo.toml"; \
+	elif [ ! -f "$(RUST_LIB_DIR)/Cargo.toml" ]; then \
+		printf '$(RUST_MANIFEST)' > $(RUST_LIB_DIR)/Cargo.toml && \
+		echo "✓ Created $(RUST_LIB_DIR)/Cargo.toml"; \
+	else \
+		echo "✓ Kept existing $(RUST_LIB_DIR)/Cargo.toml"; \
+	fi
 	@echo "✓ Rust support initialized!"
 
 .PHONY: info
