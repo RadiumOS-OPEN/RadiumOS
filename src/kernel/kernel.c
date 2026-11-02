@@ -501,99 +501,26 @@ void kernel_main(void) {
         print("ERROR: IDT setup failed\n");
         while(1) asm("hlt");
     }
-    keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
-    // Initialize network
-    if (scan_and_init_rtl8139()) {  
-        print("Network card ready!\n");
-        
-        // Configure network settings
+    if (scan_and_init_rtl8139()) {
         uint8_t local_ip[4] = {10, 0, 2, 15};
         uint8_t gateway[4] = {10, 0, 2, 2};
         uint8_t dns[4] = {10, 0, 2, 3};
-        
         rust_set_network_config(local_ip, gateway, dns);
-        
-        // DEBUG: Check if device is really initialized
-        print("DEBUG: Checking device initialization...\n");
-        rust_rtl8139_check_init();
-        
-        // Verify RTL8139 is initialized
-        print("Checking RTL8139 status...\n");
-        uint8_t mac[6];
-        if (rust_rtl8139_get_mac(mac) == 0) {
-            print("RTL8139 is initialized. MAC: ");
-            for (int i = 0; i < 6; i++) {
-                print_hex_byte(mac[i]);
-                if (i < 5) print(":");
-            }
-            print("\n");
-            
-            // Test 1: Raw packet send
-            print("\n=== TEST 1: Raw Packet ===\n");
-            rust_test_raw_send();
-            
-            // Test 2: ARP request
-            print("\n=== TEST 2: ARP Request ===\n");
-            rust_test_network_simple();
-            
-        } else {
-            print("RTL8139 not initialized!\n");
-        }
-    } else {
-        print("No network card found\n");
     }
-    
-    // Initialize Rust multitasking
+
     rust_init_multitasking();
-    rust_setup_pit(1000);  
+    rust_setup_pit(1000);
     rust_start_demo_tasks();
     init_serial_port(0x3F8);
-init_keyboard();
+    init_keyboard();
     enable_paging_from_c();
-serial_write_string(0x3F8, "Developed and Maintained by scp_2801");
-initialize_cpu_info();
-cmd_sysprobe(1, NULL);
+    serial_write_string(0x3F8, "Developed and Maintained by scp_2801");
+    initialize_cpu_info();
 
-CPUInfo* info = get_cpu_info_struct();
- 
-
-// Use the address of the struct itself as the "proof"
-    uintptr_t proof_addr = (uintptr_t)info;
-    
-    // Show the message FIRST
-    // Force visible color before the message
-    extern void rust_dungeon();
-    //rust_dungeon();
-
-terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-
-keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
+    terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
     terminal_clear();
     vga_set_80x50();
-    if (info->is_64bit) {
-        print("\nSystem is running in Long Mode (64-bit).\n");
-        
-        // Proof 1: Pointer Size
-        printr("Proof: Pointer width is %d bytes.\n", sizeof(void*));
-        
-        // Proof 2: The Address
-        // In x86_64 Long Mode, kernel addresses are usually mapped to the higher half 
-        // (canonical addresses starting with 0xFFFF). We print all 16 hex digits.
-        printr("Proof Addr: 0x%016llx\n", (unsigned long long)proof_addr);
-        
-    } else {
-        printr("\nSystem is running in 32-bit Protected Mode.\n");
-        
-        // Proof 1: Pointer Size
-        printr("Proof: Pointer width is %d bytes.\n", sizeof(void*));
-        
-        // Proof 2: The Address
-        // In 32-bit mode, addresses are limited to 8 hex digits (4 bytes).
-        printr("Proof Addr: 0x%08x\n", (unsigned int)proof_addr);
-    }
-        set_flashy_net_info();
-
-       //outb(0x21, inb(0x21) | 0x01); 
+    set_flashy_net_info();
     enable_interrupts();
     while (1) {
         halt();
