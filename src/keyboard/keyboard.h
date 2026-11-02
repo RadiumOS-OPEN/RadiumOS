@@ -33,6 +33,7 @@ void keyboard_handler();
 void keyboard_task();
 void keyboard_await(const char* message, bool clear_screen);
 int register_command(const char* name, const char* description, void (*execute)(int, char*[]));
+int unregister_command(const char* name);
 int keyboard_input(char* userinput);
 void keyboard_input_secure(char* userinput);
 void keyboard_read_input();

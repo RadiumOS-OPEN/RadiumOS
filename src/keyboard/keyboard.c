@@ -812,6 +812,19 @@ int register_command(const char *name, const char *description,
     return 1;
 }
 
+int unregister_command(const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < command_count; i++) {
+        if (strcmp(commands[i].name, name) == 0) {
+            for (size_t j = i; j + 1 < command_count; j++)
+                commands[j] = commands[j + 1];
+            command_count--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void add_to_history(const char *command) {
     if (strlen(command) == 0) return;
     if (history_count >= MAX_HISTORY) {
