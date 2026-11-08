@@ -1,5 +1,6 @@
 #include "../terminal/terminal.h"
 #include "../vga/vga.h"
+#include "../vga/scaler.h"
 #include "../Avfs/Avfs.h"
 
 #include "../terminal/terminal.h"
@@ -83,8 +84,11 @@ void file_manager() {
     fm_clipboard_file[0] = '\0';
     int file_count = 0;
     
-    // Main file manager window
-    vga_window_t fm_win = vga_create_centered_window(76, 24, VGA_COLOR_WHITE, VGA_COLOR_BLUE);
+    // Main file manager window: 24 rows on the old 80x25 screen, taller when the scaler has more rows
+    int fm_h = scaler_win_rows() - 2;
+    if (fm_h < 24) fm_h = 24;
+    const int ex = fm_h - 24;   // extra rows, used by the file list
+    vga_window_t fm_win = vga_create_centered_window(76, fm_h, VGA_COLOR_WHITE, VGA_COLOR_BLUE);
     vga_win_set_title(&fm_win, "Advanced File Manager v2.0 - Recursive Directories");
     
     int frame = 0;
@@ -92,7 +96,7 @@ void file_manager() {
     
     while (running) {
         // Calculate list height based on view mode
-        int list_height = view_mode == 2 ? 7 : 11;
+        int list_height = (view_mode == 2 ? 7 : 11) + ex;
         
         // Refresh file list when needed
         if (need_refresh) {
@@ -553,11 +557,11 @@ void file_manager() {
             
             // === FILE PREVIEW ===
             if (view_mode == 2 && file_count > 0 && selected_index < file_count && !fm_files[selected_index].is_dir) {
-                vga_win_draw_line_h(&fm_win, 2, 18, 72, 0xC4);
-                vga_win_puts_colored(&fm_win, 2, 19,
+                vga_win_draw_line_h(&fm_win, 2, 18 + ex, 72, 0xC4);
+                vga_win_puts_colored(&fm_win, 2, 19 + ex,
                     "Preview:",
                     vga_entry_color(VGA_COLOR_LIGHT_BROWN, VGA_COLOR_BLUE));
-                vga_win_puts_colored(&fm_win, 11, 19, fm_files[selected_index].name,
+                vga_win_puts_colored(&fm_win, 11, 19 + ex, fm_files[selected_index].name,
                     vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_BLUE));
                 
                 char preview_buf[256];
@@ -579,11 +583,11 @@ void file_manager() {
                         if (col >= 72) continue;
                         
                         if (ch < 32 || ch > 126) ch = '.';
-                        vga_win_putc_colored(&fm_win, col++, 20 + line, ch,
+                        vga_win_putc_colored(&fm_win, col++, 20 + ex + line, ch,
                             vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_BLUE));
                     }
                 } else {
-                    vga_win_puts_colored(&fm_win, 2, 20, "[Binary or empty file]",
+                    vga_win_puts_colored(&fm_win, 2, 20 + ex, "[Binary or empty file]",
                         vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_BLUE));
                 }
             }
@@ -625,7 +629,7 @@ void file_manager() {
             }
             
             // === FOOTER / STATUS BAR ===
-            vga_win_draw_line_h(&fm_win, 2, 21, 72, 0xC4);
+            vga_win_draw_line_h(&fm_win, 2, 21 + ex, 72, 0xC4);
             
             if (file_count > 0 && selected_index < file_count) {
                 char status[70];
@@ -647,14 +651,14 @@ void file_manager() {
                     strcat(status, size_str);
                 }
                 
-                vga_win_puts_colored(&fm_win, 2, 22, status,
+                vga_win_puts_colored(&fm_win, 2, 22 + ex, status,
                     vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
             } else if (file_count == 0) {
-                vga_win_puts_colored(&fm_win, 2, 22, "Empty directory",
+                vga_win_puts_colored(&fm_win, 2, 22 + ex, "Empty directory",
                     vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_BLUE));
             }
             
-            vga_win_puts_colored(&fm_win, 2, 23, "F1:Help | ENTER:Open | BACKSPACE:Up | ESC:Exit",
+            vga_win_puts_colored(&fm_win, 2, 23 + ex, "F1:Help | ENTER:Open | BACKSPACE:Up | ESC:Exit",
                 vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLUE));
             
             vga_win_refresh(&fm_win);
@@ -1774,3 +1778,4 @@ void rawr(void) {
         sleep_ms(50); // 20 FPS
     }
 }
+void files_command(int argc, char *argv[]) { (void)argc; (void)argv; file_manager(); terminal_clear(); }

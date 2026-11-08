@@ -1,0 +1,16 @@
+// mod: Noclip: walk through walls
+include "/disk/mods/doom.hls";
+
+const CF_NOCLIP: int = 1;
+
+// Doom sets and clears the body's MF_NOCLIP flag from player->cheats every tic, so the cheat bit is what has to change
+fn main() {
+    if in_level() == 1 {
+        let c = pl_get(O_PL_CHEATS);
+        if mod_frame() < 0 {
+            pl_set(O_PL_CHEATS, c & -2);
+        } else {
+            pl_set(O_PL_CHEATS, c | CF_NOCLIP);
+        }
+    }
+}

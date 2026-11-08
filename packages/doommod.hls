@@ -1,0 +1,58 @@
+// doommod.hls - a DOOM "mod" written purely in Helios; no engine or Rust changes.
+// Patches Doom's mobjinfo[] table in the kernel image, then starts Doom.
+//   helios run /disk/doommod.hls
+
+const STRIDE: int = 92;        // sizeof(mobjinfo_t): 23 ints
+const OFF_HEALTH: int = 8;     // spawnhealth
+const OFF_SPEED: int = 60;     // speed
+const MT_TROOP: int = 11;      // the Imp
+
+// Locate mobjinfo[] by its first entries (player -1/100, zombieman 3004, shotguy 9, archvile 64).
+fn find_mobjinfo() -> int {
+    let mut found = 0;
+    unsafe {
+        for a in 0x100000..0x700000 step 4 {
+            if peek(a, 32) == -1 {
+                if peek(a + 8, 32) == 100 {
+                    if peek(a + STRIDE, 32) == 3004 {
+                        if peek(a + STRIDE * 2, 32) == 9 {
+                            if peek(a + STRIDE * 3, 32) == 64 {
+                                found = a;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
+fn main() {
+    let base = find_mobjinfo();
+    if base == 0 {
+        println("doommod: mobjinfo not found (is this a Doom kernel build?)");
+        return 1;
+    }
+
+    let imp = base + STRIDE * MT_TROOP;
+    let mut ok = 0;
+    unsafe {
+        if peek(imp, 32) == 3001 {
+            poke(imp + OFF_HEALTH, 300, 32);   // 60 -> 300 hp
+            poke(imp + OFF_SPEED, 16, 32);     // 8 -> 16
+            ok = 1;
+        }
+    }
+    if ok == 0 {
+        println("doommod: imp entry has unexpected layout, not patching");
+        return 2;
+    }
+
+    println("Injected");
+    println("doommod: mobjinfo at " + itos(base) + ", imps now 300 hp and twice as fast");
+    unsafe { sleep_ms(1500); }   // Doom takes over the screen, so give the text time to be read
+    shell("doom");
+    return 0;
+}

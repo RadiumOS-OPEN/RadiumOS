@@ -1,0 +1,17 @@
+// mod: Cloak: monsters barely see you
+include "/disk/mods/doom.hls";
+
+const MF_SHADOW: int = 262144;
+
+fn main() {
+    if in_level() == 1 {
+        let flags = mo_get(O_MO_FLAGS);
+        if mod_frame() < 0 {
+            mo_set(O_MO_FLAGS, flags & -262145);
+            set_power(2, 0);
+        } else {
+            mo_set(O_MO_FLAGS, flags | MF_SHADOW);
+            set_power(2, 2000);
+        }
+    }
+}

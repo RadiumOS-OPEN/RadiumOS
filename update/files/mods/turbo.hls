@@ -1,0 +1,10 @@
+// mod: Turbo: the game runs 1.6x faster
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_TIMESCALE, 100);
+    } else {
+        out_set(OUT_TIMESCALE, 160);
+    }
+}

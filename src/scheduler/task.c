@@ -129,9 +129,20 @@ void handle_interrupt(TrapFrame regs) {
             extern bool rust_fetch_active(void);
             extern volatile uint32_t ticks;
             ticks++;
+            extern bool ctrlc_running(void);
+            extern void ctrlc_tick(void);
+            extern void rust_guard_tick(void);
+            if (ctrlc_running()) {          // nested in a command: watch for Ctrl+C and run the kernel guards, never start another task
+                outb(0x20, 0x20);
+                rust_guard_tick();
+                ctrlc_tick();
+                return;
+            }
+            extern void fbcon_tick(void);
+            fbcon_tick();
             // Fetch waits for network I/O with IRQs enabled, without nesting shell tasks.
             outb(0x20, 0x20);
-            if (!rust_fetch_active()) rust_schedule();
+            if (!rust_fetch_active()) rust_schedule(); else rust_guard_tick();
             return;
         }
         

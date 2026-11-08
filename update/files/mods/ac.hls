@@ -1,0 +1,155 @@
+// Helpers for the AssaultCube mods (no "acmod:" header, so the mod menu skips it). The game API table is argv(5); the app
+// (port/ac/acmods.cpp) fills the inputs before every frame and applies the outputs after the mods ran. Every value is read
+// live, so call these only from main(). argv(1..4): frame (-1 = being switched off: put your outputs back), screen, state, font.
+// Positions are x16, angles x10 degrees. Players: A_NPL entries of PL_STRIDE ints at A_PL; entry fields are the P_ constants.
+
+const A_SCRW: int = 0;
+const A_SCRH: int = 1;
+const A_MS: int = 2;
+const A_INGAME: int = 3;     // 1 while you are alive and playing
+const A_HEALTH: int = 4;
+const A_ARMOUR: int = 5;
+const A_GUN: int = 6;
+const A_AMMO: int = 7;
+const A_MAG: int = 8;
+const A_MAGSIZE: int = 9;
+const A_X: int = 10;
+const A_Y: int = 11;
+const A_Z: int = 12;
+const A_YAW: int = 13;
+const A_PITCH: int = 14;
+const A_SPEED: int = 15;     // x100
+const A_ONFLOOR: int = 16;
+const A_FRAGS: int = 17;
+const A_DEATHS: int = 18;
+const A_TEAMMODE: int = 19;
+const A_TEAM: int = 20;
+const A_FOV: int = 21;
+const A_NPL: int = 30;
+const A_PL: int = 32;
+const PL_STRIDE: int = 10;
+const PL_MAX: int = 24;
+// fields of one player entry
+const P_FWD: int = 0;        // x16, in front of you
+const P_RIGHT: int = 1;      // x16, to your right
+const P_UP: int = 2;         // x16
+const P_DIST: int = 3;       // x16
+const P_YAW: int = 4;        // yaw that points at it, x10
+const P_PITCH: int = 5;      // pitch that points at it, x10
+const P_HEALTH: int = 6;
+const P_ENEMY: int = 7;      // 1 enemy, 0 team mate
+const P_VISIBLE: int = 8;    // 1 when there is a line of sight
+
+// outputs: write them with out_set(); put them back to the defaults when mod_frame() < 0
+const OUT_HEALTH: int = 300;      // set your health once (the app resets it to -1)
+const OUT_ARMOUR: int = 301;      // same for armour
+const OUT_AMMO_FULL: int = 302;   // 1: ammo and magazines of your guns stay full
+const OUT_RAPID: int = 303;       // 1: no delay between shots
+const OUT_AIM: int = 304;         // 1: turn to OUT_AIM_YAW / OUT_AIM_PITCH (x10) once
+const OUT_AIM_YAW: int = 305;
+const OUT_AIM_PITCH: int = 306;
+const OUT_FIRE: int = 307;        // 1: hold the fire button
+const OUT_SPEED: int = 308;       // walking speed in percent (100 = normal)
+const OUT_JUMP: int = 309;        // jump strength in percent
+const OUT_GRAV: int = 310;        // gravity in percent (lower = floatier)
+const OUT_FLY: int = 311;         // 1: fly where you look
+const OUT_TIMESCALE: int = 312;   // game speed in percent
+const OUT_FOV: int = 313;         // field of view in degrees (40..120), 0 = your own setting
+const OUT_SAT: int = 314;         // colour saturation in percent (100 = unchanged)
+const OUT_CON: int = 315;         // contrast in percent (100 = unchanged)
+const OUT_VIG: int = 316;         // vignette 0..100
+const OUT_SCAN: int = 317;        // scanline darkness 0..100
+const OUT_TINT_R: int = 318;      // colour overlay 0..255 ...
+const OUT_TINT_G: int = 319;
+const OUT_TINT_B: int = 320;
+const OUT_TINT_A: int = 321;      // ... and how strong it is, 0..100
+
+fn rd(addr: int) -> int {
+    let mut v = 0;
+    unsafe { v = peek(addr, 32); }
+    return v;
+}
+
+fn wr(addr: int, v: int) {
+    unsafe { poke(addr, v, 32); }
+}
+
+fn api(i: int) -> int {
+    return rd(stoi(argv(5)) + i * 4);
+}
+
+fn out_set(i: int, v: int) {
+    wr(stoi(argv(5)) + i * 4, v);
+}
+
+fn mod_frame() -> int { return stoi(argv(1)); }
+fn mod_screen() -> int { return stoi(argv(2)); }
+fn mod_state() -> int { return stoi(argv(3)); }
+fn mod_font() -> int { return stoi(argv(4)); }
+
+fn in_game() -> int { return api(A_INGAME); }
+fn now_ms() -> int { return api(A_MS); }
+
+// the i-th player entry: pl(i, P_DIST)
+fn pl(i: int, field: int) -> int { return api(A_PL + i * PL_STRIDE + field); }
+
+// index of the nearest enemy you can see, -1 if none
+fn nearest_enemy() -> int {
+    let n = api(A_NPL);
+    let mut best = 0 - 1;
+    let mut bd = 100000000;
+    for i in 0..n {
+        if pl(i, P_ENEMY) == 1 {
+            if pl(i, P_VISIBLE) == 1 {
+                if pl(i, P_DIST) < bd {
+                    bd = pl(i, P_DIST);
+                    best = i;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// ---- drawing on the frame (api(A_SCRW) x api(A_SCRH), XRGB) ----------------------------------------------------------
+
+fn ag_px(x: int, y: int, c: int) {
+    if x >= 0 && y >= 0 && x < api(A_SCRW) && y < api(A_SCRH) {
+        wr(mod_screen() + (y * api(A_SCRW) + x) * 4, c);
+    }
+}
+
+fn ag_rect(x: int, y: int, w: int, h: int, c: int) {
+    for yy in 0..h {
+        for xx in 0..w {
+            ag_px(x + xx, y + yy, c);
+        }
+    }
+}
+
+fn ag_char(x: int, y: int, ch: int, color: int) {
+    let font = mod_font();
+    for row in 0..8 {
+        let mut bits = 0;
+        unsafe { bits = peek(font + ch * 8 + row, 8); }
+        for col in 0..8 {
+            let on = (bits >> col) & 1;
+            if on == 1 {
+                ag_px(x + col, y + row, color);
+            }
+        }
+    }
+}
+
+fn ag_text(x: int, y: int, text: int, color: int) {
+    let n = strlen(text);
+    for i in 0..n {
+        ag_char(x + i * 8, y, ord(strsub(text, i, 1)), color);
+    }
+}
+
+// text with a dark shadow
+fn ag_label(x: int, y: int, text: int, color: int) {
+    ag_text(x + 1, y + 1, text, 0x000000);
+    ag_text(x, y, text, color);
+}

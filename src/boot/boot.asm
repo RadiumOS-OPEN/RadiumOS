@@ -1,7 +1,7 @@
 ; ----- Multiboot Header -----
 section .multiboot
 MB_MAGIC    equ 0x1BADB002
-MB_FLAGS    equ 0
+MB_FLAGS    equ 0x3
 MB_CHECKSUM equ -(MB_MAGIC + MB_FLAGS)
 dd MB_MAGIC
 dd MB_FLAGS
@@ -17,19 +17,26 @@ global bptl
 bptl:
     resb 4096
 
+align 4096
+bpt1:
+    resb 4096
+bpt2:
+    resb 4096
+bpt3:
+    resb 4096
+
 ; ----- Boot -----
 section .text
 global _start
 extern _stack_top
 _start:
     cli                         ; Disable interrupts during boot
+    mov esi, ebx                ; Preserve Multiboot info pointer
+    mov edi, eax                ; Preserve Multiboot boot magic
     mov esp, _stack_top          ; Use the stack reserved by linker.ld
-    
-
-    
-    ; Now call kernel
-    mov ebx, [esp + 4]         ; multiboot info pointer
-    push ebx
+    push esi                    ; kernel_main(magic, info) argument order
+    push edi
+    call setup_paging
     extern kernel_main
     call kernel_main
     
@@ -37,62 +44,88 @@ _start:
 .hang:
     hlt
     jmp .hang
-; ----- Setup Paging -----
+; ----- Enable PAE and identity-map the 32-bit physical address space -----
 setup_paging:
-    ; Step 1: Setup page table for first 4MB (kernel + stack)
+    ; Identity-map physical memory below 3 GiB.
     mov edi, bptl
-    mov eax, 0x00000003         ; Present + RW
-    mov ecx, 1024               ; 1024 entries * 4KB = 4MB
-.fill_low_table:
-    stosd
-    add eax, 0x1000             ; Next 4KB page
-    loop .fill_low_table
-    
-    ; Step 2: Clear page directory
+    xor ebx, ebx
+    mov esi, 3
+.fill_directory:
+    mov ecx, 512
+.fill_entry:
+    mov eax, ebx
+    or eax, 0x083               ; Present + RW + 2-MiB page
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add ebx, 0x200000
+    add edi, 8
+    loop .fill_entry
+    dec esi
+    jnz .fill_directory
+
+    ; Map RAM remapped at physical 4-5 GiB into virtual 3-4 GiB.
+    mov edi, bpt3
+    xor ebx, ebx
+    mov ecx, 512
+.fill_high_memory:
+    mov eax, ebx
+    or eax, 0x083
+    mov [edi], eax
+    mov dword [edi + 4], 1
+    add ebx, 0x200000
+    add edi, 8
+    loop .fill_high_memory
+
+    ; Keep QEMU's VBE framebuffer, PCI/APIC windows, and BIOS ROM reachable.
+%macro map_identity_range 2
+    mov edi, bpt3 + (((%1) - 0xC0000000) >> 21) * 8
+    mov eax, %1
+    mov ecx, %2
+%%map:
+    mov edx, eax
+    or edx, 0x083
+    mov [edi], edx
+    mov dword [edi + 4], 0
+    add eax, 0x200000
+    add edi, 8
+    loop %%map
+%endmacro
+
+    map_identity_range 0xFD000000, 8
+    map_identity_range 0xFEA00000, 1
+    map_identity_range 0xFEC00000, 2
+    map_identity_range 0xFFE00000, 1
+%unmacro map_identity_range 2
+
+    ; The page-directory-pointer table references all 4 GiB of virtual space.
     mov edi, bpd
-    xor eax, eax
-    mov ecx, 1024
-    rep stosd
-    
-    ; Step 3: First PDE points to our page table
-    mov dword [bpd], bptl
-    or dword [bpd], 0x003    ; Present + RW
-    
-    ; Step 4: Map framebuffer 0xE0000000-0xF0000000 (256MB) using 4MB pages
-    mov edi, bpd
-    add edi, (0xE0000000 >> 22) * 4  ; edi = &page_directory[896]
-    
-    mov eax, 0xE0000000
-    or eax, 0x83                ; Present + RW + 4MB page
-    mov ecx, 64                 ; Map 64 * 4MB = 256MB
-.map_fb:
-    stosd
-    add eax, 0x400000           ; Next 4MB
-    loop .map_fb
-    
-    ; Step 5: Also map 0xF0000000-0xFF000000 (backup addresses)
-    mov eax, 0xF0000000
-    or eax, 0x83
-    mov ecx, 60
-.map_fb2:
-    stosd
-    add eax, 0x400000
-    loop .map_fb2
-    
-    ; Step 6: Load page directory into CR3
+    mov eax, bptl
+    or eax, 1
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    mov eax, bpt1
+    or eax, 1
+    mov [edi + 8], eax
+    mov dword [edi + 12], 0
+    mov eax, bpt2
+    or eax, 1
+    mov [edi + 16], eax
+    mov dword [edi + 20], 0
+    mov eax, bpt3
+    or eax, 1
+    mov [edi + 24], eax
+    mov dword [edi + 28], 0
+
+    ; Enable PAE and 2-MiB pages before loading the PDPT in CR3.
+    mov eax, cr4
+    or eax, 0x30
+    mov cr4, eax
     mov eax, bpd
     mov cr3, eax
-    
-    ; Step 7: Enable PSE (Page Size Extension) for 4MB pages
-    mov eax, cr4
-    or eax, 0x10                ; Set PSE bit
-    mov cr4, eax
-    
-    ; Step 8: Enable paging
+
     mov eax, cr0
-    or eax, 0x80000000          ; Set PG bit
+    or eax, 0x80000000
     mov cr0, eax
-    
     ret
 
 ; ----- GDT -----

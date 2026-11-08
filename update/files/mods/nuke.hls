@@ -1,0 +1,35 @@
+// mod: Nuke: hold V to smite every monster
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            if key_down(3) == 1 {
+                let cap = api(A_THINKERCAP);
+                let fnp = api(A_MOBJTHINKER);
+                let mut t = rd(cap + api(O_TH_NEXT));
+                let mut n = 0;
+                let mut guard = 0;
+                while t != cap {
+                    guard += 1;
+                    if guard > 3000 { break; }
+                    if n >= 8 { break; }
+                    if rd(t + api(O_TH_FUNCTION)) == fnp {
+                        let fl = rd(t + api(O_MO_FLAGS));
+                        let counted = fl & MF_COUNTKILL;
+                        let shootable = fl & MF_SHOOTABLE;
+                        if counted != 0 {
+                            if shootable != 0 {
+                                if rd(t + api(O_MO_HEALTH)) > 0 {
+                                    out_set(OUT_KILL0 + n, t);
+                                    n += 1;
+                                }
+                            }
+                        }
+                    }
+                    t = rd(t + api(O_TH_NEXT));
+                }
+            }
+        }
+    }
+}

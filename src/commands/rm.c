@@ -1,337 +1,158 @@
+// rm.h - Remove files or directories
+//
+// Updated for the seamless /disk/ mount: no disk-specific logic here.
+// Every path is forwarded to AVFS, which resolves it against the current
+// working directory and routes /disk paths to FAT32 — deleting on the
+// real disk and deleting in the RAM fs use the exact same code path.
+//
+// Safety rails (evaluated BEFORE anything is deleted):
+//   - "." and ".." are refused outright (POSIX rm behaviour)
+//   - anything that resolves to "/"     is refused (would wipe the RAM fs root)
+//   - anything that resolves to "/disk" is refused (the mount point itself;
+//     AVFS refuses it too, this is a second lock on the same door)
+//
+// Usage:
+//   rm <file>...          remove files (also empty directories)
+//   rm -r <dir>...        remove directories recursively
+//   rm -f <path>...       force: silently ignore nonexistent targets
 
-#include "../Avfs/Avfs.h"
+#pragma once
+
+#include <stdint.h>
 #include "../terminal/terminal.h"
+#include "../vga/vga.h"
 #include "../utility/utility.h"
+#include "../Avfs/Avfs.h"
 
-// Maximum matches for wildcards
-#define MAX_MATCHES 128
+#define RM_PATH_MAX 512
 
-static DirectoryEntry entries[128];
-static char matched_paths[MAX_MATCHES][256]; // Store matched paths
-static int match_count = 0;
+// Resolve `path` against the AVFS cwd WITHOUT touching AVFS internals.
+// Used purely to detect dangerous targets before deleting.  Mirrors the
+// same rules AVFS applies: leading '/' is absolute, otherwise the cwd is
+// prefixed, then "." components are dropped and ".." pops one component.
+static void rm_resolve_for_guard(const char *path, char *out, int outsz)
+{
+    char abs[RM_PATH_MAX];
 
-// Structure to hold command options
-typedef struct {
-    int recursive;
-    int force;
-    int interactive;
-    int verbose;
-    int empty_dir; // -d flag
-    int preserve_root;
-} RmOptions;
-
-// Helper to get user confirmation
-// NOTE: You may need to adjust 'getchar' to your specific kernel input function
-// e.g., keyboard_getchar(), read_line(), etc.
-static int user_confirm(const char* path) {
-    print("Remove '");
-    print(path);
-    print("'? ");
-    
-    // Simple blocking read. 
-    // Assuming a basic terminal_getchar() exists or similar.
-    // Replace 'terminal_getchar' with your actual input function.
-    char c = 0; 
-    // In a real kernel, you might read from a keyboard buffer here
-    // c = keyboard_read(); 
-    
-    // For this snippet, we simulate 'y' or assume the user handles input
-    // If you have a getchar implementation:
-    // c = getchar(); 
-    
-    // Fallback for demo purposes (always approve if interactive is on, 
-    // but in real code you MUST check input):
-    // print("y (auto-confirmed for demo)\n"); return 1; 
-    
-    // Implementing actual read logic:
-    // (Pseudo-code as input drivers vary wildly)
-    // c = keyboard_getchar(); 
-    
-    // Let's assume a function input_getchar exists for this context
-    // c = input_getchar(); 
-    // return (c == 'y' || c == 'Y');
-    
-    return 1; // Placeholder: Always return true if you don't have an input function ready
-}
-
-// Simple wildcard matching function (Existing)
-static bool wildcard_match(const char* pattern, const char* str) {
-    while (*pattern && *str) {
-        if (*pattern == '*') {
-            while (*pattern == '*') pattern++;
-            if (*pattern == '\0') return true;
-            while (*str) {
-                if (wildcard_match(pattern, str)) return true;
-                str++;
-            }
-            return false;
-        } else if (*pattern == '?' || *pattern == *str) {
-            pattern++;
-            str++;
-        } else {
-            return false;
-        }
-    }
-    while (*pattern == '*') pattern++;
-    return (*pattern == '\0' && *str == '\0');
-}
-
-// Expand wildcard patterns (Existing logic, cleaned up)
-static void expand_wildcard(const char* pattern) {
-    match_count = 0;
-    const char* cwd = avfs_getcwd();
-    
-    char dir_path[256];
-    char file_pattern[256];
-    const char* last_slash = strrchr(pattern, '/');
-    
-    if (last_slash) {
-        int dir_len = last_slash - pattern;
-        strncpy(dir_path, pattern, dir_len);
-        dir_path[dir_len] = '\0';
-        if (dir_len == 0) strcpy(dir_path, "/");
-        strcpy(file_pattern, last_slash + 1);
+    if (path[0] == '/') {
+        snprintf(abs, sizeof(abs), "%s", path);
     } else {
-        strcpy(dir_path, cwd);
-        strcpy(file_pattern, pattern);
-    }
-    
-    int count = avfs_list_directory(dir_path, entries, 128);
-    if (count < 0) return;
-    
-    for (int i = 0; i < count && match_count < MAX_MATCHES; i++) {
-        if (strcmp(entries[i].name, ".") == 0 || strcmp(entries[i].name, "..") == 0) continue;
-        
-        if (wildcard_match(file_pattern, entries[i].name)) {
-            if (strcmp(dir_path, "/") == 0) {
-                snprintf(matched_paths[match_count], 256, "/%s", entries[i].name);
-            } else {
-                snprintf(matched_paths[match_count], 256, "%s/%s", dir_path, entries[i].name);
-            }
-            match_count++;
-        }
-    }
-}
-
-// Recursive directory removal (Updated with Options)
-static int remove_directory_recursive(const char* path, RmOptions* opts) {
-    // Safety: Preserve Root
-    if (opts->preserve_root && strcmp(path, "/") == 0) {
-        print("Error: it is dangerous to operate recursively on '/'\n");
-        print("Use --no-preserve-root to override.\n");
-        return -2;
+        const char *cwd = avfs_get_cwd();
+        snprintf(abs, sizeof(abs), "%s%s%s",
+                 cwd, (strcmp(cwd, "/") == 0) ? "" : "/", path);
     }
 
-    int count = avfs_list_directory(path, entries, 128);
-    if (count < 0) return -1;
-    
-    for (int i = 0; i < count; i++) {
-        if (strcmp(entries[i].name, ".") == 0 || strcmp(entries[i].name, "..") == 0) continue;
-        
-        char full_path[256];
-        if (strcmp(path, "/") == 0) {
-            snprintf(full_path, sizeof(full_path), "/%s", entries[i].name);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", path, entries[i].name);
-        }
-        
-        // Interactive Check
-        if (opts->interactive) {
-            if (!user_confirm(full_path)) {
-                if (opts->verbose) print("Skipped '"); print(full_path); print("'\n");
-                continue;
-            }
-        }
+    // component-wise normalization
+    char norm[RM_PATH_MAX];
+    strcpy(norm, "/");
 
-        if (entries[i].is_directory) {
-            if (opts->verbose) { print("Entering directory '"); print(full_path); print("'\n"); }
-            if (remove_directory_recursive(full_path, opts) != 0) {
-                return -1;
+    char tmp[RM_PATH_MAX];
+    strcpy(tmp, abs);
+    char *tok = strtok(tmp, "/");
+    while (tok) {
+        if (strcmp(tok, ".") == 0) {
+            // skip
+        } else if (strcmp(tok, "..") == 0) {
+            if (strcmp(norm, "/") != 0) {
+                char *slash = strrchr(norm, '/');
+                if (slash == norm) norm[1] = '\0';   // "/x"  -> "/"
+                else               *slash  = '\0';   // "/a/b" -> "/a"
             }
         } else {
-            if (opts->verbose) { print("Removing file '"); print(full_path); print("'\n"); }
-            if (avfs_remove_file(full_path) != 0 && !opts->force) {
-                print("Error: Cannot remove '"); print(full_path); print("'\n");
-                return -1;
-            }
+            if (strcmp(norm, "/") != 0) strcat(norm, "/");
+            strcat(norm, tok);
         }
+        tok = strtok(NULL, "/");
     }
-    
-    if (opts->verbose) { print("Removing directory '"); print(path); print("'\n"); }
-    return avfs_remove_file(path);
+
+    snprintf(out, outsz, "%s", norm);
 }
 
-void rm_command(int argc, char* argv[]) {
-    RmOptions opts = {0};
-    opts.preserve_root = 1; // Default is safe
-    
-    if (argc < 2) {
-        print("Usage: rm [OPTIONS] <FILE>...\n");
-        print("Remove (unlink) the FILE(s).\n\n");
-        print("Options:\n");
-        print("  -f, --force      Ignore nonexistent files and arguments, never prompt\n");
-        print("  -i               Prompt before every removal\n");
-        print("  -I               Prompt once before removing more than three files\n");
-        print("  -r, -R, --recursive   Remove directories and their contents recursively\n");
-        print("  -d, --dir       Remove empty directories\n");
-        print("  -v, --verbose   Explain what is being done\n");
-        print("      --preserve-root   Do not remove '/' (default)\n");
-        print("      --no-preserve-root    Do not treat '/' specially\n");
-        print("\nWildcards supported: * and ?\n");
-        return;
-    }
-    
-    // Parse arguments
-    int start_index = 1;
+// True when the target must never be removed (see header comment).
+static bool rm_target_is_protected(const char *path)
+{
+    if (strcmp(path, ".") == 0 || strcmp(path, "..") == 0)
+        return true;
+
+    char resolved[RM_PATH_MAX];
+    rm_resolve_for_guard(path, resolved, sizeof(resolved));
+
+    if (strcmp(resolved, "/") == 0)      return true;   // RAM fs root
+    if (strcmp(resolved, "/disk") == 0)  return true;   // disk mount point
+    return false;
+}
+
+void rm_command(int argc, char *argv[])
+{
+    bool recursive = false;
+    bool force     = false;
+    int  targets   = 0;
+
+    // ---- parse arguments -------------------------------------------------
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-') {
-            if (argv[i][1] == '-') {
-                // Long arguments
-                if (strcmp(argv[i], "--recursive") == 0) opts.recursive = 1;
-                else if (strcmp(argv[i], "--force") == 0) opts.force = 1;
-                else if (strcmp(argv[i], "--verbose") == 0) opts.verbose = 1;
-                else if (strcmp(argv[i], "--dir") == 0) opts.empty_dir = 1;
-                else if (strcmp(argv[i], "--preserve-root") == 0) opts.preserve_root = 1;
-                else if (strcmp(argv[i], "--no-preserve-root") == 0) opts.preserve_root = 0;
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            for (const char *p = argv[i] + 1; *p != '\0'; p++) {
+                if      (*p == 'r') recursive = true;
+                else if (*p == 'f') force     = true;
                 else {
-                    print("Error: Unknown option '"); print(argv[i]); print("'\n");
+                    terminal_setcolor(VGA_COLOR_LIGHT_RED);
+                    printr("rm: unknown flag '-%c'\n", *p);
+                    print("Usage: rm [-r] [-f] <file|dir>...\n");
+                    terminal_setcolor(VGA_COLOR_WHITE);
                     return;
                 }
-            } else {
-                // Short arguments (Combined e.g. -rfi)
-                for (int j = 1; argv[i][j] != '\0'; j++) {
-                    char c = argv[i][j];
-                    if (c == 'r' || c == 'R') opts.recursive = 1;
-                    else if (c == 'f') opts.force = 1;
-                    else if (c == 'i') opts.interactive = 1;
-                    else if (c == 'v') opts.verbose = 1;
-                    else if (c == 'd') opts.empty_dir = 1;
-                    else if (c == 'I') { /* TODO: Implement -I logic */ }
-                    else {
-                        print("Error: Unknown flag '-"); terminal_putchar(c); print("'\n");
-                        return;
-                    }
-                }
             }
-            start_index++; // Skip the flag
         } else {
-            // Hit a file argument, stop parsing flags
-            break;
+            targets++;
         }
     }
-    
-    if (start_index >= argc) {
-        if (!opts.force) print("Error: No file specified\n");
+
+    if (targets == 0) {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("Usage: rm [-r] [-f] <file|dir>...\n");
+        print("       rm -r removes directories recursively\n");
+        terminal_setcolor(VGA_COLOR_WHITE);
         return;
     }
 
-    // Logic: -f overrides -i
-    if (opts.force) opts.interactive = 0;
+    // ---- remove each target (AVFS routes /disk paths to FAT32) ----------
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] != '\0')
+            continue;
+        const char *path = argv[i];
 
-    // Process each file/directory argument
-    for (int i = start_index; i < argc; i++) {
-        const char* pattern = argv[i];
-        
-        // Check for wildcards
-        if (strchr(pattern, '*') || strchr(pattern, '?')) {
-            expand_wildcard(pattern);
-            
-            if (match_count == 0) {
-                if (!opts.force) {
-                    print("Error: No matches for '"); print(pattern); print("'\n");
-                }
+        if (rm_target_is_protected(path)) {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED);
+            printr("rm: refusing to remove '%s'\n", path);
+            terminal_setcolor(VGA_COLOR_WHITE);
+            continue;
+        }
+
+        if (avfs_is_directory(path)) {
+            if (!recursive) {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED);
+                printr("rm: %s: is a directory (use rm -r)\n", path);
+                terminal_setcolor(VGA_COLOR_WHITE);
                 continue;
             }
-            
-            // Handle "I" flag (Prompt once if many matches)
-            if (opts.interactive && match_count > 3) {
-                print("Remove "); print_integer(match_count); 
-                print(" files? "); 
-                // Add input logic here similar to user_confirm
-            }
-
-            for (int j = 0; j < match_count; j++) {
-                const char* path = matched_paths[j];
-                
-                // Interactive Check per file
-                if (opts.interactive) {
-                    if (!user_confirm(path)) continue;
-                }
-
-                if (avfs_is_directory(path)) {
-                    if (!opts.recursive && !opts.empty_dir) {
-                        if (!opts.force) {
-                            print("Error: '"); print(path); print("' is a directory\n");
-                        }
-                        continue;
-                    }
-                    
-                    if (opts.empty_dir && !opts.recursive) {
-                        // Try to remove empty dir only
-                        int res = avfs_remove_file(path);
-                        if (res != 0 && !opts.force) {
-                             print("Error: Directory not empty or failed: '"); print(path); print("'\n");
-                        } else if (opts.verbose) {
-                             print("Removed directory '"); print(path); print("'\n");
-                        }
-                    } else {
-                        // Recursive removal
-                        int res = remove_directory_recursive(path, &opts);
-                        if (res == -2) continue; // Preserve root error
-                        if (res != 0 && !opts.force) {
-                            print("Error: Failed to remove '"); print(path); print("'\n");
-                        } else if (opts.verbose) {
-                            print("Removed '"); print(path); print("'\n");
-                        }
-                    }
-                } else {
-                    // Is a file
-                    int res = avfs_remove_file(path);
-                    if (res != 0 && !opts.force) {
-                        print("Error: Failed to remove '"); print(path); print("'\n");
-                    } else if (opts.verbose) {
-                        print("Removed '"); print(path); print("'\n");
-                    }
-                }
+            if (avfs_remove_dir_recursive(path) != 0) {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED);
+                printr("rm: could not remove '%s'\n", path);
+                terminal_setcolor(VGA_COLOR_WHITE);
             }
         } else {
-            // No wildcards
-            const char* path = pattern;
-            
-            if (opts.interactive && !user_confirm(path)) continue;
-
-            if (avfs_is_directory(path)) {
-                if (!opts.recursive && !opts.empty_dir) {
-                    if (!opts.force) {
-                        print("Error: '"); print(path); print("' is a directory\n");
-                    }
-                    continue;
-                }
-                
-                if (opts.empty_dir && !opts.recursive) {
-                    int res = avfs_remove_file(path);
-                    if (res != 0 && !opts.force) {
-                        print("Error: Directory not empty or failed: '"); print(path); print("'\n");
-                    } else if (opts.verbose) {
-                        print("Removed directory '"); print(path); print("'\n");
-                    }
-                } else {
-                    int res = remove_directory_recursive(path, &opts);
-                    if (res == -2) continue; 
-                    if (res != 0 && !opts.force) {
-                        print("Error: Failed to remove '"); print(path); print("'\n");
-                    } else if (opts.verbose) {
-                        print("Removed '"); print(path); print("'\n");
-                    }
-                }
-            } else {
-                int res = avfs_remove_file(path);
-                if (res != 0 && !opts.force) {
-                    print("Error: File not found or failed: '"); print(path); print("'\n");
-                } else if (opts.verbose) {
-                    print("Removed '"); print(path); print("'\n");
-                }
-            }
+            int rc = avfs_remove_file(path);
+            if (rc == 0)
+                continue;                       // silent success, like real rm
+            if (rc == -1 && force)
+                continue;                       // -f: ignore missing targets
+            terminal_setcolor(VGA_COLOR_LIGHT_RED);
+            if (rc == -2)
+                printr("rm: %s: directory not empty\n", path);
+            else
+                printr("rm: %s: no such file or directory\n", path);
+            terminal_setcolor(VGA_COLOR_WHITE);
         }
     }
+    terminal_setcolor(VGA_COLOR_WHITE);
 }

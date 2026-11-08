@@ -1,0 +1,16 @@
+// mod: HD graphics: smaller pixels, smooth shading
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_UPSCALE, 0);
+        out_set(OUT_SAT, 100);
+        out_set(OUT_CON, 100);
+        out_set(OUT_VIG, 0);
+    } else {
+        out_set(OUT_UPSCALE, 2);
+        out_set(OUT_SAT, 118);
+        out_set(OUT_CON, 108);
+        out_set(OUT_VIG, 18);
+    }
+}

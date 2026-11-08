@@ -1,0 +1,12 @@
+// mod: Full brightness everywhere
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if in_level() == 1 {
+        if mod_frame() < 0 {
+            pl_set(O_PL_FIXEDCOLORMAP, 0);
+        } else {
+            pl_set(O_PL_FIXEDCOLORMAP, 1);
+        }
+    }
+}

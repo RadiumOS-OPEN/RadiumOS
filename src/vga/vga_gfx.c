@@ -10,6 +10,7 @@
 // has no access to real-mode BIOS interrupts.
 
 #include "vga_gfx.h"
+#include "fbcon.h"
 #include "../io/io.h"
 #include "../timers/timer.h"
 #include "../keyboard/keyboard.h"
@@ -297,6 +298,8 @@ static void vga_font_access_exit_to_text(void) {
 }
 
 void vga_gfx_set_mode13h(void) {
+    fbcon_suspend_hw();
+
     if (!s_regs_saved) {
         vga_capture_register_table(s_saved_text_mode_regs);
         s_regs_saved = true;
@@ -355,6 +358,8 @@ void vga_gfx_set_text_mode(void) {
     if (s_dac_saved) {
         vga_dac_restore();
     }
+
+    fbcon_resume();
 }
 
 uint8_t* vga_gfx_get_framebuffer(void) {

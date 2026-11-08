@@ -3,10 +3,12 @@
 #define PONG_H
 
 #include "../vga/vga.h"
+#include "../vga/scaler.h"
 
-#define GAME_WIDTH 60
-#define GAME_HEIGHT 20
-#define MAX_SNAKE_LENGTH 300
+// The playfield is the whole window grid, so it follows the terminal size.
+#define GAME_WIDTH  scaler_win_cols()
+#define GAME_HEIGHT scaler_win_rows()
+#define MAX_SNAKE_LENGTH 1200
 #define INITIAL_SPEED 150
 #define SPEED_INCREMENT 5
 #define MIN_SPEED 50
@@ -50,5 +52,6 @@ typedef struct {
 
 // Function to start and run the Pong game
 void play_pong(void);
+void snake_command(int argc, char *argv[]);
 void init_snake(Snake* snake);
 #endif // PONG_H

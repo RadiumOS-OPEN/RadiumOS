@@ -1,3 +1,4 @@
+#include "../vga/fbcon.h"
 #include "../Avfs/Avfs.h"
 #include "../utility/utility.h"
 #include "../terminal/terminal.h"
@@ -694,6 +695,7 @@ static inline uint8_t ps2_read(void) {
     uint8_t b; __asm__ volatile("inb $0x60,%0":"=a"(b)); return b;
 }
 static inline int ps2_ready(void) {
+    fbcon_poll();
     uint8_t s; __asm__ volatile("inb $0x64,%0":"=a"(s)); return s&1;
 }
 static uint8_t ed_get_sc(void) {

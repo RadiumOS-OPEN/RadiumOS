@@ -42,6 +42,35 @@ impl Tcp {
         Ok(stream)
     }
 
+    /// Restarts the per-operation deadline (long-lived connections call this before each operation).
+    pub(crate) fn touch(&mut self) {
+        self.started = unsafe { crate::get_ticks() };
+    }
+
+    /// Reads buffered bytes without waiting: None when nothing has arrived, Some(0) once the peer has closed.
+    pub(crate) fn try_read(&mut self, output: &mut [u8]) -> Result<Option<usize>, Error> {
+        if output.is_empty() {
+            return Ok(Some(0));
+        }
+        if self.offset == self.pending.len() {
+            if self.closed {
+                return Ok(Some(0));
+            }
+            self.poll()?;
+            if self.offset == self.pending.len() {
+                return Ok(if self.closed { Some(0) } else { None });
+            }
+        }
+        let count = output.len().min(self.pending.len() - self.offset);
+        output[..count].copy_from_slice(&self.pending[self.offset..self.offset + count]);
+        self.offset += count;
+        if self.offset == self.pending.len() {
+            self.pending.clear();
+            self.offset = 0;
+        }
+        Ok(Some(count))
+    }
+
     fn check_deadline(&self) -> Result<(), Error> {
         if unsafe { crate::get_ticks() }.wrapping_sub(self.started) >= self.timeout_ms {
             return Err(Error::Message("fetch timed out"));

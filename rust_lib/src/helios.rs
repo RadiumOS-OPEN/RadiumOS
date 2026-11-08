@@ -228,8 +228,23 @@ extern "C" {
     fn rust_prp_open_file_prv(input: *const u8, output: *const u8, private_key: *const u8) -> i32;
     fn rust_prp_seal_text_pub(text: *const u8, len: u32, recipient_pub: *const u8, output: *const u8) -> i32;
     fn rust_https_get(url: *const u8) -> i32;
+    fn rust_fetch_to_file(url: *const u8, output: *const u8) -> i32;
     fn rust_fetch_active() -> bool;
     fn rust_test_https() -> i32;
+    fn rust_png_fetch_and_render(url: *const u8, x: i32, y: i32) -> i32;
+    fn rust_load_and_render_png(filename: *const u8, x: i32, y: i32) -> i32;
+    fn rust_render_test_png() -> i32;
+    fn avfs_save_file(name: *const u8, data: *const u8, size: u32, overwrite: bool) -> i32;
+    fn avfs_append_file(name: *const u8, data: *const u8, size: u32) -> i32;
+    fn avfs_list_directory(path: *const u8, entries: *mut u8, max_entries: i32) -> i32;
+    fn avfs_disk_query(out: *mut u8) -> i32;
+    fn avfs_ramfs_query(out: *mut u8) -> i32;
+    fn pmm_get_total_memory() -> u64;
+    fn pmm_get_used_memory() -> u64;
+    fn pmm_get_free_memory() -> u64;
+    fn rtc_get_time(dt: *mut u8);
+    fn execute_command(cmd: *const u8);
+    fn shell_stdin_file() -> *const u8;
 }
 
 // ─── VGA colour constants ─────────────────────────────────────────────────────
@@ -301,6 +316,677 @@ fn hex_byte(c: u8) -> u8 {
     if c >= b'a' { c - b'a' + 10 }
     else if c >= b'A' { c - b'A' + 10 }
     else { c - b'0' }
+}
+
+// ============================================================================
+//  NATIVE FUNCTION REGISTRY  (Rust ABI, lives entirely inside helios)
+//
+//  Helios code calls a registered fn as `native("name", a, b)` or directly as
+//  `name(a, b)` when no user fn has that name. Strings arrive as C pointers.
+// ============================================================================
+
+pub type NativeFn = fn(*const i32, i32) -> i32;
+
+struct NativeEntry { name: String, func: NativeFn }
+
+static mut NATIVE_FNS:   Vec<NativeEntry> = Vec::new();
+static mut NATIVE_READY: bool = false;
+static mut RNG_STATE:    u32  = 0;
+
+unsafe fn native_table() -> &'static mut Vec<NativeEntry> {
+    &mut *core::ptr::addr_of_mut!(NATIVE_FNS)
+}
+
+unsafe fn cstr_bytes<'a>(p: *const u8) -> &'a [u8] {
+    let mut n = 0usize;
+    while n < 0x100_0000 && *p.add(n) != 0 { n += 1; }
+    core::slice::from_raw_parts(p, n)
+}
+
+// `name` is a NUL-terminated C string. Returns 0 on success, -1 on bad input.
+pub unsafe fn register_native_fn(name: *const u8, func: NativeFn) -> i32 {
+    if name.is_null() { return -1; }
+    let nm = cstr_bytes(name);
+    let s = match str::from_utf8(nm) { Ok(s) if !s.is_empty() => s, _ => return -1 };
+    let table = native_table();
+    if let Some(e) = table.iter_mut().find(|e| e.name.as_bytes() == nm) {
+        e.func = func;
+        return 0;
+    }
+    table.push(NativeEntry { name: String::from(s), func });
+    0
+}
+
+pub unsafe fn get_native_fn(name: *const u8) -> Option<NativeFn> {
+    if name.is_null() { return None; }
+    native_lookup(cstr_bytes(name))
+}
+
+fn native_lookup(name: &[u8]) -> Option<NativeFn> {
+    unsafe {
+        if !NATIVE_READY { NATIVE_READY = true; register_builtin_natives(); }
+        native_table().iter().find(|e| e.name.as_bytes() == name).map(|e| e.func)
+    }
+}
+
+fn native_is_registered(name: &str) -> bool { native_lookup(name.as_bytes()).is_some() }
+
+// Helpers for native fn bodies
+pub unsafe fn native_arg(args: *const i32, argc: i32, i: i32) -> i32 {
+    if i >= 0 && i < argc { *args.add(i as usize) } else { 0 }
+}
+pub unsafe fn native_arg_str<'a>(args: *const i32, argc: i32, i: i32) -> &'a [u8] {
+    let p = native_arg(args, argc, i) as usize as *const u8;
+    if (p as usize) < 0x1000 { &[] } else { cstr_bytes(p) }
+}
+
+fn nat_abs(a: *const i32, n: i32) -> i32 { unsafe { native_arg(a, n, 0).wrapping_abs() } }
+fn nat_min(a: *const i32, n: i32) -> i32 { unsafe { native_arg(a, n, 0).min(native_arg(a, n, 1)) } }
+fn nat_max(a: *const i32, n: i32) -> i32 { unsafe { native_arg(a, n, 0).max(native_arg(a, n, 1)) } }
+fn nat_clamp(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let (v, lo, hi) = (native_arg(a, n, 0), native_arg(a, n, 1), native_arg(a, n, 2));
+        if hi < lo { lo } else { v.max(lo).min(hi) }
+    }
+}
+fn nat_pow(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let (base, exp) = (native_arg(a, n, 0), native_arg(a, n, 1));
+        if exp < 0 { return 0; }
+        let mut r = 1i32;
+        for _ in 0..exp.min(64) { r = r.wrapping_mul(base); }
+        r
+    }
+}
+fn nat_rand(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        let mut x = RNG_STATE;
+        if x == 0 { x = get_ticks() | 1; }
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        RNG_STATE = x;
+        (x >> 1) as i32
+    }
+}
+// rand_range(lo, hi) -> value in [lo, hi)
+fn nat_rand_range(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let (lo, hi) = (native_arg(a, n, 0), native_arg(a, n, 1));
+        if hi <= lo { return lo; }
+        let span = (hi as i64 - lo as i64) as u32;
+        lo.wrapping_add((nat_rand(a, n) as u32 % span) as i32)
+    }
+}
+
+// ── String-returning natives ─────────────────────────────────────────────────
+// A native that returns text must go through native_return_str so the VM
+// registers (and later frees) the buffer. 1 = VM-owned heap string, 2 = static.
+static mut NATIVE_STR_RESULT: u8 = 0;
+
+pub(crate) unsafe fn native_return_str(bytes: &[u8]) -> i32 {
+    let p = malloc(bytes.len() as u32 + 1);
+    if p.is_null() {
+        NATIVE_STR_RESULT = 2;
+        return EMPTY_CSTR.as_ptr() as i32;
+    }
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+    *p.add(bytes.len()) = 0;
+    NATIVE_STR_RESULT = 1;
+    p as i32
+}
+
+unsafe fn native_cstr_ptr(args: *const i32, argc: i32, i: i32) -> *const u8 {
+    let p = native_arg(args, argc, i) as usize;
+    if p < 0x1000 { EMPTY_CSTR.as_ptr() } else { p as *const u8 }
+}
+
+fn find_bytes(h: &[u8], n: &[u8]) -> Option<usize> {
+    if n.is_empty() || n.len() > h.len() { return None; }
+    h.windows(n.len()).position(|w| w == n)
+}
+
+fn find_ci(h: &[u8], from: usize, pat: &[u8]) -> Option<usize> {
+    if from >= h.len() || pat.len() > h.len() - from { return None; }
+    h[from..].windows(pat.len()).position(|w| w.eq_ignore_ascii_case(pat)).map(|i| i + from)
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+// str_find_at(s, needle, start) -> absolute index >= start, or -1
+fn nat_str_find_at(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let hay = native_arg_str(a, n, 0);
+        let nd = native_arg_str(a, n, 1);
+        let start = native_arg(a, n, 2).max(0) as usize;
+        if start > hay.len() { return -1; }
+        find_bytes(&hay[start..], nd).map_or(-1, |i| (i + start) as i32)
+    }
+}
+
+fn nat_str_lower(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let out: Vec<u8> = native_arg_str(a, n, 0).iter().map(|b| b.to_ascii_lowercase()).collect();
+        native_return_str(&out)
+    }
+}
+
+// str_pad(s, width) -> s right-padded with spaces (or cut) to exactly width
+fn nat_str_pad(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let w = native_arg(a, n, 1).max(0) as usize;
+        let mut out: Vec<u8> = s.iter().copied().take(w).collect();
+        while out.len() < w { out.push(b' '); }
+        native_return_str(&out)
+    }
+}
+
+// bar(value, max, width) -> "[####......]"
+fn nat_bar(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let v = native_arg(a, n, 0).max(0) as i64;
+        let m = native_arg(a, n, 1).max(1) as i64;
+        let w = native_arg(a, n, 2).clamp(1, 70) as i64;
+        let filled = (v.min(m) * w / m) as usize;
+        let mut out = Vec::with_capacity(w as usize + 2);
+        out.push(b'[');
+        for i in 0..w as usize { out.push(if i < filled { b'#' } else { b'.' }); }
+        out.push(b']');
+        native_return_str(&out)
+    }
+}
+
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+fn nat_url_encode(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let mut out = Vec::with_capacity(s.len() * 3);
+        for &b in s {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                out.push(b);
+            } else if b == b' ' {
+                out.push(b'+');
+            } else {
+                out.push(b'%');
+                out.push(HEX_UPPER[(b >> 4) as usize]);
+                out.push(HEX_UPPER[(b & 15) as usize]);
+            }
+        }
+        native_return_str(&out)
+    }
+}
+
+fn nat_url_decode(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let mut out = Vec::with_capacity(s.len());
+        let mut i = 0usize;
+        while i < s.len() {
+            if s[i] == b'+' {
+                out.push(b' ');
+            } else if s[i] == b'%' && i + 2 < s.len() {
+                match (hex_val(s[i + 1]), hex_val(s[i + 2])) {
+                    (Some(h), Some(l)) => { out.push(h * 16 + l); i += 2; }
+                    _ => out.push(b'%'),
+                }
+            } else {
+                out.push(s[i]);
+            }
+            i += 1;
+        }
+        native_return_str(&out)
+    }
+}
+
+fn is_block_tag(name: &[u8]) -> bool {
+    matches!(name,
+        b"br" | b"p" | b"div" | b"li" | b"ul" | b"ol" | b"tr" | b"table" |
+        b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" | b"hr" | b"section" |
+        b"article" | b"header" | b"footer" | b"pre" | b"blockquote" | b"title" |
+        b"dd" | b"dt")
+}
+
+fn push_text(out: &mut Vec<u8>, pending: &mut bool, b: u8) {
+    if b == b' ' || b == b'\n' || b == b'\t' || b == b'\r' { *pending = true; return; }
+    if b >= 0x80 || b < 0x20 { return; }
+    if *pending {
+        if out.last().map_or(false, |&l| l != b'\n') { out.push(b' '); }
+        *pending = false;
+    }
+    out.push(b);
+}
+
+fn html_entity(ent: &[u8]) -> Option<Vec<u8>> {
+    let simple: Option<&[u8]> = match ent {
+        b"amp" => Some(b"&"), b"lt" => Some(b"<"), b"gt" => Some(b">"),
+        b"quot" | b"ldquo" | b"rdquo" => Some(b"\""),
+        b"apos" | b"rsquo" | b"lsquo" => Some(b"'"),
+        b"nbsp" => Some(b" "),
+        b"ndash" | b"mdash" | b"minus" => Some(b"-"),
+        b"hellip" => Some(b"..."),
+        b"copy" => Some(b"(c)"),
+        b"middot" | b"bull" => Some(b"*"),
+        b"raquo" => Some(b">>"), b"laquo" => Some(b"<<"),
+        _ => None,
+    };
+    if let Some(s) = simple { return Some(s.to_vec()); }
+    if ent.len() >= 2 && ent[0] == b'#' {
+        let (digits, radix) = if ent[1] == b'x' || ent[1] == b'X' { (&ent[2..], 16u32) } else { (&ent[1..], 10u32) };
+        let mut cp: u32 = 0;
+        for &d in digits {
+            let v = match hex_val(d) { Some(v) if (v as u32) < radix => v as u32, _ => return None };
+            cp = cp.wrapping_mul(radix).wrapping_add(v);
+        }
+        return Some(if cp == 160 { vec![b' '] } else if (32..127).contains(&cp) { vec![cp as u8] } else { Vec::new() });
+    }
+    None
+}
+
+// Visible text of an HTML page: drops tags/script/style/comments, decodes entities,
+// collapses whitespace, and puts block elements on their own lines.
+fn html_to_text(src: &[u8]) -> Vec<u8> {
+    let n = src.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n / 2 + 16);
+    let mut pending = false;
+    let mut i = 0usize;
+    while i < n {
+        let c = src[i];
+        if c == b'<' && i + 1 < n && (src[i + 1].is_ascii_alphabetic() || src[i + 1] == b'/' || src[i + 1] == b'!') {
+            if src[i + 1] == b'!' && i + 3 < n && &src[i + 2..i + 4] == b"--" {
+                i = match find_bytes(&src[i + 4..], b"-->") { Some(p) => i + 4 + p + 3, None => n };
+                continue;
+            }
+            let closing = src[i + 1] == b'/';
+            let mut j = i + 1 + closing as usize;
+            let name_start = j;
+            while j < n && src[j].is_ascii_alphanumeric() { j += 1; }
+            let mut name = [0u8; 12];
+            let name_len = (j - name_start).min(12);
+            for k in 0..name_len { name[k] = src[name_start + k].to_ascii_lowercase(); }
+            let name = &name[..name_len];
+            let mut quote = 0u8;
+            while j < n {
+                let d = src[j];
+                if quote != 0 { if d == quote { quote = 0; } }
+                else if d == b'"' || d == b'\'' { quote = d; }
+                else if d == b'>' { break; }
+                j += 1;
+            }
+            j += 1;
+            if !closing && (name == b"script" || name == b"style") {
+                let mut end_tag = Vec::with_capacity(8);
+                end_tag.extend_from_slice(b"</");
+                end_tag.extend_from_slice(name);
+                j = match find_ci(src, j.min(n), &end_tag) { Some(p) => p, None => n };
+                i = j;
+                continue;
+            }
+            if is_block_tag(name) {
+                if out.last().map_or(false, |&l| l != b'\n') { out.push(b'\n'); }
+                pending = false;
+            }
+            i = j;
+            continue;
+        }
+        if c == b'&' {
+            let limit = (i + 12).min(n);
+            if let Some(off) = src[i + 1..limit].iter().position(|&b| b == b';') {
+                if let Some(rep) = html_entity(&src[i + 1..i + 1 + off]) {
+                    for b in rep { push_text(&mut out, &mut pending, b); }
+                    i += off + 2;
+                    continue;
+                }
+            }
+        }
+        push_text(&mut out, &mut pending, c);
+        i += 1;
+    }
+    out
+}
+
+fn nat_html_text(a: *const i32, n: i32) -> i32 {
+    unsafe { native_return_str(&html_to_text(native_arg_str(a, n, 0))) }
+}
+
+// Decodes the JSON string literal whose opening quote is at s[q]; returns (text, index after closing quote)
+fn json_decode(s: &[u8], q: usize) -> (Vec<u8>, usize) {
+    let mut out = Vec::new();
+    let mut i = q + 1;
+    while i < s.len() && s[i] != b'"' {
+        if s[i] == b'\\' && i + 1 < s.len() {
+            i += 1;
+            match s[i] {
+                b'n' => out.push(b'\n'),
+                b't' => out.push(b' '),
+                b'r' | b'b' | b'f' => {}
+                b'u' => {
+                    if i + 4 >= s.len() { break; }
+                    let mut cp = 0u32;
+                    for k in 1..=4 { cp = (cp << 4) | hex_val(s[i + k]).unwrap_or(0) as u32; }
+                    if (32..127).contains(&cp) { out.push(cp as u8); }
+                    i += 4;
+                }
+                c => out.push(c),
+            }
+        } else if s[i] >= 0x20 && s[i] < 0x80 {
+            out.push(s[i]);
+        }
+        i += 1;
+    }
+    (out, i + 1)
+}
+
+// json_count(s) -> number of string literals in the document
+fn nat_json_count(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let (mut i, mut count) = (0usize, 0i32);
+        while i < s.len() {
+            if s[i] == b'"' { i = json_decode(s, i).1; count += 1; } else { i += 1; }
+        }
+        count
+    }
+}
+
+// json_str(s, k) -> k-th string literal in document order (0-based), "" if absent
+fn nat_json_str(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let want = native_arg(a, n, 1).max(0);
+        let (mut i, mut count) = (0usize, 0i32);
+        while i < s.len() {
+            if s[i] == b'"' {
+                let (val, next) = json_decode(s, i);
+                if count == want { return native_return_str(&val); }
+                count += 1;
+                i = next;
+            } else { i += 1; }
+        }
+        native_return_str(b"")
+    }
+}
+
+// json_get(s, key) -> string value of the first "key": "..." pair, "" if absent
+fn nat_json_get(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let s = native_arg_str(a, n, 0);
+        let key = native_arg_str(a, n, 1);
+        let mut i = 0usize;
+        while i < s.len() {
+            if s[i] != b'"' { i += 1; continue; }
+            let (val, next) = json_decode(s, i);
+            if val == key {
+                let mut k = next;
+                while k < s.len() && (s[k] == b' ' || s[k] == b'\n') { k += 1; }
+                if k < s.len() && s[k] == b':' {
+                    k += 1;
+                    while k < s.len() && (s[k] == b' ' || s[k] == b'\n') { k += 1; }
+                    if k < s.len() && s[k] == b'"' { return native_return_str(&json_decode(s, k).0); }
+                    return native_return_str(b"");
+                }
+            }
+            i = next;
+        }
+        native_return_str(b"")
+    }
+}
+
+// ── Files, shell ─────────────────────────────────────────────────────────────
+const FILE_READ_MAX: i32 = 2 * 1024 * 1024;
+
+fn nat_file_exists(a: *const i32, n: i32) -> i32 {
+    unsafe { avfs_file_exists(native_cstr_ptr(a, n, 0)) as i32 }
+}
+fn nat_file_size(a: *const i32, n: i32) -> i32 {
+    unsafe { avfs_get_filesize(native_cstr_ptr(a, n, 0)) }
+}
+// file_read(path) -> contents as a string ("" if missing)
+fn nat_file_read(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let path = native_cstr_ptr(a, n, 0);
+        let size = avfs_get_filesize(path).min(FILE_READ_MAX);
+        if size <= 0 { return native_return_str(b""); }
+        let buf = malloc(size as u32 + 1);
+        if buf.is_null() { return native_return_str(b""); }
+        if avfs_read_file(path, buf, size as u32, 0) < 0 {
+            free(buf);
+            return native_return_str(b"");
+        }
+        *buf.add(size as usize) = 0;
+        NATIVE_STR_RESULT = 1;
+        buf as i32
+    }
+}
+// stdin_text() -> everything piped into this program ("" when it is not in a pipeline)
+fn nat_stdin_text(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        let path = shell_stdin_file();
+        if path.is_null() { return native_return_str(b""); }
+        let arg = [path as usize as i32];
+        nat_file_read(arg.as_ptr(), 1)
+    }
+}
+// file_write(path, text) -> 0 on success; replaces existing contents
+fn nat_file_write(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let data = native_arg_str(a, n, 1);
+        avfs_save_file(native_cstr_ptr(a, n, 0), data.as_ptr(), data.len() as u32, true)
+    }
+}
+// file_append(path, text) -> 0 on success; creates the file if needed
+fn nat_file_append(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let path = native_cstr_ptr(a, n, 0);
+        let data = native_arg_str(a, n, 1);
+        if avfs_file_exists(path) {
+            avfs_append_file(path, data.as_ptr(), data.len() as u32)
+        } else {
+            avfs_save_file(path, data.as_ptr(), data.len() as u32, false)
+        }
+    }
+}
+// shell(cmd) -> runs a shell command line
+fn nat_shell(a: *const i32, n: i32) -> i32 {
+    unsafe { execute_command(native_cstr_ptr(a, n, 0)); 0 }
+}
+// dir_list(path) -> one "name[/]\tsize" line per entry
+fn nat_dir_list(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        const ENTRY: usize = 44; // DirectoryEntry: name[32], size, is_directory, index
+        const MAX: usize = 128;
+        let mut buf = vec![0u8; ENTRY * MAX];
+        let count = avfs_list_directory(native_cstr_ptr(a, n, 0), buf.as_mut_ptr(), MAX as i32);
+        let mut out = String::new();
+        for e in 0..(count.max(0) as usize).min(MAX) {
+            let rec = &buf[e * ENTRY..(e + 1) * ENTRY];
+            let name_len = rec[..32].iter().position(|&c| c == 0).unwrap_or(32);
+            let size = u32::from_le_bytes([rec[32], rec[33], rec[34], rec[35]]);
+            let is_dir = i32::from_le_bytes([rec[36], rec[37], rec[38], rec[39]]) != 0;
+            out.push_str(str::from_utf8(&rec[..name_len]).unwrap_or("?"));
+            if is_dir { out.push('/'); }
+            out.push_str(&format!("\t{}\n", size));
+        }
+        native_return_str(out.as_bytes())
+    }
+}
+
+// ── System information ───────────────────────────────────────────────────────
+fn nat_mem_total_kb(_a: *const i32, _n: i32) -> i32 { unsafe { (pmm_get_total_memory() >> 10) as i32 } }
+fn nat_mem_used_kb(_a: *const i32, _n: i32) -> i32  { unsafe { (pmm_get_used_memory() >> 10) as i32 } }
+fn nat_mem_free_kb(_a: *const i32, _n: i32) -> i32  { unsafe { (pmm_get_free_memory() >> 10) as i32 } }
+
+unsafe fn cpuid_leaf(leaf: u32) -> [u32; 4] {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    core::arch::asm!("cpuid", inout("eax") leaf => a, out("ebx") b, inout("ecx") 0u32 => c, out("edx") d,
+        options(nostack, preserves_flags));
+    [a, b, c, d]
+}
+
+fn nat_cpu_vendor(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        let r = cpuid_leaf(0);
+        let mut v = Vec::with_capacity(12);
+        for reg in [r[1], r[3], r[2]] { v.extend_from_slice(&reg.to_le_bytes()); }
+        native_return_str(&v)
+    }
+}
+
+fn nat_cpu_brand(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        if cpuid_leaf(0x8000_0000)[0] < 0x8000_0004 { return native_return_str(b"unknown"); }
+        let mut v = Vec::with_capacity(48);
+        for leaf in 0x8000_0002u32..=0x8000_0004 {
+            for reg in cpuid_leaf(leaf) { v.extend_from_slice(&reg.to_le_bytes()); }
+        }
+        let text: Vec<u8> = v.into_iter().take_while(|&c| c != 0).collect();
+        let trimmed = str::from_utf8(&text).unwrap_or("unknown").trim();
+        native_return_str(trimmed.as_bytes())
+    }
+}
+
+fn nat_cpu_features(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        let r = cpuid_leaf(1);
+        let (ecx, edx) = (r[2], r[3]);
+        let table: [(u32, u32, &str); 19] = [
+            (edx, 0, "fpu"), (edx, 4, "tsc"), (edx, 5, "msr"), (edx, 6, "pae"), (edx, 9, "apic"),
+            (edx, 15, "cmov"), (edx, 23, "mmx"), (edx, 24, "fxsr"), (edx, 25, "sse"), (edx, 26, "sse2"),
+            (ecx, 0, "sse3"), (ecx, 9, "ssse3"), (ecx, 19, "sse4.1"), (ecx, 20, "sse4.2"),
+            (ecx, 23, "popcnt"), (ecx, 25, "aes"), (ecx, 28, "avx"), (edx, 28, "htt"), (ecx, 31, "hypervisor"),
+        ];
+        let mut out = String::new();
+        for (reg, bit, name) in table.iter() {
+            if reg & (1 << bit) != 0 {
+                if !out.is_empty() { out.push(' '); }
+                out.push_str(name);
+            }
+        }
+        native_return_str(out.as_bytes())
+    }
+}
+
+#[repr(C)]
+struct RtcTime { second: u8, minute: u8, hour: u8, day: u8, month: u8, year: u16 }
+
+// date_str() -> "YYYY-MM-DD HH:MM:SS"
+fn nat_date_str(_a: *const i32, _n: i32) -> i32 {
+    unsafe {
+        let mut t = RtcTime { second: 0, minute: 0, hour: 0, day: 0, month: 0, year: 0 };
+        rtc_get_time(&mut t as *mut RtcTime as *mut u8);
+        let s = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second);
+        native_return_str(s.as_bytes())
+    }
+}
+
+#[repr(C)]
+struct RamInfo {
+    ready: u8, block_size: u32, total_blocks: u32, used_blocks: u32,
+    total_bytes: u32, used_bytes: u32, free_bytes: u32, file_count: u32, dir_count: u32,
+}
+
+// ramfs_stat(i): 0 total KB, 1 used KB, 2 free KB, 3 files, 4 dirs
+fn nat_ramfs_stat(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let mut r = RamInfo { ready: 0, block_size: 0, total_blocks: 0, used_blocks: 0,
+            total_bytes: 0, used_bytes: 0, free_bytes: 0, file_count: 0, dir_count: 0 };
+        avfs_ramfs_query(&mut r as *mut RamInfo as *mut u8);
+        match native_arg(a, n, 0) {
+            0 => (r.total_bytes >> 10) as i32,
+            1 => (r.used_bytes >> 10) as i32,
+            2 => (r.free_bytes >> 10) as i32,
+            3 => r.file_count as i32,
+            4 => r.dir_count as i32,
+            _ => 0,
+        }
+    }
+}
+
+#[repr(C)]
+struct DiskInfo {
+    mounted: u8, ata_bus: u16, ata_drive: u8,
+    sector_size: u32, sectors_per_cluster: u32, cluster_size: u32, reserved_sectors: u32,
+    fat_sectors: u32, data_start_lba: u32, total_sectors: u32, total_clusters: u32,
+    used_clusters: u32, free_clusters: u32, total_bytes: u32, used_bytes: u32, free_bytes: u32,
+    total_kb: u32, used_kb: u32, free_kb: u32,
+    file_count: u32, dir_count: u32, volume_label: [u8; 12],
+}
+
+// disk_stat(i): 0 mounted, 1 total KB, 2 used KB, 3 free KB, 4 files, 5 dirs
+fn nat_disk_stat(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let mut d: DiskInfo = core::mem::zeroed();
+        if avfs_disk_query(&mut d as *mut DiskInfo as *mut u8) != 0 { return 0; }
+        match native_arg(a, n, 0) {
+            0 => d.mounted as i32,
+            1 => d.total_kb as i32,
+            2 => d.used_kb as i32,
+            3 => d.free_kb as i32,
+            4 => d.file_count as i32,
+            5 => d.dir_count as i32,
+            _ => 0,
+        }
+    }
+}
+
+// b64_decode(s) -> decoded text; accepts standard and URL-safe alphabets, padding optional
+fn nat_b64_decode(a: *const i32, n: i32) -> i32 {
+    unsafe {
+        let mut out = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for &c in native_arg_str(a, n, 0) {
+            let v = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' | b'-' => 62,
+                b'/' | b'_' => 63,
+                _ => continue,
+            };
+            acc = (acc << 6) | v as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+                acc &= (1 << bits) - 1;
+            }
+        }
+        native_return_str(&out)
+    }
+}
+
+// color(vga_attr) -> sets the terminal text colour (15 white, 12 red, 14 yellow, 11 cyan, 10 green)
+fn nat_color(a: *const i32, n: i32) -> i32 {
+    unsafe { terminal_setcolor(native_arg(a, n, 0) as u8); 0 }
+}
+
+unsafe fn register_builtin_natives() {
+    let table: [(&[u8], NativeFn); 36] = [
+        (b"abs\0", nat_abs), (b"min\0", nat_min), (b"max\0", nat_max), (b"clamp\0", nat_clamp),
+        (b"pow\0", nat_pow), (b"rand\0", nat_rand), (b"rand_range\0", nat_rand_range),
+        (b"str_find_at\0", nat_str_find_at), (b"str_lower\0", nat_str_lower),
+        (b"str_pad\0", nat_str_pad), (b"bar\0", nat_bar),
+        (b"url_encode\0", nat_url_encode), (b"url_decode\0", nat_url_decode),
+        (b"html_text\0", nat_html_text),
+        (b"json_count\0", nat_json_count), (b"json_str\0", nat_json_str), (b"json_get\0", nat_json_get),
+        (b"file_exists\0", nat_file_exists), (b"file_size\0", nat_file_size),
+        (b"file_read\0", nat_file_read), (b"file_write\0", nat_file_write),
+        (b"file_append\0", nat_file_append), (b"shell\0", nat_shell), (b"dir_list\0", nat_dir_list),
+        (b"mem_total_kb\0", nat_mem_total_kb), (b"mem_used_kb\0", nat_mem_used_kb),
+        (b"mem_free_kb\0", nat_mem_free_kb), (b"cpu_vendor\0", nat_cpu_vendor),
+        (b"cpu_brand\0", nat_cpu_brand), (b"cpu_features\0", nat_cpu_features),
+        (b"date_str\0", nat_date_str), (b"ramfs_stat\0", nat_ramfs_stat),
+        (b"disk_stat\0", nat_disk_stat), (b"color\0", nat_color), (b"b64_decode\0", nat_b64_decode),
+        (b"stdin_text\0", nat_stdin_text),
+    ];
+    for (name, func) in table.iter() { register_native_fn(name.as_ptr(), *func); }
+    crate::sniff::register();
 }
 
 // ============================================================================
@@ -421,7 +1107,8 @@ enum Opcode {
     PrpFingerprint=0xD7, PrpKeygen=0xD8, PrpSign=0xD9,
     PrpVerify=0xDA, PrpSealFilePub=0xDB, PrpOpenFilePrv=0xDC,
     PrpSealTextPub=0xDD,
-    FetchGet=0xED, FetchActive=0xEE, FetchTest=0xEF,
+    FetchGet=0xED, FetchActive=0xEE, FetchTest=0xEF, FetchDownload=0xF3,
+    PngRender=0xF0, PngLoad=0xF1, PngTest=0xF2,
     // v6: expanded inline asm opcodes
     AsmHlt=0xE0,    // emit hlt
     AsmPushfd=0xE1, // push EFLAGS -> VM stack
@@ -434,6 +1121,9 @@ enum Opcode {
     AsmClts=0xE8,   // clts - clear CR0.TS
     HwMapMem=0xE9,  // identity-map physical range (base, len) -> 0 ok / -1 err
     PollScancode=0xEA,
+    NativeCall=0xEB, // pops name const, argc, then argc args; calls registry fn
+    ArgC=0xEC,       // push number of command-line args (incl. program name)
+    ArgV=0xF4,       // pop index, push arg string
     Nop=0xFF,
 }
 
@@ -507,12 +1197,14 @@ impl Opcode {
             0xDB=>Some(Opcode::PrpSealFilePub), 0xDC=>Some(Opcode::PrpOpenFilePrv),
             0xDD=>Some(Opcode::PrpSealTextPub),
             0xED=>Some(Opcode::FetchGet), 0xEE=>Some(Opcode::FetchActive),
-            0xEF=>Some(Opcode::FetchTest),
+            0xEF=>Some(Opcode::FetchTest), 0xF3=>Some(Opcode::FetchDownload),
+            0xF0=>Some(Opcode::PngRender), 0xF1=>Some(Opcode::PngLoad), 0xF2=>Some(Opcode::PngTest),
             0xE0=>Some(Opcode::AsmHlt),    0xE1=>Some(Opcode::AsmPushfd), 0xE2=>Some(Opcode::AsmPopfd),
             0xE3=>Some(Opcode::AsmLidt),   0xE4=>Some(Opcode::AsmLgdt),   0xE5=>Some(Opcode::AsmWbinvd),
             0xE6=>Some(Opcode::AsmInvlpg), 0xE7=>Some(Opcode::GetCr2),    0xE8=>Some(Opcode::AsmClts),
             0xE9=>Some(Opcode::HwMapMem),
             0xEA=>Some(Opcode::PollScancode),
+            0xEB=>Some(Opcode::NativeCall), 0xEC=>Some(Opcode::ArgC), 0xF4=>Some(Opcode::ArgV),
             0xC0=>Some(Opcode::CastInt),   0xC1=>Some(Opcode::CastBool),
             0xFF=>Some(Opcode::Nop),
             _ => None,
@@ -584,13 +1276,16 @@ impl Opcode {
             Opcode::PrpSealFilePub=>"prp_seal_file_pub", Opcode::PrpOpenFilePrv=>"prp_open_file_prv",
             Opcode::PrpSealTextPub=>"prp_seal_text_pub",
             Opcode::FetchGet=>"fetch_get", Opcode::FetchActive=>"fetch_active",
-            Opcode::FetchTest=>"fetch_test",
+            Opcode::FetchTest=>"fetch_test", Opcode::FetchDownload=>"fetch_download",
+            Opcode::PngRender=>"png_render", Opcode::PngLoad=>"png_load",
+            Opcode::PngTest=>"png_test",
             Opcode::AsmHlt=>"asm_hlt",       Opcode::AsmPushfd=>"asm_pushfd",
             Opcode::AsmPopfd=>"asm_popfd",    Opcode::AsmLidt=>"asm_lidt",
             Opcode::AsmLgdt=>"asm_lgdt",      Opcode::AsmWbinvd=>"asm_wbinvd",
             Opcode::AsmInvlpg=>"asm_invlpg",  Opcode::GetCr2=>"get_cr2",
             Opcode::AsmClts=>"asm_clts",      Opcode::HwMapMem=>"hw_map_mem",
             Opcode::PollScancode=>"poll_scancode",
+            Opcode::NativeCall=>"native_call", Opcode::ArgC=>"argc", Opcode::ArgV=>"argv",
             Opcode::Nop=>"nop",
         }
     }
@@ -608,7 +1303,8 @@ impl Opcode {
             Opcode::PrpFingerprint | Opcode::PrpKeygen | Opcode::PrpSign |
             Opcode::PrpVerify | Opcode::PrpSealFilePub | Opcode::PrpOpenFilePrv |
             Opcode::PrpSealTextPub => 1,
-            Opcode::FetchGet | Opcode::FetchActive | Opcode::FetchTest => 1,
+            Opcode::FetchGet | Opcode::FetchActive | Opcode::FetchTest | Opcode::FetchDownload |
+            Opcode::PngRender | Opcode::PngLoad | Opcode::PngTest => 1,
             _ => 0,
         }
     }
@@ -1174,13 +1870,14 @@ struct Parser {
     consts:    Vec<ConstDef>,  // v5: top-level constants
     prp_imports: Vec<String>,
     fetch_imports: Vec<String>,
+    png_imports: Vec<String>,
 }
 impl Parser {
     fn new(t: Vec<Token>, src: &str) -> Self {
         Parser { tokens: t, pos: 0, diags: DiagEngine::new(src),
                  depth: 0, in_loop: 0, in_unsafe: 0,
                  structs: Vec::new(), consts: Vec::new(), prp_imports: Vec::new(),
-                 fetch_imports: Vec::new() }
+                 fetch_imports: Vec::new(), png_imports: Vec::new() }
     }
     fn peek(&self) -> &TokenKind  { &self.tokens[self.pos].kind }
     fn tok(&self)  -> &Token      { &self.tokens[self.pos] }
@@ -1252,7 +1949,13 @@ impl Parser {
             }
             TokenKind::Input => {
                 self.advance();
-                if matches!(self.peek(), TokenKind::LParen) { self.advance(); self.expect(&TokenKind::RParen); }
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.advance();
+                    if matches!(self.peek(), TokenKind::RParen) { self.advance(); return Expr::Input; }
+                    let prompt = self.parse_expr();
+                    self.expect(&TokenKind::RParen);
+                    return Expr::Call(String::from("input_prompt"), vec![prompt]);
+                }
                 Expr::Input
             }
             TokenKind::LParen => {
@@ -1836,9 +2539,9 @@ impl Parser {
         self.advance();
         if !self.expect(&TokenKind::ColonColon) { return; }
         let namespace = self.eat_ident("namespace after `using::`");
-        if namespace != "prp" && namespace != "fetch" {
+        if namespace != "prp" && namespace != "fetch" && namespace != "png" {
             self.diags.push(Diag::error(14, t.line, t.col, 5,
-            "unsupported import namespace", "supported namespaces: `using::prp::*`, `using::fetch::*`"));
+            "unsupported import namespace", "supported namespaces: `using::prp::*`, `using::fetch::*`, `using::png::*`"));
         }
         if !self.expect(&TokenKind::ColonColon) { return; }
 
@@ -1854,6 +2557,7 @@ impl Parser {
                     "seal_text" | "fingerprint" | "keygen" | "sign" | "verify" |
                     "seal_file_pub" | "open_file_prv" | "seal_text_pub" | "selftest"),
                 "fetch" => matches!(import.as_str(), "get" | "https_get" | "active" | "test_https"),
+                "png" => matches!(import.as_str(), "render" | "load" | "test"),
                 _ => false,
             };
             if import != "*" && !supported {
@@ -1863,6 +2567,8 @@ impl Parser {
                 self.prp_imports.push(import);
             } else if namespace == "fetch" && !self.fetch_imports.contains(&import) {
                 self.fetch_imports.push(import);
+            } else if namespace == "png" && !self.png_imports.contains(&import) {
+                self.png_imports.push(import);
             }
             if matches!(self.peek(), TokenKind::Comma) {
                 self.advance();
@@ -1969,7 +2675,7 @@ impl Parser {
     }
 
     // ── Top-level parse ───────────────────────────────────────────────────────
-    fn parse_program(mut self) -> (Vec<StructDef>, Vec<FnDef>, Vec<ConstDef>, Vec<String>, Vec<String>, DiagEngine) {
+    fn parse_program(mut self) -> (Vec<StructDef>, Vec<FnDef>, Vec<ConstDef>, Vec<String>, Vec<String>, Vec<String>, DiagEngine) {
         let mut fns:     Vec<FnDef>    = Vec::new();
         let mut structs: Vec<StructDef> = Vec::new();
         while !matches!(self.peek(), TokenKind::Eof) {
@@ -2076,7 +2782,9 @@ impl Parser {
                 "peek" | "peek8" | "peek16" | "peek32" | "poke" | "poke8" |
                 "poke16" | "poke32" | "malloc" | "alloc" | "free" |
                 "memcpy" | "memset" | "strlen" | "strsub" | "stoi" |
-                "char_code" | "ord");
+                "char_code" | "ord" | "native" | "argc" | "argv" |
+                "itos" | "strcat" | "strfind" | "println")
+                || native_is_registered(name);
             let is_prp_function = matches!(name.as_str(),
                 "random_bytes" | "sha256_file" | "seal_file" | "open_file" |
                 "seal_text" | "fingerprint" | "keygen" | "sign" | "verify" |
@@ -2086,9 +2794,13 @@ impl Parser {
             let is_fetch_function = matches!(name.as_str(), "get" | "https_get" | "active" | "test_https");
             let fetch_is_imported = self.fetch_imports.iter()
                 .any(|import| import == "*" || import == name);
+            let is_png_function = matches!(name.as_str(), "render" | "load" | "test");
+            let png_is_imported = self.png_imports.iter()
+                .any(|import| import == "*" || import == name);
             if !is_user_function && !is_intrinsic
                 && !(is_prp_function && prp_is_imported)
                 && !(is_fetch_function && fetch_is_imported)
+                && !(is_png_function && png_is_imported)
             {
                 self.diags.push(Diag::error(9, pair[0].line, pair[0].col, name.len(),
                     &format!("function `{}` is not defined or imported", name), "unresolved call")
@@ -2122,6 +2834,17 @@ impl Parser {
                 }
             }
         }
+        for f in &fns {
+            for name in ["render", "load", "test"] {
+                if Self::body_calls(&f.body, name)
+                    && !self.png_imports.iter().any(|import| import == "*" || import == name)
+                {
+                    self.diags.push(Diag::error(16, f.line, 1, f.name.len(),
+                        &format!("PNG function `{}` is not imported", name), "missing import")
+                        .help(&format!("add `using::png::{};` or `using::png::*;`", name)));
+                }
+            }
+        }
         // E002: no main
         if !fns.iter().any(|f| f.name == "main") {
             self.diags.push(
@@ -2144,7 +2867,7 @@ impl Parser {
         // W502: unused variables
         for f in &fns { self.lint_vars(f); }
         let consts = self.consts.clone();
-        (structs, fns, consts, self.prp_imports, self.fetch_imports, self.diags)
+        (structs, fns, consts, self.prp_imports, self.fetch_imports, self.png_imports, self.diags)
     }
 
     // ── Static analysis helpers ───────────────────────────────────────────────
@@ -2170,6 +2893,8 @@ impl Parser {
             Stmt::Print(e) | Stmt::PrintHex(e) | Stmt::BreakVal(e)
                 => Self::expr_calls(e, nm),
             Stmt::CompoundAssign(_, _, e) => Self::expr_calls(e, nm),
+            Stmt::AssignIdx(_, i, v) => Self::expr_calls(i, nm) || Self::expr_calls(v, nm),
+            Stmt::LetArr(_, _, e, _, _) => Self::expr_calls(e, nm),
             Stmt::If(c, t, e)  => Self::expr_calls(c, nm) || Self::body_calls(t, nm) || Self::body_calls(e, nm),
             Stmt::While(c, b)  => Self::expr_calls(c, nm) || Self::body_calls(b, nm),
             Stmt::Loop(b) | Stmt::UnsafeBlock(b) => Self::body_calls(b, nm),
@@ -2233,6 +2958,8 @@ impl Parser {
             Stmt::PrintHex(e) | Stmt::BreakVal(e) => Self::expr_reads(e, nm),
             Stmt::Assign(n, e)       => n != nm && Self::expr_reads(e, nm) || Self::expr_reads(e, nm),
             Stmt::CompoundAssign(_, _, e) => Self::expr_reads(e, nm),
+            Stmt::AssignIdx(n, i, v) => n == nm || Self::expr_reads(i, nm) || Self::expr_reads(v, nm),
+            Stmt::LetArr(_, _, e, _, _) => Self::expr_reads(e, nm),
             Stmt::If(c, t, e)        => Self::expr_reads(c, nm) || Self::body_reads(t, nm) || Self::body_reads(e, nm),
             Stmt::While(c, b)        => Self::expr_reads(c, nm) || Self::body_reads(b, nm),
             Stmt::Loop(b) | Stmt::UnsafeBlock(b) => Self::body_reads(b, nm),
@@ -2282,6 +3009,8 @@ struct Emitter {
     const_map:  Vec<(String, i32)>, // v5: top-level constants
     prp_imports: Vec<String>,
     fetch_imports: Vec<String>,
+    png_imports: Vec<String>,
+    user_fns:   Vec<String>,      // user fn names; they shadow natives
 }
 
 pub fn link_modules(
@@ -2315,7 +3044,7 @@ pub fn link_modules(
 
 
 impl Emitter {
-    fn new(structs: Vec<StructDef>, consts: Vec<ConstDef>, prp_imports: Vec<String>, fetch_imports: Vec<String>) -> Self {
+    fn new(structs: Vec<StructDef>, consts: Vec<ConstDef>, prp_imports: Vec<String>, fetch_imports: Vec<String>, png_imports: Vec<String>) -> Self {
         let const_map = consts.into_iter().map(|c| (c.name, c.value)).collect();
         Emitter {
             code:       Vec::with_capacity(4096),
@@ -2328,6 +3057,8 @@ impl Emitter {
             const_map,
             prp_imports,
             fetch_imports,
+            png_imports,
+            user_fns: Vec::new(),
         }
     }
     fn eu8(&mut self, b: u8)   { self.code.push(b); }
@@ -2378,16 +3109,36 @@ impl Emitter {
         self.fetch_imports.iter().any(|import| import == "*" || import == name)
     }
 
+    fn png_imported(&self, name: &str) -> bool {
+        self.png_imports.iter().any(|import| import == "*" || import == name)
+    }
+
     fn emit_intrinsic_call(&mut self, name: &str, args: &[Expr]) -> bool {
         let fetch_opcode = if self.fetch_imported(name) {
             match (name, args.len()) {
                 ("get", 1) | ("https_get", 1) => Some(Opcode::FetchGet),
+                ("get", 2) => Some(Opcode::FetchDownload),
                 ("active", 0) => Some(Opcode::FetchActive),
                 ("test_https", 0) => Some(Opcode::FetchTest),
                 _ => None,
             }
         } else { None };
         if let Some(opcode) = fetch_opcode {
+            for arg in args { self.emit_expr(arg); }
+            self.eu8(opcode as u8);
+            self.eu8(args.len() as u8);
+            return true;
+        }
+
+        let png_opcode = if self.png_imported(name) {
+            match (name, args.len()) {
+                ("render", 3) => Some(Opcode::PngRender),
+                ("load", 3) => Some(Opcode::PngLoad),
+                ("test", 0) => Some(Opcode::PngTest),
+                _ => None,
+            }
+        } else { None };
+        if let Some(opcode) = png_opcode {
             for arg in args { self.emit_expr(arg); }
             self.eu8(opcode as u8);
             self.eu8(args.len() as u8);
@@ -2464,6 +3215,9 @@ impl Emitter {
             ("strlen", 1) => Some(Opcode::StrLen),
             ("strsub", 3) => Some(Opcode::StrSub),
             ("stoi", 1) => Some(Opcode::StrToInt),
+            ("itos", 1) => Some(Opcode::IntToStr),
+            ("strcat", 2) => Some(Opcode::StrCat),
+            ("strfind", 2) => Some(Opcode::StrFind),
             ("char_code", 1) | ("ord", 1) => Some(Opcode::StrByte),
             _ => None,
         };
@@ -2471,6 +3225,26 @@ impl Emitter {
             for arg in args { self.emit_expr(arg); }
             self.eu8(opcode as u8);
             return true;
+        }
+
+        match (name, args.len()) {
+            ("input_prompt", 1) => {
+                self.emit_expr(&args[0]); self.eu8(Opcode::PrintStr as u8);
+                self.eu8(Opcode::Input as u8);
+                return true;
+            }
+            ("argc", 0) => { self.eu8(Opcode::ArgC as u8); return true; }
+            ("argv", 1) => {
+                self.emit_expr(&args[0]); self.eu8(Opcode::ArgV as u8);
+                return true;
+            }
+            ("native", n) if n >= 1 => {
+                if let Expr::StrLit(fname) = &args[0] {
+                    self.emit_native_call(fname, &args[1..]);
+                    return true;
+                }
+            }
+            _ => {}
         }
 
         match (name, args.len()) {
@@ -2525,6 +3299,10 @@ impl Emitter {
             ("print_str", 1) => {
                 self.emit_expr(&args[0]); self.eu8(Opcode::PrintStr as u8);
             }
+            ("println", 1) => {
+                self.emit_expr(&args[0]); self.eu8(Opcode::Print as u8);
+                self.eu8(Opcode::Push as u8); self.ei32(10); self.eu8(Opcode::PrintChar as u8);
+            }
             ("cpuid", 1) => {
                 self.emit_expr(&args[0]); self.eu8(Opcode::Cpuid as u8);
                 self.eu8(Opcode::Swap as u8); self.eu8(Opcode::Pop as u8);
@@ -2549,6 +3327,15 @@ impl Emitter {
         self.eu8(Opcode::Push as u8);
         self.ei32(0);
         true
+    }
+
+    // Stack layout for NativeCall: args..., argc, name-const
+    fn emit_native_call(&mut self, name: &str, args: &[Expr]) {
+        for a in args { self.emit_expr(a); }
+        self.eu8(Opcode::Push as u8); self.ei32(args.len() as i32);
+        let ci = self.add_const(name);
+        self.eu8(Opcode::PushStr as u8); self.eu16(ci);
+        self.eu8(Opcode::NativeCall as u8);
     }
 
     fn loop_push(&mut self, top: u32) {
@@ -2688,6 +3475,10 @@ impl Emitter {
             }
             Expr::Call(nm, args) => {
                 if self.emit_intrinsic_call(nm, args) { return; }
+                if !self.user_fns.iter().any(|f| f == nm) && native_is_registered(nm) {
+                    self.emit_native_call(nm, args);
+                    return;
+                }
                 for arg in args { self.emit_expr(arg); }
                 self.eu8(Opcode::Push as u8); self.ei32(args.len() as i32);
                 self.eu8(Opcode::Call as u8);
@@ -2731,7 +3522,12 @@ impl Emitter {
             }
             Stmt::Print(e) => {
                 self.emit_expr(e);
-                let op = match e { Expr::StrLit(_) => Opcode::Print as u8, _ => Opcode::PrintNum as u8 };
+                // Strings and ints share the stack; only the VM knows which a value is.
+                let op = match e {
+                    Expr::IntLit(_) | Expr::BoolLit(_) | Expr::UnOp(_, _) | Expr::Cast(_, _) => Opcode::PrintNum as u8,
+                    Expr::BinOp(_, k, _) if !matches!(k, BinOpKind::Add) => Opcode::PrintNum as u8,
+                    _ => Opcode::Print as u8,
+                };
                 self.eu8(op);
             }
             Stmt::PrintHex(e) => { self.emit_expr(e); self.eu8(Opcode::PrintHex as u8); }
@@ -2916,6 +3712,7 @@ impl Emitter {
     }
 
     fn emit_program(mut self, fns: &[FnDef]) -> (Vec<u8>, Vec<Vec<u8>>, u32) {
+        self.user_fns = fns.iter().map(|f| f.name.clone()).collect();
         for f in fns { self.emit_fn(f); }
         self.patch_calls();
         let entry = self.fn_addrs.iter().find(|(n, _)| n == "main").map(|(_, a)| *a).unwrap_or(0);
@@ -3074,12 +3871,20 @@ struct Vm<'a> {
     keyboard_capture_active: bool,
     // v5: configurable stack size (set by `-stack <KB>` shell flag)
     stack_size_kb:   u32,
+    // Heap string pointers (ptr, vm_owns). Lets Print/==/+ tell strings from ints.
+    strs:       Vec<(usize, bool)>,
+    // argv[0] is the program name; each entry is NUL-terminated
+    args:       Vec<Vec<u8>>,
 }
+
+// Largest line keyboard_input() may write (COMMAND_BUFFER_SIZE in keyboard.h)
+const VM_INPUT_BUF: u32 = 2048;
+static EMPTY_CSTR: [u8; 1] = [0];
 impl<'a> Vm<'a> {
     const NF: Option<Frame> = None;
 
     // Allocate value stack on the kernel heap to avoid blowing the Rust call stack
-    unsafe fn new(code: &'a [u8], consts: Vec<&'a [u8]>, v: u8, stack_kb: u32) -> Option<Self> {
+    unsafe fn new(code: &'a [u8], consts: Vec<&'a [u8]>, v: u8, stack_kb: u32, args: Vec<Vec<u8>>) -> Option<Self> {
         let slots = if stack_kb > 0 { (stack_kb as usize * 1024) / 4 } else { VM_STACK_SLOTS };
         let bytes = slots * 4;
         let stack = malloc(bytes as u32);
@@ -3105,6 +3910,8 @@ impl<'a> Vm<'a> {
             unsafe_op_count: 0,
             keyboard_capture_active: false,
             stack_size_kb: stack_kb,
+            strs: Vec::new(),
+            args,
         })
     }
 
@@ -3121,6 +3928,65 @@ impl<'a> Vm<'a> {
         if !self.stack.is_null() { free(self.stack as *mut u8); }
         // If the reserve was never used (program had no unsafe ops), free it now
         if !self.unsafe_reserve.is_null() { free(self.unsafe_reserve); }
+        for &(p, owned) in &self.strs { if owned { free(p as *mut u8); } }
+    }
+
+    // Index into the const pool if `v` is a tagged string constant
+    #[inline]
+    fn const_index(&self, v: i32) -> Option<usize> {
+        let u = v as u32;
+        if u & 0x8000_0000 == 0 || u & 0x7FFF_0000 != 0 { return None; }
+        let i = (u & 0xFFFF) as usize;
+        if i < self.consts.len() { Some(i) } else { None }
+    }
+
+    #[inline]
+    fn is_registered(&self, v: i32) -> bool {
+        let u = v as u32;
+        if u < 0x1000 || u & 0x8000_0000 != 0 { return false; }
+        self.strs.iter().any(|&(p, _)| p == u as usize)
+    }
+
+    #[inline]
+    fn is_str_value(&self, v: i32) -> bool {
+        self.const_index(v).is_some() || self.is_registered(v)
+    }
+
+    fn register_str(&mut self, p: *const u8, owned: bool) {
+        if !self.is_registered(p as i32) { self.strs.push((p as usize, owned)); }
+    }
+
+    // Called before the program frees a pointer itself
+    fn forget_str(&mut self, p: *mut u8) {
+        if let Some(i) = self.strs.iter().position(|&(q, _)| q == p as usize) { self.strs.swap_remove(i); }
+    }
+
+    unsafe fn push_str_ptr(&mut self, p: *mut u8) {
+        self.register_str(p, true);
+        self.push(p as i32);
+    }
+
+    unsafe fn str_concat(&mut self, a: i32, b: i32) {
+        let sa: &[u8] = self.get_str_slice_raw(a);
+        let sb: &[u8] = self.get_str_slice_raw(b);
+        let total = sa.len() + sb.len();
+        let p = malloc(total as u32 + 1);
+        if p.is_null() {
+            kprintln_col(COL_RED, b"[helios vm] strcat: OOM");
+            self.push(0);
+            return;
+        }
+        core::ptr::copy_nonoverlapping(sa.as_ptr(), p, sa.len());
+        core::ptr::copy_nonoverlapping(sb.as_ptr(), p.add(sa.len()), sb.len());
+        *p.add(total) = 0;
+        self.bytes_alloc += total as u64 + 1;
+        self.push_str_ptr(p);
+    }
+
+    // Strings equal by content; falls back to plain integer equality
+    unsafe fn values_equal(&self, a: i32, b: i32) -> bool {
+        a == b || (self.is_str_value(a) && self.is_str_value(b)
+            && self.get_str_slice_raw(a) == self.get_str_slice_raw(b))
     }
 
     #[inline(always)] unsafe fn push(&mut self, v: i32) {
@@ -3151,15 +4017,20 @@ impl<'a> Vm<'a> {
     }
 
     // Get a &[u8] slice for a string value on the stack (tag-bit encoded)
+    // Bytes (without NUL) of a const-pool string or a registered heap string; b"" otherwise
     unsafe fn get_str_slice_raw<'b>(&self, v: i32) -> &'b [u8] where 'a: 'b {
-        if (v as u32 & 0x8000_0000) != 0 {
-            let i = (v & 0x7FFF) as usize;
-            if i < self.consts.len() {
-                let full = self.consts[i];
-                let len = full.iter().position(|&c| c == 0).unwrap_or(full.len());
-                &full[..len]
-            } else { b"" }
-        } else { b"" }
+        if let Some(i) = self.const_index(v) {
+            let full = self.consts[i];
+            let len = full.iter().position(|&c| c == 0).unwrap_or(full.len());
+            return &full[..len];
+        }
+        if self.is_registered(v) {
+            let ptr = v as usize as *const u8;
+            let mut len = 0usize;
+            while len < 0x100_0000 && *ptr.add(len) != 0 { len += 1; }
+            return core::slice::from_raw_parts(ptr, len);
+        }
+        b""
     }
 
     unsafe fn vm_string_bytes<'b>(&'b self, value: i32) -> &'b [u8] {
@@ -3199,7 +4070,7 @@ impl<'a> Vm<'a> {
     // For heap strings, we push the raw pointer cast to i32 (no tag bit).
     // On 32-bit RadiumOS this is fine.
     unsafe fn push_heap_str_ptr(&mut self, p: *mut u8) {
-        self.push(p as i32);
+        self.push_str_ptr(p);
     }
 
     unsafe fn run(&mut self, entry: u32) -> i32 {
@@ -3224,7 +4095,11 @@ impl<'a> Vm<'a> {
                 Opcode::Over    => { if self.sp >= 2 { let v = self.stack_at(self.sp - 2); self.push(v); } }
 
                 // ── Arithmetic ────────────────────────────────────────────────
-                Opcode::Add  => { let b = self.pop(); let a = self.pop(); self.push(a.wrapping_add(b)); }
+                Opcode::Add  => {
+                    let b = self.pop(); let a = self.pop();
+                    if self.is_str_value(a) && self.is_str_value(b) { self.str_concat(a, b); }
+                    else { self.push(a.wrapping_add(b)); }
+                }
                 Opcode::Sub  => { let b = self.pop(); let a = self.pop(); self.push(a.wrapping_sub(b)); }
                 Opcode::Mul  => { let b = self.pop(); let a = self.pop(); self.push(a.wrapping_mul(b)); }
                 Opcode::Div  => { let b = self.pop(); let a = self.pop(); self.push(if b != 0 { a / b } else { 0 }); }
@@ -3240,8 +4115,8 @@ impl<'a> Vm<'a> {
                 Opcode::Shr  => { let b = self.pop(); let a = self.pop(); self.push(((a as u32) >> (b & 31)) as i32); }
 
                 // ── Comparison ────────────────────────────────────────────────
-                Opcode::CmpEq => { let b = self.pop(); let a = self.pop(); self.push((a == b) as i32); }
-                Opcode::CmpNe => { let b = self.pop(); let a = self.pop(); self.push((a != b) as i32); }
+                Opcode::CmpEq => { let b = self.pop(); let a = self.pop(); let r = self.values_equal(a, b); self.push(r as i32); }
+                Opcode::CmpNe => { let b = self.pop(); let a = self.pop(); let r = self.values_equal(a, b); self.push(!r as i32); }
                 Opcode::CmpLt => { let b = self.pop(); let a = self.pop(); self.push((a <  b) as i32); }
                 Opcode::CmpLe => { let b = self.pop(); let a = self.pop(); self.push((a <= b) as i32); }
                 Opcode::CmpGt => { let b = self.pop(); let a = self.pop(); self.push((a >  b) as i32); }
@@ -3311,7 +4186,7 @@ impl<'a> Vm<'a> {
                 }
                 Opcode::HeapFree  => {
                     let p = self.pop() as *mut u8;
-                    if !p.is_null() { free(p); }
+                    if !p.is_null() { self.forget_str(p); free(p); }
                 }
                 Opcode::ArrLoad   => {
                     let idx = self.pop() as usize;
@@ -3328,10 +4203,9 @@ impl<'a> Vm<'a> {
                 // ── I/O ───────────────────────────────────────────────────────
                 Opcode::Print => {
                     let v = self.pop();
-                    if (v as u32 & 0x8000_0000) != 0 {
-                        self.pstr((v & 0x7FFF) as u16);
+                    if self.is_str_value(v) {
+                        for &c in self.get_str_slice_raw(v) { terminal_putchar(c); }
                     } else {
-                        // Could be a heap string pointer or an int
                         kprint_i32(v);
                     }
                 }
@@ -3339,19 +4213,65 @@ impl<'a> Vm<'a> {
                 Opcode::PrintChar => { terminal_putchar(self.pop() as u8); }
                 Opcode::PrintHex  => { kprint_u32_hex(self.pop() as u32); }
                 Opcode::Input => {
-                    // v5: graceful OOM — if malloc fails, push empty-string const instead of panicking
-                    let buf_ptr = malloc(256);
-                    if buf_ptr.is_null() {
+                    // keyboard_input() writes up to COMMAND_BUFFER_SIZE bytes; a smaller
+                    // buffer corrupts the kernel heap. Read into a scratch buffer, keep an exact copy.
+                    let tmp = malloc(VM_INPUT_BUF);
+                    let mut line: *mut u8 = core::ptr::null_mut();
+                    if !tmp.is_null() {
+                        core::ptr::write_bytes(tmp, 0, VM_INPUT_BUF as usize);
+                        let status = keyboard_input(tmp);
+                        *tmp.add(VM_INPUT_BUF as usize - 1) = 0;
+                        if status < 0 { *tmp = 0; } // Ctrl+C: empty string
+                        let mut n = 0usize;
+                        while *tmp.add(n) != 0 { n += 1; }
+                        line = malloc(n as u32 + 1);
+                        if !line.is_null() {
+                            core::ptr::copy_nonoverlapping(tmp, line, n);
+                            *line.add(n) = 0;
+                            self.bytes_alloc += n as u64 + 1;
+                        }
+                        free(tmp);
+                    }
+                    if line.is_null() {
                         kprintln_col(COL_RED, b"[helios vm] input: OOM - returning empty string");
-                        // push empty string tag (const index 0 with tag bit; safe because even an
-                        // empty const pool returns b"" from get_str_slice_raw)
-                        self.push(0x8000_0000_u32 as i32);
+                        self.register_str(EMPTY_CSTR.as_ptr(), false);
+                        self.push(EMPTY_CSTR.as_ptr() as i32);
                     } else {
-                        core::ptr::write_bytes(buf_ptr, 0, 256);
-                        let status = keyboard_input(buf_ptr);
-                        // Ctrl+C / error: zero out buffer so we push a valid empty C-string
-                        if status < 0 { *buf_ptr = 0; }
-                        self.push(buf_ptr as i32);
+                        self.push_str_ptr(line);
+                    }
+                }
+                Opcode::ArgC => { self.push(self.args.len() as i32); }
+                Opcode::ArgV => {
+                    let i = self.pop();
+                    let p = if i >= 0 && (i as usize) < self.args.len() {
+                        self.args[i as usize].as_ptr()
+                    } else { EMPTY_CSTR.as_ptr() };
+                    self.register_str(p, false);
+                    self.push(p as i32);
+                }
+                Opcode::NativeCall => {
+                    let name_v = self.pop();
+                    let argc = self.pop().max(0) as usize;
+                    let mut buf = [0i32; 16];
+                    for i in (0..argc).rev() { let v = self.pop(); if i < 16 { buf[i] = v; } }
+                    let n = argc.min(16);
+                    // Const strings become real C pointers so natives see one representation
+                    for i in 0..n {
+                        if let Some(ci) = self.const_index(buf[i]) { buf[i] = self.consts[ci].as_ptr() as i32; }
+                    }
+                    let name = self.get_str_slice_raw(name_v);
+                    match native_lookup(name) {
+                        Some(f) => {
+                            let r = f(buf.as_ptr(), n as i32);
+                            let kind = NATIVE_STR_RESULT; NATIVE_STR_RESULT = 0;
+                            if kind != 0 { self.register_str(r as usize as *const u8, kind == 1); }
+                            self.push(r);
+                        }
+                        None => {
+                            kprint_col(COL_RED, b"[helios vm] unknown native fn: ");
+                            kprintln(name);
+                            self.push(-1);
+                        }
                     }
                 }
                 Opcode::PollScancode => {
@@ -3406,7 +4326,7 @@ impl<'a> Vm<'a> {
                 Opcode::MemCpy => { let n=self.pop() as usize; let src=self.pop() as *const u8; let dst=self.pop() as *mut u8; core::ptr::copy_nonoverlapping(src, dst, n); }
                 Opcode::MemSet => { let n=self.pop() as usize; let v=self.pop() as u8; let dst=self.pop() as *mut u8; core::ptr::write_bytes(dst, v, n); }
                 Opcode::AllocPage => { let n=self.pop() as u32; self.push(malloc(n) as i32); }
-                Opcode::FreePage  => { free(self.pop() as *mut u8); }
+                Opcode::FreePage  => { let p = self.pop() as *mut u8; self.forget_str(p); free(p); }
 
                 // ── Hardware - CR registers ───────────────────────────────────
                 Opcode::GetCr0 => { let v: u32; core::arch::asm!("mov {}, cr0", out(reg)v, options(nostack,preserves_flags)); self.push(v as i32); }
@@ -3646,20 +4566,7 @@ impl<'a> Vm<'a> {
                 // FIX: StrCat now actually concatenates into a heap buffer
                 Opcode::StrCat => {
                     let b = self.pop(); let a = self.pop();
-                    let sa: &[u8] = self.get_str_slice_raw(a);
-                    let sb: &[u8] = self.get_str_slice_raw(b);
-                    let total = sa.len() + sb.len();
-                    let p = malloc(total as u32 + 1);
-                    if !p.is_null() {
-                        core::ptr::copy_nonoverlapping(sa.as_ptr(), p, sa.len());
-                        core::ptr::copy_nonoverlapping(sb.as_ptr(), p.add(sa.len()), sb.len());
-                        *p.add(total) = 0;
-                        self.bytes_alloc += total as u64 + 1;
-                        self.push(p as i32); // heap ptr (no tag bit)
-                    } else {
-                        kprintln_col(COL_RED, b"[helios vm] strcat: OOM");
-                        self.push(0);
-                    }
+                    self.str_concat(a, b);
                 }
                 // FIX: StrSub - extract substring(str, start, len)
                 Opcode::StrSub => {
@@ -3675,7 +4582,7 @@ impl<'a> Vm<'a> {
                         core::ptr::copy_nonoverlapping(slice.as_ptr(), p, actual_len);
                         *p.add(actual_len) = 0;
                         self.bytes_alloc += actual_len as u64 + 1;
-                        self.push(p as i32);
+                        self.push_str_ptr(p);
                     } else {
                         self.push(0);
                     }
@@ -3710,7 +4617,7 @@ impl<'a> Vm<'a> {
                         core::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len());
                         *p.add(s.len()) = 0;
                         self.bytes_alloc += s.len() as u64 + 1;
-                        self.push(p as i32);
+                        self.push_str_ptr(p);
                     } else { self.push(0); }
                 }
                 Opcode::StrToInt => {
@@ -3758,7 +4665,7 @@ impl<'a> Vm<'a> {
                         }
                         *p.add(s.len()) = 0;
                         self.bytes_alloc += s.len() as u64 + 1;
-                        self.push(p as i32);
+                        self.push_str_ptr(p);
                     } else { self.push(v); } // fallback: return original
                 }
                 // v5: StrLower — heap-copy string with all bytes lowercased
@@ -3772,7 +4679,7 @@ impl<'a> Vm<'a> {
                         }
                         *p.add(s.len()) = 0;
                         self.bytes_alloc += s.len() as u64 + 1;
-                        self.push(p as i32);
+                        self.push_str_ptr(p);
                     } else { self.push(v); }
                 }
                 // v5: PrintStr — prints a heap-ptr string (raw pointer, no tag-bit check)
@@ -3888,6 +4795,16 @@ impl<'a> Vm<'a> {
                     let url = self.pop();
                     self.push(if argc == 1 { rust_https_get(self.vm_cstr_ptr(url)) } else { -1 });
                 }
+                Opcode::FetchDownload => {
+                    let argc = self.rb() as usize;
+                    let output = self.pop();
+                    let url = self.pop();
+                    self.push(if argc == 2 {
+                        rust_fetch_to_file(self.vm_cstr_ptr(url), self.vm_cstr_ptr(output))
+                    } else {
+                        -1
+                    });
+                }
                 Opcode::FetchActive => {
                     let argc = self.rb() as usize;
                     self.push((argc == 0 && rust_fetch_active()) as i32);
@@ -3895,6 +4812,32 @@ impl<'a> Vm<'a> {
                 Opcode::FetchTest => {
                     let argc = self.rb() as usize;
                     self.push(if argc == 0 { rust_test_https() } else { -1 });
+                }
+                Opcode::PngRender => {
+                    let argc = self.rb() as usize;
+                    if argc == 3 {
+                        let y = self.pop() as i32;
+                        let x = self.pop() as i32;
+                        let url = self.pop();
+                        self.push(rust_png_fetch_and_render(self.vm_cstr_ptr(url), x, y));
+                    } else {
+                        self.push(-1);
+                    }
+                }
+                Opcode::PngLoad => {
+                    let argc = self.rb() as usize;
+                    if argc == 3 {
+                        let y = self.pop() as i32;
+                        let x = self.pop() as i32;
+                        let filename = self.pop();
+                        self.push(rust_load_and_render_png(self.vm_cstr_ptr(filename), x, y));
+                    } else {
+                        self.push(-1);
+                    }
+                }
+                Opcode::PngTest => {
+                    let argc = self.rb() as usize;
+                    self.push(if argc == 0 { rust_render_test_png() } else { -1 });
                 }
 
                 Opcode::Nop => {}
@@ -4044,7 +4987,7 @@ pub fn helios_compile(source: &str, verbosity: u8) -> Result<Vec<u8>, ()> {
             kprintln_col(COL_CYAN, b" tokens)...");
         }
     }
-    let (structs, fns, consts_top, prp_imports, fetch_imports, diags) = Parser::new(tokens, source).parse_program();
+    let (structs, fns, consts_top, prp_imports, fetch_imports, png_imports, diags) = Parser::new(tokens, source).parse_program();
     unsafe { diags.emit_all(); }
     if diags.has_errors() { return Err(()); }
     unsafe {
@@ -4054,7 +4997,7 @@ pub fn helios_compile(source: &str, verbosity: u8) -> Result<Vec<u8>, ()> {
             kprintln_col(COL_CYAN, b" fns)...");
         }
     }
-    let (code, consts, entry) = Emitter::new(structs, consts_top, prp_imports, fetch_imports).emit_program(&fns);
+    let (code, consts, entry) = Emitter::new(structs, consts_top, prp_imports, fetch_imports, png_imports).emit_program(&fns);
     unsafe {
         if verbosity >= 1 {
             terminal_setcolor(COL_GREEN);
@@ -4091,7 +5034,7 @@ pub unsafe fn helios_exec(rxe: &[u8], verbosity: u8) -> i32 {
     }
     // FIX: VM stack now allocated on kernel heap to avoid Rust stack overflow on complex programs
     // v5: stack_kb=0 uses the default VM_STACK_SLOTS; overridable via `-stack <KB>` shell flag
-    let mut vm = match Vm::new(code, parse_const_pool(data), verbosity, 0) {
+    let mut vm = match Vm::new(code, parse_const_pool(data), verbosity, 0, Vec::new()) {
         Some(v) => v,
         None => {
             kprintln_col(COL_RED, b"[helios] out of memory - cannot allocate VM stack (4 MB)");
@@ -4104,6 +5047,11 @@ pub unsafe fn helios_exec(rxe: &[u8], verbosity: u8) -> i32 {
 }
 
 pub unsafe fn helios_exec_stack(rxe: &[u8], verbosity: u8, stack_kb: u32) -> i32 {
+    helios_exec_args(rxe, verbosity, stack_kb, Vec::new())
+}
+
+// `args` becomes argc()/argv(i) inside the program; args[0] is the program name.
+pub unsafe fn helios_exec_args(rxe: &[u8], verbosity: u8, stack_kb: u32, args: Vec<Vec<u8>>) -> i32 {
     let (entry, _, _) = match rxe_validate(rxe) {
         Ok(v) => v,
         Err(e) => { kprintln_col(COL_RED, e.as_bytes()); return -1; }
@@ -4124,7 +5072,7 @@ pub unsafe fn helios_exec_stack(rxe: &[u8], verbosity: u8, stack_kb: u32) -> i32
         }
         pos += len;
     }
-    let mut vm = match Vm::new(code, parse_const_pool(data), verbosity, stack_kb) {
+    let mut vm = match Vm::new(code, parse_const_pool(data), verbosity, stack_kb, args) {
         Some(v) => v,
         None => {
             kprintln_col(COL_RED, b"[helios] out of memory - cannot allocate VM stack");
@@ -4193,6 +5141,7 @@ static DIAG_TESTS: &[TestCase] = &[
     TestCase { label: "OK  - PRP wildcard import",              expect_error: false, source: "using::prp::*; fn main() { let result = selftest(); print(result); }" },
     TestCase { label: "OK  - fetch individual import",          expect_error: false, source: "using::fetch::get; fn main() { let status = get(\"https://example.com/\"); print(status); }" },
     TestCase { label: "OK  - fetch wildcard import",            expect_error: false, source: "using::fetch::*; fn main() { let busy = active(); print(busy); }" },
+    TestCase { label: "OK  - fetch PNG and render",              expect_error: false, source: "using::fetch::get; using::png::load; fn main() { let status = get(\"https://radium.global/cat.png\", \"/tmp/cat.png\"); let pixels = load(\"/tmp/cat.png\", 0, 0); print(status); print(pixels); }" },
     TestCase { label: "OK  - VGA text renderer syntax",        expect_error: false, source: "const VGA_MEM: int = 0xB8000; const ROWS: int = 50; fn make_cell(ch: int, color: int) -> int { return ch | (color << 8); } fn write_vga(x: int, y: int, cell: int) { let addr = VGA_MEM + ((y * 80 + x) * 2); unsafe { poke16(addr, cell); } } fn clear_screen(bg: int) { let blank = make_cell(32, bg); for y in 0..ROWS { for x in 0..80 { write_vga(x, y, blank); } } } fn main() { clear_screen(7); }" },
     // v5 tests
     TestCase { label: "OK  - const definition",               expect_error: false, source: "const MAX: int = 100; fn main() -> void { print(MAX); }" },
@@ -4244,7 +5193,7 @@ unsafe fn run_test_suite(suite_name: &str) {
         kprintln(b"  ---");
 
         let tokens = Lexer::new(tc.source.as_bytes()).tokenise();
-        let (structs, fns, consts, prp_imports, fetch_imports, diags) = Parser::new(tokens, tc.source).parse_program();
+        let (structs, fns, consts, prp_imports, fetch_imports, png_imports, diags) = Parser::new(tokens, tc.source).parse_program();
         let had_diag = !diags.diags.is_empty();
         let had_error = diags.has_errors();
         diags.emit_all();
@@ -4252,14 +5201,14 @@ unsafe fn run_test_suite(suite_name: &str) {
         kprintln(b"  ---");
         let mut passed = if tc.expect_error { had_error } else if is_ok_test { !had_error } else { had_diag };
         if tc.label == "OK  - memory intrinsic lowering" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             let expected = [
                 Opcode::Peek32, Opcode::Poke8, Opcode::Peek16, Opcode::Poke16,
                 Opcode::MemCpy, Opcode::MemSet, Opcode::PrintHex, Opcode::StrByte,
             ];
             passed &= expected.iter().all(|opcode| bytecode_contains_opcode(&code, opcode));
         } else if tc.label == "OK  - hardware and input intrinsics" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             let expected = [
                 Opcode::In8, Opcode::Out8, Opcode::GetTicks, Opcode::SleepMs,
                 Opcode::PitSetHz, Opcode::Cpuid, Opcode::PrintChar,
@@ -4267,17 +5216,21 @@ unsafe fn run_test_suite(suite_name: &str) {
             ];
             passed &= expected.iter().all(|opcode| bytecode_contains_opcode(&code, opcode));
         } else if tc.label == "OK  - PRP individual import" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             passed &= bytecode_contains_opcode(&code, &Opcode::PrpKeygen);
         } else if tc.label == "OK  - PRP wildcard import" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             passed &= bytecode_contains_opcode(&code, &Opcode::PrpSelfTest);
         } else if tc.label == "OK  - fetch individual import" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             passed &= bytecode_contains_opcode(&code, &Opcode::FetchGet);
         } else if tc.label == "OK  - fetch wildcard import" && !had_error {
-            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone()).emit_program(&fns);
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
             passed &= bytecode_contains_opcode(&code, &Opcode::FetchActive);
+        } else if tc.label == "OK  - fetch PNG and render" && !had_error {
+            let (code, _, _) = Emitter::new(structs, consts, prp_imports.clone(), fetch_imports.clone(), png_imports.clone()).emit_program(&fns);
+            passed &= bytecode_contains_opcode(&code, &Opcode::FetchDownload)
+                && bytecode_contains_opcode(&code, &Opcode::PngLoad);
         }
         if passed {
             terminal_setcolor(COL_GREEN); kprintln(b"  PASS"); pass += 1;
@@ -4538,7 +5491,35 @@ pub unsafe extern "C" fn helios_exec_file(path: *const u8, verbosity: u8) -> i32
     helios_exec_file_stack(path, verbosity, 0)
 }
 
+// Entry for `./prog.rxe a b c`: argv[0] is the program path as typed.
+#[no_mangle]
+pub unsafe extern "C" fn helios_exec_file_args(path: *const u8, verbosity: u8, argc: i32, argv: *mut *mut u8) -> i32 {
+    helios_exec_file_impl(path, verbosity, 0, helios_collect_args(argc, argv, 0))
+}
+
+unsafe fn helios_collect_args(argc: i32, argv: *mut *mut u8, start: i32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if argv.is_null() { return out; }
+    let mut i = start;
+    while i < argc {
+        let a = *argv.add(i as usize) as *const u8;
+        let mut v = Vec::new();
+        if !a.is_null() {
+            let mut l = 0usize;
+            while *a.add(l) != 0 { v.push(*a.add(l)); l += 1; }
+        }
+        v.push(0);
+        out.push(v);
+        i += 1;
+    }
+    out
+}
+
 unsafe fn helios_exec_file_stack(path: *const u8, verbosity: u8, stack_kb: u32) -> i32 {
+    helios_exec_file_impl(path, verbosity, stack_kb, Vec::new())
+}
+
+unsafe fn helios_exec_file_impl(path: *const u8, verbosity: u8, stack_kb: u32, args: Vec<Vec<u8>>) -> i32 {
     if path.is_null() { kprintln_col(COL_RED, b"helios: null path"); return -1; }
     let mut buf = [0u8; 128];
     let mut n = 0usize;
@@ -4569,11 +5550,11 @@ unsafe fn helios_exec_file_stack(path: *const u8, verbosity: u8, stack_kb: u32) 
         // v6: preprocess includes before running
         let expanded = helios_preprocess(core::str::from_utf8(data).unwrap_or(""), 0);
         match helios_compile(&expanded, verbosity) {
-            Ok(rxe) => helios_exec_stack(&rxe, verbosity, stack_kb),
+            Ok(rxe) => helios_exec_args(&rxe, verbosity, stack_kb, args),
             Err(()) => -1,
         }
     } else {
-        helios_exec_stack(data, verbosity, stack_kb)
+        helios_exec_args(data, verbosity, stack_kb, args)
     };
     free(ptr);
     result
@@ -4686,7 +5667,7 @@ extern "C" fn helios_command(argc: i32, argv: *mut *mut u8) {
             terminal_setcolor(COL_WHITE); kputc(b'\n');
             kprintln(b"USAGE");
             kprintln(b"  helios [-v|-vv] [-stack KB] compile <src.hls> [out.rxe]");
-            kprintln(b"  helios [-v|-vv] [-stack KB] run     <file.rxe|file.hls>");
+            kprintln(b"  helios [-v|-vv] [-stack KB] run     <file.rxe|file.hls> [args...]");
             kprintln(b"  helios [-v|-vv] [-stack KB] run     <helios source code...>");
             kprintln(b"  helios [-v|-vv] [-stack KB] eval    <helios source code...>");
             kprintln(b"  helios [-v|-vv] [-stack KB] src     <src.hls>");
@@ -4816,7 +5797,7 @@ extern "C" fn helios_command(argc: i32, argv: *mut *mut u8) {
                 if let Some((p, sz)) = read_src(name) {
                     let src = core::str::from_utf8(core::slice::from_raw_parts(p, sz)).unwrap_or("");
                     let tokens = Lexer::new(src.as_bytes()).tokenise();
-                    let (_, _, _, _, _, diags) = Parser::new(tokens, src).parse_program();
+                    let (_, _, _, _, _, _, diags) = Parser::new(tokens, src).parse_program();
                     diags.emit_all();
                     if diags.has_errors() { kprintln_col(COL_RED, b"check: FAILED"); }
                     else { kprintln_col(COL_GREEN, b"check: OK"); }
@@ -4893,7 +5874,8 @@ extern "C" fn helios_command(argc: i32, argv: *mut *mut u8) {
                     || first_s.ends_with(".rxe")
                     || avfs_file_exists(first_ptr);
                 if looks_like_file {
-                    helios_exec_file_stack(first_ptr, verbosity, stack_kb);
+                    // everything after the file name is passed to the program
+                    helios_exec_file_impl(first_ptr, verbosity, stack_kb, helios_collect_args(argc, argv, idx));
                 } else {
                     // Inline source: join all remaining argv tokens
                     let raw = helios_collect_inline_src(argc, argv, idx);
@@ -4952,7 +5934,7 @@ extern "C" fn helios_command(argc: i32, argv: *mut *mut u8) {
                 if let Some((p, sz)) = read_src(name) {
                     let src = core::str::from_utf8(core::slice::from_raw_parts(p, sz)).unwrap_or("");
                     let tokens = Lexer::new(src.as_bytes()).tokenise();
-                    let (structs, fns, _consts_top, _prp_imports, _fetch_imports, diags) = Parser::new(tokens, src).parse_program();
+                    let (structs, fns, _consts_top, _prp_imports, _fetch_imports, _png_imports, diags) = Parser::new(tokens, src).parse_program();
                     if diags.has_errors() {
                         diags.emit_all();
                         kprintln_col(COL_RED, b"fmt: cannot format due to parse errors");
@@ -5248,7 +6230,7 @@ extern "C" fn helios_command(argc: i32, argv: *mut *mut u8) {
                 if let Some((p, sz)) = read_src(name) {
                     let src = core::str::from_utf8(core::slice::from_raw_parts(p, sz)).unwrap_or("");
                     let tokens = Lexer::new(src.as_bytes()).tokenise();
-                    let (_, _, _, _, _, diags) = Parser::new(tokens, src).parse_program();
+                    let (_, _, _, _, _, _, diags) = Parser::new(tokens, src).parse_program();
                     // Count unresolved imports vs. resolved
                     if diags.has_errors() {
                         kprintln_col(COL_RED, b"import-check: FAILED");

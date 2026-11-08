@@ -1,0 +1,28 @@
+// dcdemo.hls - example plugin for the RadiumOS Discord client (copy it to /disk/dcplug/).
+//
+// The client runs:  dcdemo.hls <event> <channel> <author> <text>
+//   event: dm, mention, msg (new message in the open chat), cmd (you typed /dcdemo <text>)
+// Everything the plugin prints is read back, one action per line:
+//   notify: <text>    show a popup and play the notification sound
+//   sound: <ping|chime|pop|bell|custom>
+//   toast: <text>     show a line at the top of the chat
+//   send: <text>      send a message (bot tokens only; a user account is never driven by a plugin)
+fn main() {
+    let ev = argv(1);
+    match ev {
+        "dm" => {
+            println("notify: private message from " + argv(3));
+            println("sound: bell");
+        }
+        "mention" => {
+            println("toast: " + argv(3) + " mentioned you in " + argv(2));
+            println("sound: chime");
+        }
+        "cmd" => {
+            println("toast: dcdemo heard '" + argv(4) + "' in " + argv(2));
+        }
+        _ => {
+            println("");
+        }
+    }
+}

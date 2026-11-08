@@ -3,8 +3,60 @@
 #include "../Avfs/Avfs.h"
 #include "../terminal/terminal.h"
 #include "createFiles.h"
+#include "heliosApps.h"
+#include "bootprofile.h"
+
+// Everything under /disk persists between boots, so the bundled scripts and apps are only written
+// again after a new build (the stamp file records which build wrote them). The name is a plain 8.3 name:
+// AVFS keeps only the first 3 characters of a dot-file's name, so ".radium_build" would collide with ".radiumrc".
+#define DISK_STAMP_FILE "/disk/radium.bld"
+static const char BUILD_STAMP[] = "RadiumOS build " __DATE__ " " __TIME__ "\n";
+static char g_stamp_text[32];
+const char *build_stamp(void) {
+    if (!g_stamp_text[0]) {
+        const char *t = BUILD_STAMP + 15;   // skip "RadiumOS build "
+        size_t n = strlen(t);
+        if (n > 0 && t[n - 1] == '\n') n--;
+        if (n >= sizeof(g_stamp_text)) n = sizeof(g_stamp_text) - 1;
+        memcpy(g_stamp_text, t, n);
+        g_stamp_text[n] = '\0';
+    }
+    return g_stamp_text;
+}
+static bool g_disk_current = false;
+static bool g_last_write_skipped = false;
+
+static bool disk_stamp_current(void) {
+    static char buf[64];
+    int size = avfs_get_filesize(DISK_STAMP_FILE);
+    if (size != (int)strlen(BUILD_STAMP) || size >= (int)sizeof(buf)) return false;
+    if (avfs_get_content(DISK_STAMP_FILE, buf, sizeof(buf)) != 0) return false;
+    return strcmp(buf, BUILD_STAMP) == 0;
+}
+
+static int install_create_file(const char *path, uint32_t size) {
+    g_last_write_skipped = g_disk_current && strncmp(path, "/disk/", 6) == 0;
+    return g_last_write_skipped ? 0 : avfs_create_file(path, size);
+}
+
+static int install_write_file(const char *path, const void *buffer, uint32_t size, uint32_t offset) {
+    g_last_write_skipped = g_disk_current && strncmp(path, "/disk/", 6) == 0;
+    return g_last_write_skipped ? 0 : avfs_write_file(path, buffer, size, offset);
+}
+
+// The "Created ..." line is dropped along with the write it reports.
+static void install_done(const char *message, const char *file) {
+    if (g_last_write_skipped) { g_last_write_skipped = false; return; }
+    done(message, file);
+}
+
+#define avfs_create_file install_create_file
+#define avfs_write_file  install_write_file
+#define done(message, file) install_done(message, file)
 
 void createFiles(void) {
+    g_disk_current = avfs_is_directory("/disk") && disk_stamp_current();
+
     // System directories
     avfs_create_dir("/etc");
     avfs_create_dir("/bin");
@@ -12,7 +64,8 @@ void createFiles(void) {
     avfs_create_dir("/home/user");
     avfs_create_dir("/home/user/documents");
     avfs_create_dir("/home/user/projects");
-    avfs_create_dir("/home/user/scripts");
+    avfs_create_dir("/disk");
+    avfs_create_dir("/disk/scripts");
     avfs_create_dir("/tmp");
     avfs_create_dir("/var");
     avfs_create_dir("/var/log");
@@ -1174,7 +1227,7 @@ static const char *plugin_env =
 "    color 10\n"
 "    print   PATH:     \n"
 "    color 15\n"
-"    echo /bin:/plugins:/home/user/scripts\n"
+"    echo /bin:/plugins:/disk\n"
 "    color 10\n"
 "    print   TERM:     \n"
 "    color 15\n"
@@ -1319,7 +1372,7 @@ static const char *hwinfo_plugin =
 "    color 8\n"
 "    print   Display:   \n"
 "    color 15\n"
-"    echo VBE 800x600 + VGA Text 80x50\n"
+"    echo VBE 1280x720 console + VGA Text 80x50\n"
 "\n"
 "    color 8\n"
 "    print   NIC:       \n"
@@ -4611,8 +4664,8 @@ const char* hello_script =
     "% Start the tool\n"
     "call main\n";
 
-avfs_create_file("/home/user/scripts/hw_rng.rsh", strlen(hello_script));
-avfs_write_file("/home/user/scripts/hw_rng.rsh", hello_script, strlen(hello_script), 0);
+avfs_create_file("/disk/scripts/hw_rng.rsh", strlen(hello_script));
+avfs_write_file("/disk/scripts/hw_rng.rsh", hello_script, strlen(hello_script), 0);
 done("Created HW RNG script", "hw_rng.rsh");
 
 
@@ -4713,8 +4766,8 @@ const char* MAP = ""
 "call main";
 
 // Create the file using the AVFS
-avfs_create_file("/home/user/scripts/MAP.rsh", strlen(MAP));
-avfs_write_file("/home/user/scripts/MAP.rsh", MAP, strlen(MAP), 0);
+avfs_create_file("/disk/scripts/MAP.rsh", strlen(MAP));
+avfs_write_file("/disk/scripts/MAP.rsh", MAP, strlen(MAP), 0);
 done("Created MAP script with explicit targets", "MAP.rsh");
 
 
@@ -4883,8 +4936,8 @@ const char* calc_script =
 "% Start the calculator\n"
 "call main\n";
     
-    avfs_create_file("/home/user/scripts/calc.rsh", strlen(calc_script));
-    avfs_write_file("/home/user/scripts/calc.rsh", calc_script, strlen(calc_script), 0);
+    avfs_create_file("/disk/scripts/calc.rsh", strlen(calc_script));
+    avfs_write_file("/disk/scripts/calc.rsh", calc_script, strlen(calc_script), 0);
     done("Created calculator script", "calc.rsh");
 
 
@@ -4907,8 +4960,8 @@ const char* calc_script =
         "echo [FILE] welcome.txt\n"
         "echo [FILE] hello.rsh\n";
     
-    avfs_create_file("/home/user/scripts/lister.rsh", strlen(lister_script));
-    avfs_write_file("/home/user/scripts/lister.rsh", lister_script, strlen(lister_script), 0);
+    avfs_create_file("/disk/scripts/lister.rsh", strlen(lister_script));
+    avfs_write_file("/disk/scripts/lister.rsh", lister_script, strlen(lister_script), 0);
     done("Created lister script", "lister.rsh");
     
     // System info script
@@ -4937,8 +4990,8 @@ const char* calc_script =
         "\n"
         "call print_success \"System check complete\"\n";
     
-    avfs_create_file("/home/user/scripts/sysinfo.rsh", strlen(sysinfo_script));
-    avfs_write_file("/home/user/scripts/sysinfo.rsh", sysinfo_script, strlen(sysinfo_script), 0);
+    avfs_create_file("/disk/scripts/sysinfo.rsh", strlen(sysinfo_script));
+    avfs_write_file("/disk/scripts/sysinfo.rsh", sysinfo_script, strlen(sysinfo_script), 0);
     done("Created system info script", "sysinfo.rsh");
     
     // Project README
@@ -4960,6 +5013,47 @@ const char* calc_script =
     avfs_create_file("/home/user/projects/README.txt", strlen(project_readme));
     avfs_write_file("/home/user/projects/README.txt", project_readme, strlen(project_readme), 0);
     done("Created projects README", "projects/README.txt");
+
+   // ===== HELIOS PRP / FETCH / PNG DEMOS =====
+   const char* png_demo_script =
+      "using::fetch::get;\n"
+      "using::png::load;\n"
+      "fn main() -> void {\n"
+      "    let status = get(\"https://radium.global/cat.png\", \"/tmp/cat.png\");\n"
+      "    if (status == 0) {\n"
+      "        let pixels = load(\"/tmp/cat.png\", 0, 0);\n"
+      "        print(pixels);\n"
+      "    } else {\n"
+      "        print(status);\n"
+      "    }\n"
+      "}\n";
+   avfs_create_file("/disk/scripts/png_demo.hls", strlen(png_demo_script));
+   avfs_write_file("/disk/scripts/png_demo.hls", png_demo_script, strlen(png_demo_script), 0);
+   done("Created PNG demo source", "png_demo.hls");
+
+   const char* prp_demo_script =
+      "using::prp::selftest;\n"
+      "fn main() -> void {\n"
+      "    let status = selftest();\n"
+      "    if (status == 0) {\n"
+      "        print(\"PRP self-test passed\");\n"
+      "    } else {\n"
+      "        print(\"PRP self-test failed\");\n"
+      "    }\n"
+      "}\n";
+   avfs_create_file("/disk/scripts/prp_demo.hls", strlen(prp_demo_script));
+   avfs_write_file("/disk/scripts/prp_demo.hls", prp_demo_script, strlen(prp_demo_script), 0);
+   done("Created PRP demo source", "prp_demo.hls");
+
+   const char* fetch_demo_script =
+      "using::fetch::get;\n"
+      "fn main() -> void {\n"
+      "    let status = get(\"https://example.com/\", \"/tmp/fetch_demo.html\");\n"
+      "    print(status);\n"
+      "}\n";
+   avfs_create_file("/disk/scripts/fetch_demo.hls", strlen(fetch_demo_script));
+   avfs_write_file("/disk/scripts/fetch_demo.hls", fetch_demo_script, strlen(fetch_demo_script), 0);
+   done("Created fetch demo source", "fetch_demo.hls");
     
     // ===== LOG FILES (/var/log) =====
     
@@ -5035,8 +5129,8 @@ const char* calc_script =
         "\n"
         "Sample Scripts:\n"
         "  /home/user/hello.rsh        - Hello world example\n"
-        "  /home/user/scripts/calc.rsh - Calculator demo\n"
-        "  /home/user/scripts/sysinfo.rsh - System information\n"
+        "  /disk/scripts/calc.rsh - Calculator demo\n"
+        "  /disk/scripts/sysinfo.rsh - System information\n"
         "\n"
         "Basic Commands:\n"
         "  ls [dir]           - List files in directory\n"
@@ -5099,7 +5193,7 @@ const char* hello_html =
     "    <section style=\"background-color: #0F0A04; text-align: center;\">\n"
     "      <b style=\"color: #FF7722;\">MEMORY:</b> 2G\n"
     "      <b style=\"color: #FF7722;\">ARCH:</b> i686\n"
-    "      <b style=\"color: #FF7722;\">DISPLAY:</b> VBE 800x600x32\n"
+    "      <b style=\"color: #FF7722;\">DISPLAY:</b> VBE 1280x720x32\n"
     "      <b style=\"color: #FF7722;\">NET:</b> RTL8139\n"
     "    </section>\n"
     "\n"
@@ -5114,7 +5208,7 @@ const char* hello_html =
     "        <ul style=\"margin-left: 20;\">\n"
     "          <li>Preemptive task scheduler</li>\n"
     "          <li>Custom AVFS filesystem</li>\n"
-    "          <li style=\"color: #FFAA55;\">VBE 800x600x32 Framebuffer</li>\n"
+    "          <li style=\"color: #FFAA55;\">VBE 1280x720x32 Framebuffer</li>\n"
     "          <li>PS/2 keyboard input</li>\n"
     "        </ul>\n"
     "      </article>\n"
@@ -5167,6 +5261,8 @@ const char* hello_html =
 avfs_create_file("/home/user/hello.html", strlen(hello_html));
 avfs_write_file("/home/user/hello.html", hello_html, strlen(hello_html), 0);
 done("Updated hello world with CSS & New Tags", "hello.html");
+    install_helios_apps(g_disk_current);
+    if (!g_disk_current) avfs_save_file(DISK_STAMP_FILE, BUILD_STAMP, (uint32_t)strlen(BUILD_STAMP), true);
     avfs_chdir("/home/user");
     
 }

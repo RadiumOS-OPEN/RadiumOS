@@ -1,0 +1,6 @@
+// acmod: Slow motion
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 { out_set(OUT_TIMESCALE, 100); } else { out_set(OUT_TIMESCALE, 40); }
+}

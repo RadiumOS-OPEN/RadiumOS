@@ -1,5 +1,8 @@
 #include <stdint.h> // Include for uint8_t type
 #include "../io/io.h"
+#include "../utility/utility.h"
+#include "rsd.h"
+#include "../Avfs/Avfs.h"
 /* keyboard interface IO port: data and control */
 #define KBRD_INTRFC 0x64
 
@@ -17,6 +20,7 @@
 
 void reboot() {
         uint8_t temp;
+    avfs_mark_clean();
 
 
     /* Clear all keyboard buffers (output and command buffers) */
@@ -37,6 +41,10 @@ void reboot() {
 
 void reboot_command(int argc, char* argv[]) {
     uint8_t temp;
+
+    // reboot -f skips the orderly service shutdown
+    if (!(argc > 1 && strcmp(argv[1], "-f") == 0)) rsd_shutdown("Reboot");
+    avfs_mark_clean();
 
 
     /* Clear all keyboard buffers (output and command buffers) */

@@ -1,23 +1,42 @@
 #include "keyboard.h"
+#include "../shell/shsyntax.h"
 #include <stddef.h>
 #include "../terminal/terminal.h"
 #include "../utility/utility.h"
 #include "../errors/error.h"
 #include "../io/io.h"
+#include "../io/clipboard.h"
 #include "../scheduler/task.h"
 #include "../Avfs/Avfs.h"
+#include "../commands/shellvars.h"
+#include "../user/sudo.h"
+#include "../user/users.h"
+#include "../kernel/ctrlc.h"
+#include "../network/udpsock.h"
+#include "../commands/apprun.h"
+#include "../shell/shsyntax.h"
+#include "../timers/tsc.h"
+#include "../vga/fbcon.h"
+#include "../commands/rsd.h"
 #include <stdint.h>
+
+extern int helios_exec_file(const uint8_t *path, uint8_t verbosity);
+extern int helios_exec_file_args(const uint8_t *path, uint8_t verbosity, int argc, char **argv);
 
 // --- Backscroll Configuration ---
 #define HISTORY_ROWS    2000
-#define VGA_WIDTH       80
-#define VGA_HEIGHT      50
+// The terminal is 160x90 on the framebuffer console and 80x50 in plain text mode.
+#define TERM_MAX_W      160
+#define TERM_MAX_H      90
+extern size_t terminal_width, terminal_height;
+#define VGA_WIDTH       ((int)terminal_width)
+#define VGA_HEIGHT      ((int)terminal_height)
 #define VGA_BUFFER_SIZE (VGA_WIDTH * VGA_HEIGHT)
 #define SCROLL_STEP     5   // lines to scroll per keypress
 
 typedef struct {
-    char    chars[VGA_WIDTH];
-    uint8_t attrs[VGA_WIDTH];
+    char    chars[TERM_MAX_W];
+    uint8_t attrs[TERM_MAX_W];
 } HistoryLine;
 
 static HistoryLine history_buffer[HISTORY_ROWS];
@@ -43,7 +62,7 @@ static size_t selection_end   = (size_t)-1;
 
 static char   clipboard[COMMAND_BUFFER_SIZE];
 static size_t clipboard_len = 0;
-#define FREEZE_CLIP_SIZE (VGA_WIDTH * VGA_HEIGHT * 3) // chars + \r\n per row, worst case
+#define FREEZE_CLIP_SIZE (TERM_MAX_W * TERM_MAX_H * 3) // chars + \r\n per row, worst case
 static char   freeze_clipboard[FREEZE_CLIP_SIZE];
 static size_t freeze_clipboard_len = 0;
 // --- Undo Snapshot ---
@@ -115,16 +134,17 @@ static void drain_keyboard_buffer(void) {
     while (inb(0x64) & 0x01) inb(0x60);
 }
 
-void display_prompt(void) {
-    char username[COMMAND_BUFFER_SIZE];
+extern size_t    terminal_row, terminal_column, terminal_width, terminal_height;
+extern uint16_t *terminal_buffer;
+
+// Screen row where the line being edited starts (-1: unknown). A line longer than the screen is wider than one row,
+// so every redraw starts there instead of at the row the cursor is on.
+static int g_line_row0 = -1;
+
+static void draw_prompt(void) {
     const char *cwd = avfs_getcwd();
     terminal_setcolor(VGA_COLOR_LIGHT_BROWN);
-    if (avfs_file_exists("/etc/.username.cfg")) {
-        if (avfs_get_content("/etc/.username.cfg", username, sizeof(username)) == 0)
-            printr(username);
-    } else {
-        printr("default");
-    }
+    printr("%s", users_current_name());
     terminal_setcolor(VGA_COLOR_LIGHT_GREY); print(":");
     terminal_setcolor(VGA_COLOR_LIGHT_CYAN);
     if (strncmp(cwd, "/home/user", 10) == 0) {
@@ -138,12 +158,50 @@ void display_prompt(void) {
     terminal_update_cursor();
 }
 
-void update_cursor_display_simple(const char *command_buffer, size_t command_length) {
-    terminal_putchar('\r');
-    for (int i = 0; i < 79; i++) terminal_putchar(' ');
-    terminal_putchar('\r');
+void display_prompt(void) {
+    g_line_row0 = (int)terminal_row;
+    draw_prompt();
+}
 
-    display_prompt();
+// While keyboard_input() runs, redraws use the text already on the line (e.g. a program's
+// "name: " prompt) instead of the shell prompt.
+static bool     g_input_mode = false;
+static uint16_t g_input_prefix[TERM_MAX_W];
+static size_t   g_input_prefix_len = 0;
+
+static void input_capture_prefix(void) {
+    size_t n = terminal_column > TERM_MAX_W ? TERM_MAX_W : terminal_column;
+    for (size_t i = 0; i < n; i++)
+        g_input_prefix[i] = terminal_buffer[terminal_row * terminal_width + i];
+    g_input_prefix_len = n;
+    g_line_row0 = (int)terminal_row;
+}
+
+static void input_draw_prefix(void) {
+    for (size_t i = 0; i < g_input_prefix_len; i++) {
+        terminal_setcolor((uint8_t)(g_input_prefix[i] >> 8));
+        terminal_putchar((char)(g_input_prefix[i] & 0xFF));
+    }
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY);
+    terminal_update_cursor();
+}
+
+void update_cursor_display_simple(const char *command_buffer, size_t command_length) {
+    uint32_t scrolled_before = terminal_scroll_count;
+    if (g_line_row0 >= 0 && (size_t)g_line_row0 <= terminal_row && terminal_row < terminal_height) {
+        for (size_t r = (size_t)g_line_row0; r <= terminal_row; r++)
+            for (size_t c = 0; c < terminal_width; c++)
+                terminal_putentryat(' ', VGA_COLOR_LIGHT_GREY, c, r);
+        terminal_row = (size_t)g_line_row0;
+        terminal_column = 0;
+    } else {
+        terminal_putchar('\r');
+        for (int i = 0; i < VGA_WIDTH - 1; i++) terminal_putchar(' ');
+        terminal_putchar('\r');
+    }
+
+    if (g_input_mode) input_draw_prefix();
+    else draw_prompt();
 
     size_t sel_min = selection_start;
     size_t sel_max = selection_end;
@@ -176,6 +234,9 @@ void update_cursor_display_simple(const char *command_buffer, size_t command_len
     }
     terminal_setcolor(VGA_COLOR_LIGHT_GREY);
     terminal_update_cursor();
+
+    uint32_t scrolled = terminal_scroll_count - scrolled_before;   // drawing scrolled the screen: the line moved up
+    if (scrolled) g_line_row0 = g_line_row0 > (int)scrolled ? g_line_row0 - (int)scrolled : 0;
 }
 
 #define COM1_PORT 0x3F8
@@ -185,7 +246,7 @@ static uint8_t serial_inb_local(uint16_t port)                { return port_byte
 void init_serial_port(uint16_t port) {
     serial_outb_local(port + 1, 0x00);
     serial_outb_local(port + 3, 0x80);
-    serial_outb_local(port + 0, 0x03);
+    serial_outb_local(port + 0, 0x01);   // 115200 baud: QEMU paces the port by baud rate, so this speeds up the clipboard
     serial_outb_local(port + 1, 0x00);
     serial_outb_local(port + 3, 0x03);
     serial_outb_local(port + 2, 0xC7);
@@ -216,9 +277,9 @@ void serial_write_string(uint16_t port, const char *str) {
 // ============================================================
 // VGA buffer — single declaration, used everywhere
 // ============================================================
-static volatile uint16_t *vga_buf = (volatile uint16_t *)0xB8000;
+#define vga_buf ((volatile uint16_t *)terminal_buffer)
 
-static uint16_t frozen_screen[VGA_BUFFER_SIZE];
+static uint16_t frozen_screen[TERM_MAX_W * TERM_MAX_H];
 static bool     freeze_active     = false;
 static int      freeze_cursor_col = 0;
 static int      freeze_cursor_row = 0;
@@ -345,7 +406,7 @@ static void freeze_copy_selection(void) {
     freeze_clipboard_len  = out;
     g_just_froze_copy     = true;
 
-    serial_write_string(COM1_PORT, freeze_clipboard);
+    clipboard_to_host(freeze_clipboard, freeze_clipboard_len);
 }
 
 
@@ -832,9 +893,582 @@ static void redraw_command_line(const char *command, size_t *command_length) {
     update_cursor_display_simple(command, *command_length);
 }
 
-__attribute__((weak))
+// Success (0) or failure (non-zero) of the last command; drives `&&` and `||`.
+static int g_shell_status = 0;
+
+void shell_set_status(int status) { g_shell_status = status; }
+int  shell_last_status(void)      { return g_shell_status; }
+
+static void null_sink(char c, void *ctx) { (void)c; (void)ctx; }
+
+// 1. Helper to handle output redirection (> and >>) for any execution target; file is NULL for none
+static void execute_with_redirection(void (*execute_func)(int argc, char *argv[]), int argc, char *argv[], const char *file, int append_mode) {
+    if (file == NULL) {
+        execute_func(argc, argv);
+        return;
+    }
+    if (strcmp(file, "/dev/null") == 0) {
+        bool captured = terminal_begin_capture_sink(null_sink, NULL) == 0;
+        execute_func(argc, argv);
+        if (captured) terminal_end_capture();
+        return;
+    }
+
+    if (avfs_is_directory(file)) {
+        g_shell_status = 1;
+        print("\n! ");
+        print(file);
+        print(" is a directory !\n");
+        return;
+    }
+
+    if (append_mode) {
+        // >> keeps existing contents; only create if missing
+        if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) {
+            g_shell_status = 1;
+            print("\n! could not create ");
+            print(file);
+            print(" !\n");
+            return;
+        }
+    } else {
+        if (avfs_file_exists(file) && avfs_remove_file(file) != 0) {
+            g_shell_status = 1;
+            print("\n! could not replace ");
+            print(file);
+            print(" !\n");
+            return;
+        }
+
+        if (avfs_create_file(file, 0) != 0) {
+            g_shell_status = 1;
+            print("\n! could not create ");
+            print(file);
+            print(" !\n");
+            return;
+        }
+    }
+
+    if (terminal_begin_capture(file) != 0) {
+        g_shell_status = 1;
+        print("\n! could not start capture for ");
+        print(file);
+        print(" !\n");
+        return;
+    }
+
+    execute_func(argc, argv);
+
+    if (terminal_end_capture() != 0) {
+        g_shell_status = 1;
+        print("\n! disk full while writing ");
+        print(file);
+        print(" !\n");
+    }
+}
+
+// 2. Adapter for .rxe execution
+static void execute_rxe_wrapper(int argc, char *argv[]) {
+    int rc = helios_exec_file_args((const uint8_t *)argv[0], 0, argc, argv);
+    if (rc < 0) g_shell_status = 1;   // compile error, missing file, runtime fault
+}
+
+// Programs are searched for in the directories listed in $PATH (colon separated).
+#define PATH_RESOLVED_MAX 120   // helios_exec_file_impl copies at most 120 path bytes
+
+static bool has_suffix(const char *s, const char *suffix) {
+    size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && strcmp(s + n - m, suffix) == 0;
+}
+
+static bool is_runnable_file(const char *path) {
+    return avfs_file_exists(path) && !avfs_is_directory(path);
+}
+
+// Resolves a bare name (no '/') to NAME, NAME.rxe or NAME.hls inside a PATH directory.
+static bool find_in_path(const char *name, char *out) {
+    if (name[0] == '\0' || strchr(name, '/') != NULL) return false;
+
+    const char *path = shell_getenv("PATH");
+    if (!path) return false;
+
+    bool has_ext = has_suffix(name, ".rxe") || has_suffix(name, ".hls");
+    static const char *const EXTS[] = { ".rxe", ".hls" };
+    int attempts = has_ext ? 1 : 2;
+
+    while (*path) {
+        const char *end = path;
+        while (*end && *end != ':') end++;
+        size_t dir_len = (size_t)(end - path);
+
+        for (int e = 0; dir_len > 0 && e < attempts; e++) {
+            size_t need = dir_len + 1 + strlen(name) + (has_ext ? 0 : 4) + 1;
+            if (need > PATH_RESOLVED_MAX) continue;
+
+            memcpy(out, path, dir_len);
+            out[dir_len] = '\0';
+            strcat(out, "/");
+            strcat(out, name);
+            if (!has_ext) strcat(out, EXTS[e]);
+            if (is_runnable_file(out)) return true;
+        }
+        path = *end ? end + 1 : end;
+    }
+    return false;
+}
+
+// File the running command reads as its standard input; NULL when not piped.
+static const char *g_shell_stdin = NULL;
+
+const char *shell_stdin_file(void) { return g_shell_stdin; }
+
+typedef enum { CMD_NONE, CMD_BUILTIN, CMD_FILE, CMD_PATH } cmd_kind_t;
+
+static cmd_kind_t lookup_command(const char *name, size_t *builtin_index, char *resolved) {
+    for (size_t i = 0; i < command_count; i++) {
+        if (strcmp(name, commands[i].name) == 0) { *builtin_index = i; return CMD_BUILTIN; }
+    }
+    // Not a built-in: an executable on disk (out.rxe, ./out.rxe, ...)
+    if (avfs_file_exists(name)) return CMD_FILE;
+    // Bare name: search the PATH directories so it runs from anywhere
+    if (find_in_path(name, resolved)) return CMD_PATH;
+    return CMD_NONE;
+}
+
+// Runs one command (no pipes). `raw_stage` is only read; variables and aliases are expanded into a copy.
+#define STAGE_EXPAND_MAX 4096
+
+// Replaces a leading alias with its text: "ll /x" -> "ls -l /x" (one level only, so alias ls=ls -l is safe).
+static void apply_alias(const char *in, char *out, size_t cap) {
+    const char *p = in;
+    while (*p == ' ') p++;
+    const char *word_end = p;
+    while (*word_end && *word_end != ' ') word_end++;
+
+    char word[48];
+    size_t n = (size_t)(word_end - p);
+    const char *alias = NULL;
+    if (n > 0 && n < sizeof(word)) {
+        memcpy(word, p, n);
+        word[n] = '\0';
+        alias = shell_alias_lookup(word);
+    }
+
+    if (!alias || strlen(alias) + strlen(word_end) + 1 > cap) {
+        strncpy(out, in, cap - 1);
+        out[cap - 1] = '\0';
+        return;
+    }
+    strcpy(out, alias);
+    strcat(out, word_end);
+}
+
+static void run_stage(char *raw_stage) {
+    char stage[STAGE_EXPAND_MAX], wbuf[STAGE_EXPAND_MAX];
+    char *words[MAX_ARGUMENTS];
+    unsigned char kinds[MAX_ARGUMENTS];
+
+    apply_alias(raw_stage, stage, sizeof(stage));
+    const char *first = stage;
+    while (*first == ' ' || *first == '\t') first++;
+    bool raw = strncmp(first, "helios eval", 11) == 0 && (first[11] == ' ' || first[11] == '\0');   // inline source
+
+    int count = sh_split(stage, wbuf, sizeof(wbuf), words, kinds, MAX_ARGUMENTS, raw);
+    if (count < 0) {
+        g_shell_status = 2;
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        printr("\n! command too long (limit %d arguments) !\n", MAX_ARGUMENTS);
+        terminal_setcolor(VGA_COLOR_WHITE);
+        return;
+    }
+    if (count == 0) return;
+
+    // Redirections: > >> send the output to a file, < reads stdin from one. 2> and 2>&1 are accepted and ignored
+    // (output and errors share one stream here). echo handles its own > and >>.
+    char *argv[MAX_ARGUMENTS];
+    int   argc = 0;
+    const char *out_file = NULL, *in_file = NULL;
+    int append_mode = 0;
+    bool keep_ops = raw || strcmp(words[0], "echo") == 0;
+    for (int i = 0; i < count; i++) {
+        if (kinds[i] == 0 || keep_ops) { argv[argc++] = words[i]; continue; }
+        const char *op = words[i];
+        size_t ol = strlen(op);
+        if (ol >= 3 && op[ol - 2] == '&' && op[ol - 1] >= '0' && op[ol - 1] <= '9') continue;   // 2>&1
+        if (i + 1 >= count) {
+            g_shell_status = 2;
+            print("\n! missing filename after ");
+            print(op);
+            print(" !\n");
+            return;
+        }
+        const char *target = words[++i];
+        if (op[0] == '<') in_file = target;
+        else if (op[0] == '2') { /* stderr is not separate */ }
+        else { out_file = target; append_mode = strstr(op, ">>") != NULL; }
+    }
+    if (argc == 0) return;
+
+    size_t builtin = 0;
+    char resolved[PATH_RESOLVED_MAX + 1];
+    g_shell_status = 0;
+    if (!sudo_gate(argv[0], argc, argv) || !sudo_gate_files(argv[0], in_file, out_file)) {
+        g_shell_status = 126;
+        return;
+    }
+    const char *saved_stdin = g_shell_stdin;
+    if (in_file) g_shell_stdin = in_file;
+    switch (lookup_command(argv[0], &builtin, resolved)) {
+    case CMD_BUILTIN:
+        terminal_error_flag_take();
+        execute_with_redirection(commands[builtin].execute, argc, argv, out_file, append_mode);
+        if (terminal_error_flag_take()) g_shell_status = 1;
+        g_shell_stdin = saved_stdin;
+        return;
+    case CMD_FILE:
+        if (avfs_is_directory(argv[0])) {
+            g_shell_status = 126;
+            print("\n! ");
+            print(argv[0]);
+            print(" is a directory !\n");
+            g_shell_stdin = saved_stdin;
+            return;
+        }
+        execute_with_redirection(execute_rxe_wrapper, argc, argv, out_file, append_mode);
+        g_shell_stdin = saved_stdin;
+        return;
+    case CMD_PATH:
+        argv[0] = resolved;
+        execute_with_redirection(execute_rxe_wrapper, argc, argv, out_file, append_mode);
+        g_shell_stdin = saved_stdin;
+        return;
+    default:
+        g_shell_status = 127;
+        print("\n! unknown command !\n");
+        g_shell_stdin = saved_stdin;
+        return;
+    }
+}
+
+#define PIPE_MAX_STAGES 8
+#define PIPE_MAX_DEPTH  2   // a command may itself run one nested pipeline (e.g. via shell())
+static int g_pipe_depth = 0;
+
+static void execute_pipeline(char *stages[], int count) {
+    if (g_pipe_depth >= PIPE_MAX_DEPTH) {
+        g_shell_status = 1;
+        print("\n! pipelines nested too deeply !\n");
+        return;
+    }
+
+    // Check every stage before running any, so a typo can't leave half a pipeline executed
+    // and its error message swallowed by a pipe. A command name that needs expanding is checked when it runs.
+    for (int i = 0; i < count; i++) {
+        char word[PATH_RESOLVED_MAX + 1], resolved[PATH_RESOLVED_MAX + 1];
+        size_t builtin;
+        const char *blank = stages[i];
+        while (*blank == ' ' || *blank == '\t') blank++;
+        if (*blank == '\0') {
+            g_shell_status = 2;
+            print("\n! syntax error near '|' !\n");
+            return;
+        }
+        if (!sh_plain_word(stages[i], word, sizeof(word))) continue;
+        const char *alias = shell_alias_lookup(word);
+        if (alias && !sh_plain_word(alias, word, sizeof(word))) continue;
+        if (lookup_command(word, &builtin, resolved) == CMD_NONE) {
+            g_shell_status = 127;
+            print("\n! unknown command: ");
+            print(word);
+            print(" !\n");
+            return;
+        }
+    }
+
+    // Two temp files per depth, alternating: stage i writes pipe[i % 2] and reads pipe[(i - 1) % 2]
+    char pipe_path[2][16];
+    for (int k = 0; k < 2; k++) {
+        pipe_path[k][0] = '/'; pipe_path[k][1] = '.';
+        pipe_path[k][2] = 'p'; pipe_path[k][3] = 'i'; pipe_path[k][4] = 'p'; pipe_path[k][5] = 'e';
+        pipe_path[k][6] = (char)('0' + g_pipe_depth);
+        pipe_path[k][7] = (char)('a' + k);
+        pipe_path[k][8] = '\0';
+    }
+
+    const char *outer_stdin = g_shell_stdin;
+    g_pipe_depth++;
+
+    for (int i = 0; i < count; i++) {
+        g_shell_stdin = (i == 0) ? outer_stdin : pipe_path[(i - 1) & 1];
+
+        if (i == count - 1) {
+            run_stage(stages[i]);
+            break;
+        }
+
+        const char *out = pipe_path[i & 1];
+        if (avfs_file_exists(out) && avfs_remove_file(out) != 0) {
+            print("\n! pipe: could not reset the temporary file !\n");
+            break;
+        }
+        if (avfs_create_file(out, 0) != 0 || terminal_begin_capture(out) != 0) {
+            print("\n! pipe: could not create the temporary file !\n");
+            break;
+        }
+        run_stage(stages[i]);
+        if (terminal_end_capture() != 0) {
+            print("\n! pipe: disk full while buffering output !\n");
+            break;
+        }
+    }
+
+    g_shell_stdin = outer_stdin;
+    g_pipe_depth--;
+    for (int k = 0; k < 2; k++) {
+        if (avfs_file_exists(pipe_path[k])) avfs_remove_file(pipe_path[k]);
+    }
+}
+
+// Runs one pipeline: stages joined by '|'. `line` is modified in place.
+static void execute_pipeline_line(char *line) {
+    char *stages[PIPE_MAX_STAGES];
+    int count = sh_split_pipes(line, stages, PIPE_MAX_STAGES);
+    if (count < 0) {
+        g_shell_status = 2;
+        print("\n! too many commands in one pipeline !\n");
+        return;
+    }
+    if (count == 1) {
+        run_stage(stages[0]);
+        return;
+    }
+    execute_pipeline(stages, count);
+}
+
+// 3. Main command execution function
+static bool g_skip_history = false;
+
+void execute_command(const char *command_str) {
+    if (command_str == NULL || strcmp(command_str, "") == 0) return;
+
+    // Make a mutable copy of the command string to strip newlines
+    size_t len = strlen(command_str);
+    char command[len + 1];
+    strcpy(command, command_str);
+
+    while (len > 0 && (command[len - 1] == '\n' || command[len - 1] == '\r')) {
+        command[len - 1] = '\0';
+        len--;
+    }
+
+    if (strcmp(command, "") == 0) return;
+    if (!g_skip_history) add_to_history(command);
+
+    sh_execute(command);
+}
+
+void shell_exec_pipeline(char *line) { execute_pipeline_line(line); }
+void shell_exec_stage(char *line)    { run_stage(line); }
+
+// Runs a command without recording it in the history (used for the startup script).
+void execute_command_no_history(const char *command_str) {
+    bool saved = g_skip_history;
+    g_skip_history = true;
+    execute_command(command_str);
+    g_skip_history = saved;
+}
+
+void shell_show_prompt(void) { display_prompt(); }
+
+// which <name>... : says what a command name resolves to
+void which_command(int argc, char *argv[]) {
+    if (argc < 2) {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED);
+        print("Usage: which <command>...\n");
+        terminal_setcolor(VGA_COLOR_WHITE);
+        return;
+    }
+    for (int i = 1; i < argc; i++) {
+        const char *alias = shell_alias_lookup(argv[i]);
+        if (alias) { printr("%s: aliased to %s\n", argv[i], alias); continue; }
+
+        size_t builtin = 0;
+        char resolved[PATH_RESOLVED_MAX + 1];
+        switch (lookup_command(argv[i], &builtin, resolved)) {
+        case CMD_BUILTIN: printr("%s: shell built-in command\n", argv[i]); break;
+        case CMD_FILE:    printr("%s\n", argv[i]); break;
+        case CMD_PATH:    printr("%s\n", resolved); break;
+        default:
+            terminal_setcolor(VGA_COLOR_LIGHT_RED);
+            printr("%s: not found\n", argv[i]);
+            terminal_setcolor(VGA_COLOR_WHITE);
+        }
+    }
+}
+
+// ============================================================
+// Tab completion: commands (built-ins, aliases, programs in $PATH) in command position,
+// file and directory names everywhere else.
+// ============================================================
+#define TAB_MAX_CANDIDATES 64
+#define TAB_NAME_MAX       40
+#define TAB_ENTRY_MAX      128
+
+static char           tab_cand[TAB_MAX_CANDIDATES][TAB_NAME_MAX];
+static bool           tab_cand_dir[TAB_MAX_CANDIDATES];
+static int            tab_count;
+static DirectoryEntry tab_entries[TAB_ENTRY_MAX];
+
+static bool tab_starts_with(const char *s, const char *prefix) {
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static void tab_add(const char *name, bool is_dir) {
+    if (tab_count >= TAB_MAX_CANDIDATES || strlen(name) + 2 > TAB_NAME_MAX) return;
+    for (int i = 0; i < tab_count; i++)
+        if (strcmp(tab_cand[i], name) == 0) return;
+    strcpy(tab_cand[tab_count], name);
+    tab_cand_dir[tab_count] = is_dir;
+    tab_count++;
+}
+
+static void tab_collect_commands(const char *prefix) {
+    for (size_t i = 0; i < command_count; i++)
+        if (tab_starts_with(commands[i].name, prefix)) tab_add(commands[i].name, false);
+
+    for (int n = 0; ; n++) {
+        const char *alias = shell_alias_name_at(n);
+        if (!alias) break;
+        if (tab_starts_with(alias, prefix)) tab_add(alias, false);
+    }
+
+    const char *path = shell_getenv("PATH");
+    while (path && *path) {
+        const char *end = path;
+        while (*end && *end != ':') end++;
+        size_t dir_len = (size_t)(end - path);
+
+        char dir[PATH_RESOLVED_MAX + 1];
+        if (dir_len > 0 && dir_len < sizeof(dir)) {
+            memcpy(dir, path, dir_len);
+            dir[dir_len] = '\0';
+
+            int n = avfs_list_directory(dir, tab_entries, TAB_ENTRY_MAX);
+            for (int i = 0; i < n; i++) {
+                if (tab_entries[i].is_directory) continue;
+                char base[sizeof(tab_entries[i].name)];
+                strcpy(base, tab_entries[i].name);
+                if (has_suffix(base, ".rxe") || has_suffix(base, ".hls")) base[strlen(base) - 4] = '\0';
+                if (tab_starts_with(base, prefix)) tab_add(base, false);
+            }
+        }
+        path = *end ? end + 1 : end;
+    }
+}
+
+static void tab_collect_files(const char *dir, const char *prefix) {
+    int n = avfs_list_directory(dir, tab_entries, TAB_ENTRY_MAX);
+    for (int i = 0; i < n; i++) {
+        const char *name = tab_entries[i].name;
+        if ((strcmp(name, ".") == 0 || strcmp(name, "..") == 0) && prefix[0] != '.') continue;
+        if (tab_starts_with(name, prefix)) tab_add(name, tab_entries[i].is_directory != 0);
+    }
+}
+
+static void tab_print_candidates(void) {
+    size_t widest = 0;
+    for (int i = 0; i < tab_count; i++) {
+        size_t l = strlen(tab_cand[i]) + (tab_cand_dir[i] ? 1 : 0);
+        if (l > widest) widest = l;
+    }
+    size_t col_width = widest + 2;
+    size_t per_row = col_width < terminal_width ? terminal_width / col_width : 1;
+
+    print("\n");
+    for (int i = 0; i < tab_count; i++) {
+        size_t l = strlen(tab_cand[i]);
+        terminal_setcolor(tab_cand_dir[i] ? VGA_COLOR_LIGHT_CYAN : VGA_COLOR_LIGHT_GREY);
+        print(tab_cand[i]);
+        if (tab_cand_dir[i]) { print("/"); l++; }
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY);
+
+        bool end_of_row = ((size_t)(i + 1) % per_row == 0) || i == tab_count - 1;
+        if (end_of_row) print("\n");
+        else for (size_t k = l; k < col_width; k++) print(" ");
+    }
+}
+
 int tab_complete(char *command_buffer, size_t *command_length) {
-    (void)command_buffer; (void)command_length; return 0;
+    if (g_input_mode) return 0;   // a program is asking for input, not the shell
+
+    size_t end = *command_length;
+    size_t word_start = end;
+    while (word_start > 0 && command_buffer[word_start - 1] != ' ') word_start--;
+
+    // Command position: first word, or the first word after '|', '&&' or '||'
+    bool command_position = true;
+    size_t k = word_start;
+    while (k > 0 && command_buffer[k - 1] == ' ') k--;
+    if (k > 0 && command_buffer[k - 1] != '|' && command_buffer[k - 1] != '&' && command_buffer[k - 1] != ';') command_position = false;
+
+    char word[256];
+    size_t word_len = end - word_start;
+    if (word_len >= sizeof(word)) return 0;
+    memcpy(word, command_buffer + word_start, word_len);
+    word[word_len] = '\0';
+
+    char dir_part[256] = "";
+    const char *prefix = word;
+    const char *slash = strrchr(word, '/');
+    if (slash) {
+        size_t dl = (size_t)(slash - word) + 1;
+        memcpy(dir_part, word, dl);
+        dir_part[dl] = '\0';
+        prefix = slash + 1;
+    }
+
+    tab_count = 0;
+    if (command_position && !slash) {
+        tab_collect_commands(word);
+    } else {
+        char dir[256];
+        if (dir_part[0] == '\0') {
+            strncpy(dir, avfs_get_cwd(), sizeof(dir) - 1);
+            dir[sizeof(dir) - 1] = '\0';
+        } else {
+            strcpy(dir, dir_part);
+            size_t dl = strlen(dir);
+            if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = '\0';
+        }
+        tab_collect_files(dir, prefix);
+    }
+    if (tab_count == 0) return 0;
+
+    size_t common = strlen(tab_cand[0]);
+    for (int i = 1; i < tab_count; i++) {
+        size_t j = 0;
+        while (j < common && tab_cand[i][j] == tab_cand[0][j]) j++;
+        common = j;
+    }
+
+    char completion[TAB_NAME_MAX + 2];
+    memcpy(completion, tab_cand[0], common);
+    completion[common] = '\0';
+    if (tab_count == 1) strcat(completion, tab_cand_dir[0] ? "/" : " ");
+
+    if (tab_count > 1 && common <= strlen(prefix)) {
+        tab_print_candidates();   // nothing more to add: show the choices
+        return 1;
+    }
+
+    size_t new_len = word_start + strlen(dir_part) + strlen(completion);
+    if (new_len + 1 >= COMMAND_BUFFER_SIZE) return 0;
+
+    strcpy(command_buffer + word_start, dir_part);
+    strcat(command_buffer + word_start, completion);
+    *command_length = new_len;
+    command_buffer[new_len] = '\0';
+    return 1;
 }
 
 bool is_key_pressed(void) { return (port_byte_in(0x64) & 0x01) != 0; }
@@ -856,124 +1490,24 @@ void keyboard_await(const char *message, bool clear_screen) {
     }
 }
 
-void execute_command_extern(const char *cmd) {
-    if (!cmd || cmd[0] == '\0') return;
-
-    // Make a mutable copy since strtok modifies the string
-    char buf[COMMAND_BUFFER_SIZE];
-    strncpy(buf, cmd, COMMAND_BUFFER_SIZE - 1);
-    buf[COMMAND_BUFFER_SIZE - 1] = '\0';
-
-    // Tokenize into argc/argv
-    char *argv[MAX_ARGUMENTS];
-    int   argc  = 0;
-    char *token = strtok(buf, " ");
-    while (token && argc < MAX_ARGUMENTS) {
-        argv[argc++] = token;
-        token = strtok(NULL, " ");
+void keyboard_await_timeout(const char *message, bool clear_screen, uint32_t timeout_ms) {
+    if (clear_screen) terminal_clear();
+    if (message != NULL) {
+        terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+        print(message);
     }
-    if (argc == 0) return;
-
-    // Search registered command table
-    for (size_t i = 0; i < command_count; i++) {
-        if (strcmp(argv[0], commands[i].name) == 0) {
-            commands[i].execute(argc, argv);
-            return;
-        }
+    uint64_t deadline = tsc_deadline_ms(timeout_ms);
+    while (!tsc_reached(deadline)) {
+        fbcon_poll();
+        if ((port_byte_in(0x64) & 0x01) == 0) continue;
+        uint8_t scancode = port_byte_in(0x60);
+        if ((scancode & 0x80) || scancode == 0xE0) continue;
+        break;
     }
-
-    // Not found — print error
-    print("! unknown command: ");
-    print(argv[0]);
-    print(" !\n");
 }
 
-void execute_command(const char *command) {
-    if (strcmp(command, "") == 0) return;
-    add_to_history(command);
-    char *argv[MAX_ARGUMENTS];
-    int   argc  = 0;
-    char *token = strtok((char *)command, " ");
-    while (token && argc < MAX_ARGUMENTS) {
-        argv[argc++] = token;
-        token = strtok(NULL, " ");
-    }
-    if (argc == 0) return;
 
-    // "> file" sends a command's output to a file, ">> file" appends
-    // (echo handles its own redirection)
-    int redirect_index = -1;
-    int append_mode = 0;
-    if (strcmp(argv[0], "echo") != 0) {
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], ">") == 0) { redirect_index = i; break; }
-            if (strcmp(argv[i], ">>") == 0) { redirect_index = i; append_mode = 1; break; }
-        }
-    }
 
-    for (size_t i = 0; i < command_count; i++) {
-        if (strcmp(argv[0], commands[i].name) == 0) {
-            if (redirect_index == -1) {
-                commands[i].execute(argc, argv);
-            } else {
-                if (redirect_index + 1 >= argc) {
-                    print("\n! missing filename after ");
-                    print(append_mode ? ">>" : ">");
-                    print(" !\n");
-                    return;
-                }
-
-                char *file = argv[redirect_index + 1];
-
-                if (avfs_is_directory(file)) {
-                    print("\n! ");
-                    print(file);
-                    print(" is a directory !\n");
-                    return;
-                }
-
-                if (append_mode) {
-                    // >> keeps existing contents; only create if missing
-                    if (!avfs_file_exists(file) && avfs_create_file(file, 0) != 0) {
-                        print("\n! could not create ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
-                } else {
-                    if (avfs_file_exists(file) && avfs_remove_file(file) != 0) {
-                        print("\n! could not replace ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
-
-                    if (avfs_create_file(file, 0) != 0) {
-                        print("\n! could not create ");
-                        print(file);
-                        print(" !\n");
-                        return;
-                    }
-                }
-
-                if (terminal_begin_capture(file) != 0) {
-                    print("\n! could not start capture for ");
-                    print(file);
-                    print(" !\n");
-                    return;
-                }
-                commands[i].execute(redirect_index, argv);
-                if (terminal_end_capture() != 0) {
-                    print("\n! disk full while writing ");
-                    print(file);
-                    print(" !\n");
-                }
-            }
-            return;
-        }
-    }
-    print("\n! unknown command !\n");
-}
 
 // ============================================================
 // Keyboard maps
@@ -1003,7 +1537,7 @@ void perform_copy(char *command_buffer) {
         memcpy(clipboard, command_buffer + mn, len);
         clipboard_len  = len;
         clipboard[len] = '\0';
-        serial_write_string(COM1_PORT, clipboard);
+        clipboard_to_host(clipboard, len);
     }
 }
 
@@ -1038,6 +1572,25 @@ void perform_paste(char *command_buffer, size_t *command_length) {
     selection_start  = (size_t)-1;
     selection_end    = (size_t)-1;
     update_cursor_display_simple(command_buffer, *command_length);
+}
+
+// Ctrl+V / Ctrl+Shift+V: the host clipboard (one line; a pasted newline never runs a command), else the shell's own.
+static void perform_paste_host(char *command_buffer, size_t *command_length) {
+    static char host[CLIPBOARD_HOST_MAX + 1];
+    int n = clipboard_from_host(host, sizeof(host));
+    if (n > 0) {
+        size_t out = 0;
+        for (int i = 0; i < n && out < COMMAND_BUFFER_SIZE - 1; i++) {
+            unsigned char c = (unsigned char)host[i];
+            if (c == '\r') continue;
+            if (c == '\n' || c == '\t') c = ' ';
+            if (c < 0x20 || c > 0x7E) continue;
+            clipboard[out++] = (char)c;
+        }
+        clipboard[out] = '\0';
+        clipboard_len = out;
+    }
+    perform_paste(command_buffer, command_length);
 }
 
 void insert_char_at_cursor(char *command_buffer, size_t *command_length, char c) {
@@ -1375,11 +1928,58 @@ static void trigger_reboot(void) {
 // ============================================================
 
 
+extern void rust_fetch_abort(void);
+extern void rust_tcp_force_reset(void);
+extern void terminal_capture_reset(void);
+
+// Puts the shell back in order after Ctrl+C threw a command away mid-way.
+static void shell_abort_cleanup(void) {
+    ctrlc_end();
+    g_shell_stdin = NULL;
+    g_pipe_depth = 0;
+    g_input_mode = false;
+    g_shell_status = 130;
+    terminal_capture_reset();
+    sh_abort_reset();
+    sudo_reset_elevation();
+    avfs_wipe_freed(false);
+    app_abort_cleanup();
+    udpsock_close_all();
+    g_net_quiet = 0;
+    extern bool rust_fetch_active(void);
+    if (rust_fetch_active()) { rust_fetch_abort(); rust_tcp_force_reset(); }
+    shift_active = false; g_ctrl_pressed = false; alt_active = false;
+    terminal_setcolor(VGA_COLOR_LIGHT_RED);
+    print("^C\n");
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY);
+}
+
+// For other programs that run commands under kjmp_set(&g_ctrlc_jmp) (twm): put the shell in order after Ctrl+C.
+void shell_abort_recover(void) { shell_abort_cleanup(); }
+
+// Runs a command typed at the prompt so that Ctrl+C can end it (games and full-screen programs keep their keys).
+static void run_interactive(char *line) {
+    if (ctrlc_exempt(line)) { execute_command(line); return; }
+    if (kjmp_set(&g_ctrlc_jmp) == 0) {
+        ctrlc_begin(g_ctrl_pressed);
+        execute_command(line);
+        ctrlc_end();
+    } else {
+        shell_abort_cleanup();
+    }
+}
+
+// While set the shell task ignores the keyboard (the boot login reads it from the main task).
+static volatile bool g_kbd_paused = false;
+void keyboard_pause(bool on) { g_kbd_paused = on; }
+
 void keyboard_handler(void) {
     static char   command_buffer[COMMAND_BUFFER_SIZE];
     static size_t command_length = 0;
 
-    if (!is_key_pressed()) return;
+    if (g_kbd_paused) return;
+
+    if (!is_key_pressed()) { rsd_poll(); return; }   // idle: timers and restarts of services
     uint8_t scan_code = inb(0x60);
 
     // 1. Handle Freeze Mode (Screen Selection/Copy)
@@ -1482,10 +2082,13 @@ void keyboard_handler(void) {
 
         // Cut/Copy/Paste with Shift combos
         if (shift_active) {
-            if (scan_code == 0x2F) { perform_paste(command_buffer, &command_length); return; }
+            if (scan_code == 0x2F) { perform_paste_host(command_buffer, &command_length); return; }
             if (scan_code == 0x2E) { perform_copy(command_buffer);                   return; }
             if (scan_code == 0x2D) { perform_cut(command_buffer, &command_length);   return; }
         }
+
+        // Ctrl+V (paste the host clipboard)
+        if (scan_code == 0x2F) { perform_paste_host(command_buffer, &command_length); return; }
 
         // Ctrl+C (Break/SIGINT)
         if (scan_code == 0x2E) {
@@ -1580,7 +2183,7 @@ void keyboard_handler(void) {
         if (scan_code == 0x1C) { // Enter
             command_buffer[command_length] = '\0';
             terminal_putchar('\n');
-            execute_command(command_buffer);
+            run_interactive(command_buffer);
             command_length = 0; cursor_position = 0;
             command_buffer[0] = '\0'; current_history_index = -1;
             selection_start = (size_t)-1; selection_end = (size_t)-1;
@@ -1622,7 +2225,17 @@ void keyboard_read_input(void) {
 // ============================================================
 // keyboard_input (blocking single-line read)
 // ============================================================
+static int keyboard_input_impl(char *userinput);
+
 int keyboard_input(char *userinput) {
+    input_capture_prefix();
+    g_input_mode = true;
+    int r = keyboard_input_impl(userinput);
+    g_input_mode = false;
+    return r;
+}
+
+static int keyboard_input_impl(char *userinput) {
     static char command_buffer[COMMAND_BUFFER_SIZE];
     size_t command_length = 0;
 

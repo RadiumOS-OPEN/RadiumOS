@@ -9,11 +9,23 @@
 // Function prototypes for terminal operations
 void terminal_initialize(void);
 void terminal_setcolor(uint8_t color);
+// Returns 1 if anything was printed in the error colour (light red) since the last call, then clears it.
+int terminal_error_flag_take(void);
+// Rows scrolled off the top since boot (lets the line editor follow its own prompt row).
+extern uint32_t terminal_scroll_count;
 void terminal_putchar(char c);
 void terminal_write(const char* data, size_t size);
 void print(const char* data);
 int terminal_begin_capture(const char* path);
+// Same, but every output character goes to fn(c, ctx) instead of a file; end it with terminal_end_capture().
+int terminal_begin_capture_sink(void (*fn)(char c, void *ctx), void *ctx);
 int terminal_end_capture(void);
+void terminal_capture_reset(void);   // closes every open capture (after Ctrl+C)
+// Virtual terminal: until terminal_vt_leave(), everything the programs print or draw on the text grid goes to buf (w x h
+// cells) instead of the screen. on_scroll gets each row that scrolls off the top.
+void terminal_vt_enter(uint16_t *buf, size_t w, size_t h, void (*on_scroll)(const uint16_t *row, size_t width, void *ctx), void *ctx);
+void terminal_vt_leave(void);
+int terminal_vt_active(void);
 void print_decimal(int num);
 void print_hex(int num);
 void print_octal(int num);
@@ -28,6 +40,9 @@ void print_uint64(uint64_t value);
 void print_qemu(const char* format, ...);
 void printr(const char* format, ...);
 int snprintf(char* buffer, size_t size, const char* format, ...);
+// Size of the terminal grid in cells; the scaler (vga/scaler.h) derives every other size from these.
+size_t terminal_get_width(void);
+size_t terminal_get_height(void);
 void terminal_set_cursor_position(size_t position);
 void terminal_update_cursor(void);
 void psf_init(void);

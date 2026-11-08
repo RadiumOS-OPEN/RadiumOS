@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 // Constants
-#define NUM_GDT_ENTRIES 6
+#define NUM_GDT_ENTRIES 8
 #define MAX_TASKS 64
 #define MAX_EVENTS 128
 #define MAX_EVENT_HANDLERS 32

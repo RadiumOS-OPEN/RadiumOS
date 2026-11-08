@@ -465,18 +465,30 @@ fn draw_vga_char(x: int, y: int, char: int, color: int) {
 These are built-in functions available without any import.
 
 ```rust
-let n   = strlen(s);           // byte length of string
-let eq  = strcmp(a, b);        // 0 if equal, non-zero otherwise
-let cat = strcat(a, b);        // concatenate two strings → new heap string
+let n   = strlen(s);             // byte length of string
+let cat = strcat(a, b);          // concatenate two strings -> new heap string
 let sub = strsub(s, start, len); // substring copy
-let idx = strfind(s, needle);  // index of first occurrence, -1 if not found
-let i   = strtoint(s);         // parse string as integer
-let s2  = inttostr(n);         // format integer as string (kernel scratch buffer)
-let up  = strupper(s);         // in-place uppercase copy (v5)
-let lo  = strlower(s);         // in-place lowercase copy (v5)
-let b   = strbyte(s);          // first byte of string as integer (v5)
-print_str(ptr);                 // print heap-pointer string without tag-bit check (v5)
+let idx = strfind(s, needle);    // index of first occurrence, -1 if not found
+let i   = stoi(s);               // parse string as integer
+let s2  = itos(n);               // format integer as string
+let b   = ord(s);                // first byte of string as integer (also char_code)
+print_str(s);                    // print a string without a newline
+println(x);                      // print a string or number followed by a newline
 ```
+
+`print(x)` never adds a newline; use `println(x)` for line-based output.
+
+Strings compare by content and `+` joins them:
+
+```rust
+let name = input("name: ");
+if name == "admin" { println("welcome back"); }
+println("hello, " + name);
+println("length: " + itos(strlen(name)));
+```
+
+`print(x)` and `println(x)` print text when `x` is a string and a number otherwise. Strings created at runtime
+(`input`, `strcat`, `+`, `itos`, `strsub`, `argv`) are freed automatically when the program exits.
 
 ---
 
@@ -558,25 +570,244 @@ Available fetch functions:
 ## 10. Keyboard / Input
 
 ```rust
-let line = input();           // read a line from keyboard; returns str
-print_str(line);              // display the returned string
+let line = input();            // read a line from keyboard; returns str
+let name = input("name: ");    // print a prompt first, then read
+println(line);                   // display the returned string
 
 // During Helios keyboard capture, the shell poller yields port 0x60 to the VM
 // and resumes after execution ends.
 
-let sc = poll_scancode();     // returns next scancode or -1 if none available
+let sc = poll_scancode();      // returns next scancode or -1 if none available
 ```
+
+`input()` returns an empty string on Ctrl+C or if memory runs out.
+
+### Input examples
+
+Echo a line:
+
+```rust
+fn main() {
+    let s = input("say something: ");
+    println("you said: " + s);
+}
+```
+
+Read a number and do math:
+
+```rust
+fn main() {
+    let n = stoi(input("n? "));
+    println("n * 2 = " + itos(n * 2));
+}
+```
+
+Command loop with `match`:
+
+```rust
+fn main() {
+    loop {
+        let cmd = input("> ");
+        match cmd {
+            "hi"   => { println("hello"); }
+            "quit" => { break; }
+            _      => { println("unknown: " + cmd); }
+        }
+    }
+}
+```
+
+Yes/no check:
+
+```rust
+fn main() {
+    let a = input("continue? (y/n) ");
+    if a == "y" { println("ok"); } else { print("aborted"); }
+}
+```
+
+---
+
+## 10b. Command-Line Arguments
+
+A compiled program receives the arguments typed after its name:
+
+```
+./greet.rxe Alice 3
+helios run greet.rxe Alice 3
+```
+
+| Function | Description |
+| :--- | :--- |
+| `argc()` | Number of arguments, **including** the program name |
+| `argv(i)` | Argument `i` as a string; `argv(0)` is the program name; out of range returns `""` |
+
+Arguments are split on spaces; quoting is not supported.
+
+```rust
+fn main() {
+    println("program: " + argv(0));
+    println("arg count: " + itos(argc() - 1));
+
+    for i in 1..argc() {
+        println("arg " + itos(i) + " = " + argv(i));
+    }
+}
+```
+
+`./args.rxe a b c` prints:
+
+```
+program: ./args.rxe
+arg count: 3
+arg 1 = a
+arg 2 = b
+arg 3 = c
+```
+
+Greeter with a default and a numeric argument:
+
+```rust
+fn main() {
+    let mut who = "world";
+    let mut times = 1;
+    if argc() > 1 { who = argv(1); }
+    if argc() > 2 { times = stoi(argv(2)); }
+
+    for i in 0..times {
+        println("hello, " + who);
+    }
+}
+```
+
+`./greet.rxe Alice 3` prints `hello, Alice` three times; `./greet.rxe` prints `hello, world` once.
+
+Switch on a flag:
+
+```rust
+fn main() {
+    if argc() < 2 {
+        println("usage: tool <add|echo> ...");
+        return 1;
+    }
+    match argv(1) {
+        "add"  => { println("sum = " + itos(stoi(argv(2)) + stoi(argv(3)))); }
+        "echo" => { println(argv(2)); }
+        _      => { println("unknown mode: " + argv(1)); }
+    }
+}
+```
+
+Combine with input when no argument is given:
+
+```rust
+fn main() {
+    let mut name = "";
+    if argc() > 1 { name = argv(1); } else { name = input("name: "); }
+    println("hi " + name);
+}
+```
+
+---
+
+## 10c. Native Functions
+
+Rust code inside Helios can register functions that programs call by name.
+Built-ins: `abs`, `min`, `max`, `clamp`, `pow`, `rand`, `rand_range`, plus the text, file and system
+natives listed in sections 11 and 11b.
+
+```rust
+println("max = " + itos(max(3, 9)));          // direct call
+let r = native("rand_range", 1, 7);         // explicit form, r in 1..6
+```
+
+A user function with the same name takes priority over the native one.
+
+Registering a new native (Rust side, `rust_lib/src/helios.rs`):
+
+```rust
+fn nat_double(a: *const i32, n: i32) -> i32 { unsafe { native_arg(a, n, 0) * 2 } }
+
+register_native_fn(b"double\0".as_ptr(), nat_double);
+```
+
+String arguments arrive as C pointers; read them with `native_arg_str(a, n, i)`. A native that returns text
+must build it with `native_return_str(bytes)` so the VM tracks and frees the buffer.
 
 ---
 
 ## 11. File System
 
 ```rust
-let exists = file_exists("/path/to/file");  // 1 if exists, 0 if not
-let size   = file_size("/path/to/file");    // file size in bytes (0 if missing or empty)
-let n      = file_read("/path", buf, len, offset);  // read bytes into buffer
-let n      = file_write("/path", buf, len, offset); // write bytes from buffer
+let exists = file_exists("/path/to/file");   // 1 if it exists, 0 if not
+let size   = file_size("/path/to/file");     // size in bytes, -1 if missing
+let text   = file_read("/path/to/file");     // whole file as a string (max 2 MB), "" if missing
+let rc     = file_write("/path", text);      // create or replace; 0 on success
+let rc     = file_append("/path", text);     // append, creating the file if needed
+let files  = dir_list("/disk");              // "name[/]<TAB>size" per line
+let rc     = shell("ls /disk");              // run any RadiumOS command
 ```
+
+`/disk/...` paths are stored on the persistent FAT32 partition. Large strings from `file_read`
+can be released early with `free(text)`.
+
+Fetch a page to a file, then read it back:
+
+```rust
+using::fetch::get;
+
+fn main() {
+    if get("https://example.com/", "/tmp/page.html") == 0 {
+        let html = file_read("/tmp/page.html");
+        println(html_text(html));
+        free(html);
+    }
+}
+```
+
+---
+
+## 11b. Text, JSON and System Natives
+
+All of these are native functions (section 10c) available without an import.
+
+| Function | Returns |
+| :--- | :--- |
+| `str_find_at(s, needle, start)` | Index of `needle` at or after `start`, -1 if absent |
+| `str_lower(s)` | Lower-case copy |
+| `str_pad(s, width)` | `s` padded with spaces (or cut) to exactly `width` |
+| `bar(value, max, width)` | `[####......]` progress bar |
+| `url_encode(s)` / `url_decode(s)` | Percent-encoding (space becomes `+`) |
+| `html_text(html)` | Visible text of a page: tags, scripts, styles and comments removed, entities decoded |
+| `json_count(s)` | Number of string literals in a JSON document |
+| `json_str(s, k)` | k-th string literal (0-based) in document order |
+| `json_get(s, key)` | String value of the first `"key": "..."` pair |
+| `mem_total_kb()` `mem_used_kb()` `mem_free_kb()` | Physical memory in KB |
+| `ramfs_stat(i)` | 0 total KB, 1 used KB, 2 free KB, 3 files, 4 dirs |
+| `disk_stat(i)` | 0 mounted, 1 total KB, 2 used KB, 3 free KB, 4 files, 5 dirs |
+| `cpu_vendor()` `cpu_brand()` `cpu_features()` | CPUID strings |
+| `date_str()` | `YYYY-MM-DD HH:MM:SS` from the RTC |
+| `color(attr)` | Set text colour (15 white, 12 red, 14 yellow, 11 cyan, 10 green) |
+
+```rust
+let q    = url_encode("rust os");                  // "rust+os"
+let at   = str_find_at(page, "<title>", 0);
+let repl = json_get("{\"extract\":\"hi\"}", "extract");  // "hi"
+```
+
+---
+
+## 11c. Bundled Programs (`/disk/apps`)
+
+The kernel installs these at boot (source: `src/kernel/heliosApps.c`). They are ordinary Helios source,
+so they double as examples.
+
+| Program | Usage |
+| :--- | :--- |
+| `search.hls` | `/disk/apps/search.hls [words]`. Web search (Bing) and `wiki <words>` for Wikipedia. Type a result number to read the page as text; `s` at the pager saves it to `/disk/saves`. Queries are logged to `/disk/search_history.txt`. |
+| `sysmon.hls` | `/disk/apps/sysmon.hls [command]`. Commands: `info`, `cpu`, `mem`, `disk`, `time`, `net`, `watch`, `ls [path]`, `sh <cmd>`. Anything else is passed to the RadiumOS shell. |
+
+Both need networking only for `search` and `sysmon net`.
 
 ---
 
@@ -662,7 +893,9 @@ All commands are invoked as `helios <command> [args]`.
 
 | Command | Description |
 | :--- | :--- |
-| `helios run <file.hls>` | Compile and run a source file |
+| `helios run <file.hls> [args...]` | Compile and run a source file; extra words become `argv(1..)` |
+| `helios run <file.rxe> [args...]` | Run bytecode with arguments |
+| `./name.rxe [args...]` | Run a program straight from the shell with arguments |
 | `helios run -stack <KB> <file.hls>` | Run with a custom VM stack size (v5) |
 | `helios -v run <file.hls>` | Verbose: show step count |
 | `helios -vv run <file.hls>` | Extra-verbose: show heap bytes allocated / freed (v4) |
@@ -965,4 +1198,7 @@ Below is the full opcode table for the RXE v6 bytecode format, grouped by catego
 
 | Opcode | Byte |
 | :--- | :--- |
+| native_call | 0xEB |
+| argc | 0xEC |
+| argv | 0xF4 |
 | nop | 0xFF |

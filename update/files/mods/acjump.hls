@@ -1,0 +1,12 @@
+// acmod: Moon jump: high jumps, low gravity
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_JUMP, 100);
+        out_set(OUT_GRAV, 100);
+    } else {
+        out_set(OUT_JUMP, 230);
+        out_set(OUT_GRAV, 40);
+    }
+}

@@ -1,0 +1,55 @@
+// mod: Radar: monsters around you, top left
+include "/disk/mods/doom.hls";
+
+const R: int = 24;     // radar half size in pixels
+const CX: int = 30;
+const CY: int = 40;
+
+fn put(x: int, y: int, c: int) {
+    wr(mod_screen() + (y * 320 + x) * 4, c);
+}
+
+fn main() {
+    if mod_frame() >= 0 {
+        if in_level() == 1 {
+            for i in 0..49 {
+                put(CX - R + i, CY - R, 0x808080);
+                put(CX - R + i, CY + R, 0x808080);
+                put(CX - R, CY - R + i, 0x808080);
+                put(CX + R, CY - R + i, 0x808080);
+            }
+            put(CX, CY, 0xFFFFFF);
+            put(CX + 1, CY, 0xFFFFFF);
+            put(CX, CY + 1, 0xFFFFFF);
+            put(CX + 1, CY + 1, 0xFFFFFF);
+            let px = mo_get(O_MO_X);
+            let py = mo_get(O_MO_Y);
+            let cap = api(A_THINKERCAP);
+            let fnp = api(A_MOBJTHINKER);
+            let mut t = rd(cap + api(O_TH_NEXT));
+            let mut guard = 0;
+            while t != cap {
+                guard += 1;
+                if guard > 3000 { break; }
+                if rd(t + api(O_TH_FUNCTION)) == fnp {
+                    let fl = rd(t + api(O_MO_FLAGS));
+                    let counted = fl & MF_COUNTKILL;
+                    if counted != 0 {
+                        if rd(t + api(O_MO_HEALTH)) > 0 {
+                            // 16 map units per pixel; fixed point is 65536 per unit
+                            let rx = (rd(t + api(O_MO_X)) - px) / 1048576;
+                            let ry = (py - rd(t + api(O_MO_Y))) / 1048576;
+                            if rx > 0 - R && rx < R && ry > 0 - R && ry < R {
+                                put(CX + rx, CY + ry, 0xFF2020);
+                                put(CX + rx + 1, CY + ry, 0xFF2020);
+                                put(CX + rx, CY + ry + 1, 0xFF2020);
+                                put(CX + rx + 1, CY + ry + 1, 0xFF2020);
+                            }
+                        }
+                    }
+                }
+                t = rd(t + api(O_TH_NEXT));
+            }
+        }
+    }
+}

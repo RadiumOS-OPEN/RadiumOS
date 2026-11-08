@@ -6,6 +6,8 @@
 #include "../commands/cowsay.h"
 #include "../keyboard/keyboard.h"
 #include "../Avfs/Avfs.h" // For avfs_append_file (capture streaming)
+#include "../vga/fbcon.h"
+#include "../vga/scaler.h"
 #include <stdbool.h> // For bool type
 #include <stdarg.h>  // For va_list
 #include <limits.h> 
@@ -233,8 +235,38 @@ uint8_t vga_font_8x8[256][8] = {
     [0x7D] = { 0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00 }, // }
     [0x7E] = { 0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // ~
 
-    // 0x7F - 0xFF: blank
-    [0x7F ... 0xFF] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    // 0x7F - 0xFF: blank except the box-drawing, shade and block characters (CP437 positions) used by
+    // the boot screen, the splash and text UIs. Bit 0 is the leftmost pixel.
+    [0x7F ... 0xAF] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xB0] = { 0x22, 0x88, 0x22, 0x88, 0x22, 0x88, 0x22, 0x88 },
+    [0xB1] = { 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55 },
+    [0xB2] = { 0xEE, 0xBB, 0xEE, 0xBB, 0xEE, 0xBB, 0xEE, 0xBB },
+    [0xB3] = { 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08 },
+    [0xB4 ... 0xB9] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xBA] = { 0x14, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14 },
+    [0xBB] = { 0x00, 0x00, 0x1F, 0x10, 0x17, 0x14, 0x14, 0x14 },
+    [0xBC] = { 0x14, 0x14, 0x17, 0x10, 0x1F, 0x00, 0x00, 0x00 },
+    [0xBD ... 0xBE] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xBF] = { 0x00, 0x00, 0x00, 0x0F, 0x08, 0x08, 0x08, 0x08 },
+    [0xC0] = { 0x08, 0x08, 0x08, 0xF8, 0x00, 0x00, 0x00, 0x00 },
+    [0xC1 ... 0xC3] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xC4] = { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00 },
+    [0xC5 ... 0xC7] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xC8] = { 0x14, 0x14, 0xF4, 0x04, 0xFC, 0x00, 0x00, 0x00 },
+    [0xC9] = { 0x00, 0x00, 0xFC, 0x04, 0xF4, 0x14, 0x14, 0x14 },
+    [0xCA ... 0xCC] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xCD] = { 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00 },
+    [0xCE ... 0xD8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xD9] = { 0x08, 0x08, 0x08, 0x0F, 0x00, 0x00, 0x00, 0x00 },
+    [0xDA] = { 0x00, 0x00, 0x00, 0xF8, 0x08, 0x08, 0x08, 0x08 },
+    [0xDB] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+    [0xDC] = { 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF },
+    [0xDD] = { 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F },
+    [0xDE] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 },
+    [0xDF] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 },
+    [0xE0 ... 0xFD] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    [0xFE] = { 0x00, 0x00, 0x3C, 0x3C, 0x3C, 0x3C, 0x00, 0x00 },
+    [0xFF] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 };
 static uint8_t mirror_byte(uint8_t b) {
     b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
@@ -243,6 +275,8 @@ static uint8_t mirror_byte(uint8_t b) {
     return b;
 }
 void vga_set_80x50(void) {
+    if (fbcon_enabled()) return;   // the framebuffer console already is 80x50 cells
+
     // ── Step 1: unlock CRTC registers 0-7 ────────────────────────────────
     outb(0x3D4, 0x03);
     outb(0x3D5, inb(0x3D5) | 0x80);    // set bit 7 of reg 3 (enable retrace)
@@ -363,6 +397,8 @@ void vga_dac_set_palette(const uint8_t *rgb, int count) {
 }
 
 void vga_set_mode13h(void) {
+    fbcon_suspend_hw();
+
     static const uint8_t crtc[25] = {
         0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F,
         0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -452,6 +488,7 @@ void vga_restore_text_80x50(void) {
     asm volatile ("sti");
 
     vga_set_80x50();
+    fbcon_resume();
     terminal_initialize();
 }
 
@@ -459,16 +496,25 @@ void vga_restore_text_80x50(void) {
 
 void terminal_initialize(void) {
                 // must come first — reprograms hardware
-    terminal_width  = 80;
-    terminal_height = 50;       // 50 rows now
+    if (fbcon_enabled()) {
+        terminal_width  = FBCON_COLS;
+        terminal_height = FBCON_ROWS;
+        terminal_buffer = fbcon_text_buffer();
+    } else {
+        terminal_width  = 80;
+        terminal_height = 50;
+        terminal_buffer = (uint16_t*)0xB8000;
+    }
+    scaler_refresh();
     terminal_row    = 0;
     terminal_column = 0;
     terminal_color  = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    terminal_buffer = (uint16_t*)0xB8000;
     terminal_clear_inFunction();
 }
 
 void terminal_set_cursor_position(size_t position) {
+    fbcon_set_cursor((uint32_t)position);
+
     // VGA CRT Controller ports
     // 0x3D4 is the index register, 0x3D5 is the data register
     
@@ -483,7 +529,37 @@ void terminal_set_cursor_position(size_t position) {
 
 
 /* ── Terminal Scroll ───────────────────────────────────────────────────── */
+static int g_vt_on;
+static void (*g_vt_scroll_cb)(const uint16_t *row, size_t width, void *ctx);
+static void *g_vt_ctx;
+static struct { uint16_t *buf; size_t w, h, row, col; uint8_t color; } g_vt_saved;
+
+void terminal_vt_enter(uint16_t *buf, size_t w, size_t h, void (*on_scroll)(const uint16_t *row, size_t width, void *ctx), void *ctx) {
+    if (g_vt_on) return;
+    g_vt_saved.buf = terminal_buffer; g_vt_saved.w = terminal_width; g_vt_saved.h = terminal_height;
+    g_vt_saved.row = terminal_row; g_vt_saved.col = terminal_column; g_vt_saved.color = terminal_color;
+    terminal_buffer = buf; terminal_width = w; terminal_height = h;
+    terminal_row = 0; terminal_column = 0;
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    g_vt_scroll_cb = on_scroll; g_vt_ctx = ctx;
+    g_vt_on = 1;
+}
+
+void terminal_vt_leave(void) {
+    if (!g_vt_on) return;
+    g_vt_on = 0;
+    terminal_buffer = g_vt_saved.buf; terminal_width = g_vt_saved.w; terminal_height = g_vt_saved.h;
+    terminal_row = g_vt_saved.row; terminal_column = g_vt_saved.col; terminal_color = g_vt_saved.color;
+    g_vt_scroll_cb = NULL;
+}
+
+int terminal_vt_active(void) { return g_vt_on; }
+
+uint32_t terminal_scroll_count;
+
 void terminal_scroll(void) {
+    terminal_scroll_count++;
+    if (g_vt_on && g_vt_scroll_cb) g_vt_scroll_cb(terminal_buffer, terminal_width, g_vt_ctx);
     // 1. Move the entire buffer content up by one row.
     // We loop through every row except the last one, and copy it to the row above.
     for (size_t y = 0; y < terminal_height - 1; y++) {
@@ -502,13 +578,18 @@ void terminal_scroll(void) {
 
 
 void terminal_update_cursor(void) {
+    if (g_vt_on) return;
     size_t position = terminal_row * terminal_width + terminal_column;
     terminal_set_cursor_position(position);
 }
 
+size_t terminal_get_width(void)  { return terminal_width; }
+size_t terminal_get_height(void) { return terminal_height; }
+
 void terminal_setsize(size_t width, size_t height) {
     terminal_width = width;
     terminal_height = height;
+    scaler_refresh();
 
     // Clear the terminal buffer
     for (size_t y = 0; y < terminal_height; y++) {
@@ -519,9 +600,19 @@ void terminal_setsize(size_t width, size_t height) {
     }
 }
 
+// Builtins report errors in light red; the shell reads this to decide whether `&&` / `||` continue.
+static int terminal_error_seen_flag = 0;
+
+int terminal_error_flag_take(void) {
+    int seen = terminal_error_seen_flag;
+    terminal_error_seen_flag = 0;
+    return seen;
+}
+
 void terminal_setcolor(uint8_t color) 
 {
     terminal_color = color;
+    if ((color & 0x0F) == VGA_COLOR_LIGHT_RED) terminal_error_seen_flag = 1;
 }
 
 void terminal_putentryat(char c, uint8_t color, size_t x, size_t y) 
@@ -531,15 +622,18 @@ void terminal_putentryat(char c, uint8_t color, size_t x, size_t y)
 }
 // Helper to extract a line from the VGA buffer and send it to history
 void history_append_line_from_terminal(int row) {
-    char temp_line[80];
-    uint8_t temp_attrs[80];
+    if (g_vt_on) return;
+    char temp_line[FBCON_COLS + 1];
+    uint8_t temp_attrs[FBCON_COLS];
+    int width = (int)terminal_width < FBCON_COLS ? (int)terminal_width : FBCON_COLS;
     
     // Extract characters and attributes from the current row
-    for (int x = 0; x < 80; x++) {
-        uint16_t entry = terminal_buffer[row * 80 + x];
+    for (int x = 0; x < width; x++) {
+        uint16_t entry = terminal_buffer[row * terminal_width + x];
         temp_line[x] = (char)(entry & 0xFF);
         temp_attrs[x] = (uint8_t)((entry >> 8) & 0xFF);
     }
+    temp_line[width] = '\0';
     
     // Call the function defined in keyboard.c
     // Note: If you want per-char color history, you'd need to modify history_append_line in keyboard.c
@@ -551,13 +645,15 @@ void history_append_line_from_terminal(int row) {
 // captures nest (each begin pushes a frame), so a command that runs a
 // sub-redirect can't clobber an outer one's buffered output.
 #define TERMINAL_CAPTURE_CHUNK 4096
-#define TERMINAL_CAPTURE_DEPTH 4
+#define TERMINAL_CAPTURE_DEPTH 8
 
 typedef struct capture_frame {
     char chunk[TERMINAL_CAPTURE_CHUNK];
     size_t fill;
     int error;
     const char *path; // NULL after a flush error: rest is discarded silently
+    void (*sink)(char c, void *ctx);
+    void *sink_ctx;
 } capture_frame_t;
 
 // static pool, not kmalloc — the kernel heap is only 1 KB (MEMORY_POOL_SIZE),
@@ -581,7 +677,24 @@ int terminal_begin_capture(const char *path) {
     f->fill = 0;
     f->error = 0;
     f->path = path;
+    f->sink = NULL;
+    f->sink_ctx = NULL;
     return 0;
+}
+
+int terminal_begin_capture_sink(void (*fn)(char c, void *ctx), void *ctx) {
+    if (capture_depth == TERMINAL_CAPTURE_DEPTH) return -1;
+    capture_frame_t *f = &capture_frames[capture_depth++];
+    f->fill = 0;
+    f->error = 0;
+    f->path = NULL;
+    f->sink = fn;
+    f->sink_ctx = ctx;
+    return 0;
+}
+
+void terminal_capture_reset(void) {
+    while (capture_depth > 0) terminal_end_capture();
 }
 
 int terminal_end_capture(void) {
@@ -591,9 +704,16 @@ int terminal_end_capture(void) {
     return f->error ? -1 : 0;
 }
 
+int g_tty_mirror;   // `ttylog` on the kernel command line: console output is copied to the QEMU debug port for tests
+
 void terminal_putchar(char c) {
+    if (g_tty_mirror && capture_depth == 0) __asm__ volatile("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
     if (capture_depth > 0) {
         capture_frame_t *cap = &capture_frames[capture_depth - 1];
+        if (cap->sink) {
+            if (c != '\r') cap->sink(c, cap->sink_ctx);
+            return;
+        }
         if (c != '\r' && cap->path) {
             cap->chunk[cap->fill++] = c;
             if (cap->fill == sizeof(cap->chunk))
@@ -617,6 +737,7 @@ void terminal_putchar(char c) {
                 terminal_row--;
                 terminal_scroll(); // <--- USE NEW FUNCTION
             }
+            fbcon_poll();
             break;
 
         case '\r':

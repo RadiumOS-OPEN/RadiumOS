@@ -1,0 +1,19 @@
+// mod: Run about 1.5x faster
+include "/disk/mods/doom.hls";
+
+// state: [0] last tic handled
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            let s = mod_state();
+            let t = api(A_GAMETIC);
+            if t != rd(s) {
+                wr(s, t);
+                if api(A_PAUSED) == 0 {
+                    mo_set(O_MO_MOMX, mo_get(O_MO_MOMX) * 103 / 100);
+                    mo_set(O_MO_MOMY, mo_get(O_MO_MOMY) * 103 / 100);
+                }
+            }
+        }
+    }
+}

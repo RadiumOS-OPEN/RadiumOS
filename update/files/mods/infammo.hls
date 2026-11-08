@@ -1,0 +1,10 @@
+// mod: Infinite ammo for every weapon
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            for i in 0..4 { set_ammo(i, max_ammo(i)); }
+        }
+    }
+}

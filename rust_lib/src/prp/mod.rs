@@ -2,6 +2,7 @@
 
 mod aead;
 mod chacha20;
+mod crypt;
 mod ed25519;
 mod envelope;
 mod hkdf;
@@ -605,6 +606,37 @@ pub unsafe extern "C" fn rust_prp_verify(file: *const u8, expected_pub: *const u
     }
 }
 
+// Verifies a buffer that ends in a PRPSIG1 trailer (Ed25519 public | R | S over everything before it) against the
+// 32-byte Ed25519 key in `trusted`. 0 ok, -1 bad argument, -6 no trailer, -8 signed by another key, -7 bad signature.
+#[no_mangle]
+pub unsafe extern "C" fn rust_prp_verify_mem(data: *const u8, len: u32, trusted: *const u8) -> i32 {
+    if data.is_null() || trusted.is_null() {
+        return -1;
+    }
+    if (len as usize) < TRAILER_LEN {
+        return -6;
+    }
+    let buf = core::slice::from_raw_parts(data, len as usize);
+    let (content, trailer) = buf.split_at(buf.len() - TRAILER_LEN);
+    if trailer[..7] != PRPSIG_MAGIC {
+        return -6;
+    }
+    let mut public = [0u8; 32];
+    public.copy_from_slice(&trailer[7..39]);
+    let mut want = [0u8; 32];
+    core::ptr::copy_nonoverlapping(trusted, want.as_mut_ptr(), 32);
+    if public != want {
+        return -8;
+    }
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&trailer[39..]);
+    if ed25519::verify(&public, content, &signature) {
+        0
+    } else {
+        -7
+    }
+}
+
 const PRPPRV_MAGIC: [u8; 7] = *b"PRPPRV1";
 const PRPPUB_MAGIC: [u8; 7] = *b"PRPPUB1";
 
@@ -730,6 +762,246 @@ pub unsafe extern "C" fn rust_prp_seal_text_pub(
         return -4;
     }
     0
+}
+
+// ---- sudo password vault ------------------------------------------------------
+// /disk/.sudoInfo holds one PRP envelope sealed with a key derived from the sudo password,
+// so the file itself is the verifier: only the right password opens it. Layout:
+//   "PRPSUDO1" | iterations u32 LE | salt[16] | PRP envelope(ChaCha20-Poly1305) of SUDO_PLAINTEXT
+
+extern "C" {
+    fn avfs_save_file(name: *const u8, data: *const u8, size: u32, overwrite: bool) -> i32;
+}
+
+const SUDO_MAGIC: [u8; 8] = *b"PRPSUDO1";
+const SUDO_PLAINTEXT: [u8; 16] = *b"RADIUMOS-SUDO-OK";
+const SUDO_ITERATIONS: u32 = 10_000;
+const SUDO_MAX_ITERATIONS: u32 = 200_000;
+const SUDO_SALT_LEN: usize = 16;
+const SUDO_HEADER_LEN: usize = 8 + 4 + SUDO_SALT_LEN;
+const SUDO_SEALED_LEN: usize = 20 + 16 + SUDO_PLAINTEXT.len();
+const SUDO_FILE_LEN: usize = SUDO_HEADER_LEN + SUDO_SEALED_LEN;
+
+// PBKDF2-HMAC-SHA256, single output block
+fn sudo_derive_key(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut u = hmac_parts(password, &[b"radiumos-sudo", salt, &1u32.to_be_bytes()]);
+    let mut t = u;
+    for _ in 1..iterations {
+        u = hmac_parts(password, &[&u]);
+        for i in 0..32 {
+            t[i] ^= u[i];
+        }
+    }
+    t
+}
+
+fn wipe(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+}
+
+// Seals a fresh .sudoInfo at `path`. 0 ok, -1 bad argument, -2 seal failed, -3 no randomness, -4 write failed.
+#[no_mangle]
+pub unsafe extern "C" fn rust_sudo_create(password: *const u8, path: *const u8) -> i32 {
+    if password.is_null() || path.is_null() {
+        return -1;
+    }
+    let password = c_str(password);
+    if password.is_empty() || password.len() > 128 {
+        return -1;
+    }
+
+    let mut salt = [0u8; SUDO_SALT_LEN];
+    let mut nonce = [0u8; 12];
+    if !random_bytes(&mut salt) || !random_bytes(&mut nonce) {
+        return -3;
+    }
+
+    let mut key = sudo_derive_key(password, &salt, SUDO_ITERATIONS);
+    let mut file = [0u8; SUDO_FILE_LEN];
+    file[..8].copy_from_slice(&SUDO_MAGIC);
+    file[8..12].copy_from_slice(&SUDO_ITERATIONS.to_le_bytes());
+    file[12..SUDO_HEADER_LEN].copy_from_slice(&salt);
+    let sealed = envelope::seal(&key, &nonce, &SUDO_PLAINTEXT, &mut file[SUDO_HEADER_LEN..]);
+    wipe(&mut key);
+    if sealed.is_none() {
+        return -2;
+    }
+
+    if avfs_save_file(path, file.as_ptr(), SUDO_FILE_LEN as u32, true) != 0 {
+        return -4;
+    }
+    0
+}
+
+// Checks `password` against .sudoInfo. 0 correct, -1 bad argument or no file, -2 wrong password, -3 file damaged.
+#[no_mangle]
+pub unsafe extern "C" fn rust_sudo_verify(password: *const u8, path: *const u8) -> i32 {
+    if password.is_null() || path.is_null() {
+        return -1;
+    }
+    let password = c_str(password);
+    if password.is_empty() || password.len() > 128 {
+        return -2;
+    }
+
+    let size = avfs_get_filesize(path);
+    if size < 0 {
+        return -1;
+    }
+    if size as usize != SUDO_FILE_LEN {
+        return -3;
+    }
+
+    let mut file = [0u8; SUDO_FILE_LEN];
+    if avfs_read_file(path, file.as_mut_ptr(), SUDO_FILE_LEN as u32, 0) != 0 {
+        return -3;
+    }
+    if file[..8] != SUDO_MAGIC {
+        return -3;
+    }
+    let iterations = u32::from_le_bytes([file[8], file[9], file[10], file[11]]);
+    if iterations == 0 || iterations > SUDO_MAX_ITERATIONS {
+        return -3;
+    }
+
+    let mut key = sudo_derive_key(password, &file[12..SUDO_HEADER_LEN], iterations);
+    let mut sealed = [0u8; SUDO_SEALED_LEN];
+    sealed.copy_from_slice(&file[SUDO_HEADER_LEN..]);
+    let mut plain = [0u8; SUDO_PLAINTEXT.len()];
+    let opened = envelope::open(&key, &mut sealed, &mut plain);
+    wipe(&mut key);
+
+    let mut diff = 0u8;
+    for i in 0..plain.len() {
+        diff |= plain[i] ^ SUDO_PLAINTEXT[i];
+    }
+    if opened.is_some() && diff == 0 {
+        0
+    } else {
+        -2
+    }
+}
+
+// ---- secret vault (the Discord token) ---------------------------------------------------------------
+// One short secret sealed in a PRP envelope under a key stretched from a passphrase. Layout:
+//   "PRPVLT01" | iterations u32 LE | salt[16] | PRP envelope(ChaCha20-Poly1305) of the secret
+
+const VAULT_MAGIC: [u8; 8] = *b"PRPVLT01";
+const VAULT_ITERATIONS: u32 = 20_000;
+const VAULT_MAX_ITERATIONS: u32 = 400_000;
+const VAULT_SALT_LEN: usize = 16;
+const VAULT_HEADER_LEN: usize = 8 + 4 + VAULT_SALT_LEN;
+const VAULT_MAX_SECRET: usize = 512;
+const VAULT_MAX_FILE: usize = VAULT_HEADER_LEN + 20 + VAULT_MAX_SECRET + 16;
+
+// PBKDF2-HMAC-SHA256, single output block, domain-separated from the sudo vault
+fn vault_derive_key(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut u = hmac_parts(password, &[b"radiumos-vault", salt, &1u32.to_be_bytes()]);
+    let mut t = u;
+    for _ in 1..iterations {
+        u = hmac_parts(password, &[&u]);
+        for i in 0..32 {
+            t[i] ^= u[i];
+        }
+    }
+    t
+}
+
+// Seals `secret` under `password` into the file `path`. 0 ok, -1 bad argument, -2 seal failed, -3 no randomness,
+// -4 write failed.
+#[no_mangle]
+pub unsafe extern "C" fn rust_prp_vault_save(
+    password: *const u8,
+    secret: *const u8,
+    secret_len: u32,
+    path: *const u8,
+) -> i32 {
+    if password.is_null() || secret.is_null() || path.is_null() {
+        return -1;
+    }
+    let password = c_str(password);
+    let secret_len = secret_len as usize;
+    if password.is_empty() || password.len() > 128 || secret_len == 0 || secret_len > VAULT_MAX_SECRET {
+        return -1;
+    }
+    let secret = core::slice::from_raw_parts(secret, secret_len);
+
+    let mut salt = [0u8; VAULT_SALT_LEN];
+    let mut nonce = [0u8; 12];
+    if !random_bytes(&mut salt) || !random_bytes(&mut nonce) {
+        return -3;
+    }
+
+    let mut key = vault_derive_key(password, &salt, VAULT_ITERATIONS);
+    let sealed_len = envelope::sealed_len(secret_len);
+    let file_len = VAULT_HEADER_LEN + sealed_len;
+    let mut file = [0u8; VAULT_MAX_FILE];
+    file[..8].copy_from_slice(&VAULT_MAGIC);
+    file[8..12].copy_from_slice(&VAULT_ITERATIONS.to_le_bytes());
+    file[12..VAULT_HEADER_LEN].copy_from_slice(&salt);
+    let sealed = envelope::seal(&key, &nonce, secret, &mut file[VAULT_HEADER_LEN..file_len]);
+    wipe(&mut key);
+    if sealed.is_none() {
+        return -2;
+    }
+
+    if avfs_save_file(path, file.as_ptr(), file_len as u32, true) != 0 {
+        return -4;
+    }
+    0
+}
+
+// Opens the vault at `path` with `password` into `out`. Returns the secret's length; -1 bad argument or no file,
+// -2 wrong password, -3 file damaged or `out` too small.
+#[no_mangle]
+pub unsafe extern "C" fn rust_prp_vault_load(
+    password: *const u8,
+    path: *const u8,
+    out: *mut u8,
+    out_cap: u32,
+) -> i32 {
+    if password.is_null() || path.is_null() || out.is_null() {
+        return -1;
+    }
+    let password = c_str(password);
+    if password.is_empty() || password.len() > 128 {
+        return -2;
+    }
+
+    let size = avfs_get_filesize(path);
+    if size < 0 {
+        return -1;
+    }
+    let size = size as usize;
+    if size <= VAULT_HEADER_LEN || size > VAULT_MAX_FILE {
+        return -3;
+    }
+    let mut file = [0u8; VAULT_MAX_FILE];
+    if avfs_read_file(path, file.as_mut_ptr(), size as u32, 0) != 0 || file[..8] != VAULT_MAGIC {
+        return -3;
+    }
+    let iterations = u32::from_le_bytes([file[8], file[9], file[10], file[11]]);
+    if iterations == 0 || iterations > VAULT_MAX_ITERATIONS {
+        return -3;
+    }
+    let plain_len = match envelope::plaintext_len(size - VAULT_HEADER_LEN) {
+        Some(n) if n > 0 && n <= VAULT_MAX_SECRET && n <= out_cap as usize => n,
+        _ => return -3,
+    };
+
+    let mut key = vault_derive_key(password, &file[12..VAULT_HEADER_LEN], iterations);
+    let mut plain = [0u8; VAULT_MAX_SECRET];
+    let opened = envelope::open(&key, &mut file[VAULT_HEADER_LEN..size], &mut plain[..plain_len]);
+    wipe(&mut key);
+    if opened.is_none() {
+        wipe(&mut plain);
+        return -2;
+    }
+    core::ptr::copy_nonoverlapping(plain.as_ptr(), out, plain_len);
+    wipe(&mut plain);
+    plain_len as i32
 }
 
 unsafe fn c_str(mut ptr: *const u8) -> &'static [u8] {

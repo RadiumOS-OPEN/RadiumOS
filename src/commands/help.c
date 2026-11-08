@@ -1,3 +1,4 @@
+#include "../vga/fbcon.h"
 #include "../terminal/terminal.h"
 #include "../keyboard/keyboard.h"
 #include "help.h"
@@ -306,6 +307,7 @@ static inline uint8_t ps2_read(void) {
 }
 
 static inline int ps2_ready(void) {
+    fbcon_poll();
     uint8_t st;
     __asm__ volatile ("inb $0x64, %0" : "=a"(st));
     return st & 0x01;

@@ -1,0 +1,26 @@
+{
+  "name": "helios",
+  "displayName": "Helios (RadiumOS)",
+  "description": "Syntax highlighting for the Helios language of RadiumOS (.hls), colored like Rust",
+  "version": "0.1.0",
+  "publisher": "radiumos",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "helios",
+        "aliases": ["Helios", "helios"],
+        "extensions": [".hls"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "helios",
+        "scopeName": "source.helios",
+        "path": "./syntaxes/helios.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+// mod: Visual enhancer: contrast, color, sharpness
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_SAT, 100);
+        out_set(OUT_CON, 100);
+        out_set(OUT_VIG, 0);
+        out_set(OUT_SHARP, 0);
+    } else {
+        out_set(OUT_SAT, 135);
+        out_set(OUT_CON, 112);
+        out_set(OUT_VIG, 25);
+        out_set(OUT_SHARP, 60);
+    }
+}

@@ -1,0 +1,19 @@
+// acmod: Aimbot: aims at and shoots the nearest visible enemy
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_FIRE, 0);
+    } else {
+        out_set(OUT_FIRE, 0);
+        if in_game() == 1 {
+            let t = nearest_enemy();
+            if t >= 0 {
+                out_set(OUT_AIM_YAW, pl(t, P_YAW));
+                out_set(OUT_AIM_PITCH, pl(t, P_PITCH));
+                out_set(OUT_AIM, 1);
+                out_set(OUT_FIRE, 1);
+            }
+        }
+    }
+}

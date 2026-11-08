@@ -9,3 +9,7 @@ packages/iso/boot/os.bin
 rust_lib/target/
 debug.log
 .DS_Store
+keys/
+port/ac/assaultcube/
+port/ac/out/
+build/

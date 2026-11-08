@@ -1,0 +1,14 @@
+// mod: Hold Z to jump (bunny hop)
+include "/disk/mods/doom.hls";
+
+const JUMP_MOMENTUM: int = 655360;   // 10 map units per tic
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            if key_down(0) == 1 {
+                if mo_get(O_MO_Z) <= mo_get(O_MO_FLOORZ) { mo_set(O_MO_MOMZ, JUMP_MOMENTUM); }
+            }
+        }
+    }
+}

@@ -1,0 +1,11 @@
+// mod: Health and armor never drop
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            set_health(100);
+            if armor() < 100 { set_armor(100, 1); }
+        }
+    }
+}

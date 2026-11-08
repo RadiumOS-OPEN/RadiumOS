@@ -9,11 +9,15 @@
 #include "../Avfs/Avfs.h"
 #include "../savestate/savestate.h"
 #include "../user/login.h"
+#include "../user/users.h"
+#include "../commands/desktop.h"
+#include "stackguard.h"
 #include "../network/spinlock.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../pci/pci.h"
 #include "../rtl8139/rtl8139.h"
+#include "../vga/fbcon.h"
 #include "../network/nic.h"
 #include "../network/netstack.h"
 #include "../pci/pci.h"
@@ -25,12 +29,20 @@
 #include "../keyboard/keyboard.h"
 #include "../commands/cowsay.h"
 #include "../commands/bootsplash.h"
+#include "../commands/shellvars.h"
+#include "../commands/bootpage.h"
+#include "bootprofile.h"
+#include "cmdline.h"
+#include "../timers/tsc.h"
+
+// How long the boot pauses on its status screens before carrying on by itself (any key skips it).
+#define BOOT_WAIT_MS 250
 #include "../rshplugin/rshplugin.h"
 #include "../http/http.h"
 
-extern void script_init();
-
 extern void helios_init();
+
+extern void script_init();
 
 // Rust multitasking
 
@@ -482,15 +494,125 @@ void set_flashy_net_info(void) {
     set_net_info(hostname, "10.0.135.22", status); 
     // Note: Use the calculated 'ip_address' var if you implemented the full itoa logic
 }
-void kernel_main(void) {
 
+#define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002u
+#define MULTIBOOT_INFO_MEMORY      (1u << 0)
+#define MULTIBOOT_INFO_CMDLINE     (1u << 2)
+#define MULTIBOOT_INFO_MMAP        (1u << 6)
+
+typedef struct __attribute__((packed)) {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t symbols[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+} multiboot_info_v1_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t size;
+    uint64_t base_addr;
+    uint64_t length;
+    uint32_t type;
+} multiboot_mmap_entry_v1_t;
+
+extern uint8_t _kernel_end;
+
+static void initialize_pmm_from_map(const MemoryMap* map) {
+    pmm_init(0x140000000ULL);
+    for (int i = 0; i < map->entry_count; i++) {
+        if (map->entries[i].type == MEMORY_TYPE_AVAILABLE) {
+            pmm_init_region(map->entries[i].base_addr, map->entries[i].length);
+        }
+    }
+
+    // The kernel, boot tables, stack, and heap occupy the image below this symbol.
+    pmm_deinit_region(0, (uint64_t)(uintptr_t)&_kernel_end);
+
+    // These virtual ranges retain their physical MMIO/ROM mappings over the high-RAM window.
+    pmm_deinit_region(0x13D000000ULL, 0x01000000ULL);
+    pmm_deinit_region(0x13EA00000ULL, 0x00200000ULL);
+    pmm_deinit_region(0x13EC00000ULL, 0x00400000ULL);
+    pmm_deinit_region(0x13FE00000ULL, 0x00200000ULL);
+}
+
+// GRUB passes "source=disk" when it loaded the updated kernel from /disk (see `update`), else the ISO's kernel runs.
+// The whole command line is kept for cmdline.h (target, safe, nonet, ...).
+static char g_boot_source[8] = "iso";
+const char *kernel_boot_source(void) { return g_boot_source; }
+
+static void capture_boot_source(uint32_t magic, uint32_t info_address) {
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC || info_address == 0) return;
+    const multiboot_info_v1_t* info = (const multiboot_info_v1_t*)(uintptr_t)info_address;
+    if (!(info->flags & MULTIBOOT_INFO_CMDLINE) || info->cmdline == 0) return;
+    cmdline_set((const char*)(uintptr_t)info->cmdline);
+    if (cmdline_has("source=disk")) strcpy(g_boot_source, "disk");
+    else if (cmdline_has("source=old")) strcpy(g_boot_source, "old");
+}
+
+static bool load_multiboot_memory_map(uint32_t magic, uint32_t info_address) {
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC || info_address == 0) return false;
+
+    const multiboot_info_v1_t* info = (const multiboot_info_v1_t*)(uintptr_t)info_address;
+    MemoryMap map = {0};
+
+    if ((info->flags & MULTIBOOT_INFO_MMAP) && info->mmap_length >= 24
+        && info->mmap_addr <= UINT32_MAX - info->mmap_length) {
+        uint32_t cursor = info->mmap_addr;
+        uint32_t remaining = info->mmap_length;
+        while (remaining >= 24 && map.entry_count < MEMORY_MAP_MAX_ENTRIES) {
+            const multiboot_mmap_entry_v1_t* entry =
+                (const multiboot_mmap_entry_v1_t*)(uintptr_t)cursor;
+            if (entry->size < 20 || entry->size > remaining - 4) break;
+
+            MemoryMapEntry* output = &map.entries[map.entry_count++];
+            output->base_addr = entry->base_addr;
+            output->length = entry->length;
+            output->type = entry->type;
+
+            uint32_t step = entry->size + 4;
+            cursor += step;
+            remaining -= step;
+        }
+    } else if (info->flags & MULTIBOOT_INFO_MEMORY) {
+        map.entries[0] = (MemoryMapEntry){ 0, (uint64_t)info->mem_lower * 1024, MEMORY_TYPE_AVAILABLE };
+        map.entries[1] = (MemoryMapEntry){ 0x100000, (uint64_t)info->mem_upper * 1024, MEMORY_TYPE_AVAILABLE };
+        map.entry_count = 2;
+    }
+
+    if (map.entry_count == 0) return false;
+    set_memory_map_from_bootloader(&map);
+    initialize_pmm_from_map(&map);
+    return true;
+}
+
+void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_address) {
+    stackguard_init();   // before anything protected is running; kernel_main itself never returns
+
+    fbcon_init();   // 1280x720 console when VBE is available; plain text mode otherwise
     terminal_initialize();
-    show_boot_splash();
+    tsc_calibrate();
+    boot_mark("start");
+    capture_boot_source(multiboot_magic, multiboot_info_address);
+    { extern int g_tty_mirror; g_tty_mirror = cmdline_has("ttylog"); }
+    if (!load_multiboot_memory_map(multiboot_magic, multiboot_info_address)) {
+        print("WARNING: Multiboot memory map unavailable\n");
+    }
+    if (!cmdline_has("nosplash") && !cmdline_has("safe")) show_boot_splash();
+    if (cmdline_has("verbose") || cmdline_has("debug")) printr("Kernel command line: %s\n", cmdline_get());
+    boot_mark("splash");
     history_init();
     avfs_init();
+    boot_mark("avfs_init");
     script_init();
     registerCommands();
+    boot_mark("commands");
     createFiles();
+    boot_mark("createFiles");
     
     print("\n");
     // Initialize GDT and IDT
@@ -503,9 +625,9 @@ void kernel_main(void) {
         print("ERROR: IDT setup failed\n");
         while(1) asm("hlt");
     }
-    keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
+    boot_mark("await1");
     // Initialize network
-    if (scan_and_init_rtl8139()) {  
+    if (!cmdline_has("nonet") && !cmdline_has("safe") && scan_and_init_rtl8139()) {
         print("Network card ready!\n");
         
         // Configure network settings
@@ -529,23 +651,31 @@ void kernel_main(void) {
                 if (i < 5) print(":");
             }
             print("\n");
-            
-            // Test 1: Raw packet send
-            print("\n=== TEST 1: Raw Packet ===\n");
-            rust_test_raw_send();
-            
-            // Test 2: ARP request
-            print("\n=== TEST 2: ARP Request ===\n");
-            rust_test_network_simple();
-            
+
+            // QEMU's user-mode network only delivers replies (DNS, TCP) to a guest whose MAC it has learned from
+            // an ARP request, and nothing here answers its own ARP request. One broadcast ARP for the gateway
+            // costs no waiting (the reply is ignored).
+            uint8_t arp[60] = {0};
+            memset(arp, 0xFF, 6);
+            memcpy(arp + 6, mac, 6);
+            arp[12] = 0x08; arp[13] = 0x06;                  // ARP
+            arp[14] = 0x00; arp[15] = 0x01;                  // Ethernet
+            arp[16] = 0x08; arp[17] = 0x00;                  // IPv4
+            arp[18] = 6;    arp[19] = 4;
+            arp[20] = 0x00; arp[21] = 0x01;                  // request
+            memcpy(arp + 22, mac, 6);
+            memcpy(arp + 28, local_ip, 4);
+            memcpy(arp + 38, gateway, 4);
+            rust_rtl8139_send(arp, sizeof(arp));
         } else {
             print("RTL8139 not initialized!\n");
         }
     } else {
-        print("No network card found\n");
+        print(cmdline_has("nonet") || cmdline_has("safe") ? "Network disabled on the kernel command line\n" : "No network card found\n");
     }
     
     // Initialize Rust multitasking
+    boot_mark("network");
     rust_init_multitasking();
     rust_setup_pit(1000);  
     rust_start_demo_tasks();
@@ -569,7 +699,8 @@ CPUInfo* info = get_cpu_info_struct();
 
 terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
 
-keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to continue", true);
+keyboard_await_timeout("Switching to 80x50 text mode - press any key to skip the wait", true, cmdline_has("fastboot") ? 0 : BOOT_WAIT_MS);
+    boot_mark("await2");
     terminal_clear();
     vga_set_80x50();
     if (info->is_64bit) {
@@ -598,6 +729,21 @@ keyboard_await("ATTEMPTING TO CHANGE INTO {80x50[vga-mode]} : press any key to c
        //outb(0x21, inb(0x21) | 0x01); 
     enable_interrupts();
     helios_init();
+    boot_mark("pre-finish");
+    bool desk = desktop_boot_wanted();
+    if (!desk) users_boot_login();
+    boot_mark("login");
+    boot_finish();
+    boot_mark("done");
+    if (desk) {
+        keyboard_pause(true);
+        desktop_boot();
+        keyboard_pause(false);
+        if (users_enabled() && !users_has_session()) users_login_prompt();
+        terminal_clear();
+        print("RadiumOS text console - type desktop to go back to the desktop\n");
+        shell_show_prompt();
+    }
     while (1) {
         halt();
     }

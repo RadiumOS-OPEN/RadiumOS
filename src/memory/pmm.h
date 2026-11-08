@@ -29,9 +29,9 @@ typedef struct {
 #define MEMORY_TYPE_BADRAM      5
 
 // Initialize physical memory manager
-void pmm_init(uint32_t mem_size);
-void pmm_init_region(uint32_t base, uint32_t length);
-void pmm_deinit_region(uint32_t base, uint32_t length);
+void pmm_init(uint64_t physical_limit);
+void pmm_init_region(uint64_t base, uint64_t length);
+void pmm_deinit_region(uint64_t base, uint64_t length);
 
 // Allocate/free physical pages
 void* pmm_alloc_page(void);
@@ -40,9 +40,9 @@ void pmm_free_page(void* addr);
 void pmm_free_pages(void* addr, uint32_t count);
 
 // Query memory information
-uint32_t pmm_get_total_memory(void);
-uint32_t pmm_get_used_memory(void);
-uint32_t pmm_get_free_memory(void);
+uint64_t pmm_get_total_memory(void);
+uint64_t pmm_get_used_memory(void);
+uint64_t pmm_get_free_memory(void);
 uint32_t pmm_get_total_pages(void);
 uint32_t pmm_get_used_pages(void);
 uint32_t pmm_get_free_pages(void);

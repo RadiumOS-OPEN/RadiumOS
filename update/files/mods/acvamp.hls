@@ -1,0 +1,18 @@
+// acmod: Vampire: every frag heals 25 HP
+include "/disk/mods/ac.hls";
+
+// state: [0] frags seen last
+fn main() {
+    if mod_frame() >= 0 {
+        if in_game() == 1 {
+            let s = mod_state();
+            let f = api(A_FRAGS);
+            if f > rd(s) {
+                let mut h = api(A_HEALTH) + (f - rd(s)) * 25;
+                if h > 100 { h = 100; }
+                out_set(OUT_HEALTH, h);
+            }
+            wr(s, f);
+        }
+    }
+}

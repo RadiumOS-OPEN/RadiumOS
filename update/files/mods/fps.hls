@@ -1,0 +1,28 @@
+// mod: FPS counter in the top right corner
+include "/disk/mods/doom.hls";
+include "/disk/mods/gfx.hls";
+
+// state: [0] time of the last update, [4] frames since then, [8] frames per second, [12] started flag
+fn main() {
+    if mod_frame() >= 0 {
+        let s = mod_state();
+        let now = now_ms();
+        let mut n = rd(s + 4) + 1;
+        if rd(s + 12) == 0 {
+            wr(s, now);
+            wr(s + 12, 1);
+            n = 0;
+        } else {
+            if now - rd(s) >= 1000 {
+                wr(s + 8, n * 1000 / (now - rd(s)));
+                wr(s, now);
+                n = 0;
+            }
+        }
+        wr(s + 4, n);
+        let txt = "FPS " + itos(rd(s + 8));
+        let x = 316 - strlen(txt) * 8;
+        gfx_text(mod_screen(), mod_font(), x + 1, 5, txt, 0x000000);
+        gfx_text(mod_screen(), mod_font(), x, 4, txt, 0x40FF40);
+    }
+}

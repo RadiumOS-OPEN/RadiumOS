@@ -1,0 +1,18 @@
+// mod: Aimbot: snaps to the nearest visible monster and fires
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_WANT_TARGET, 0);
+        out_set(OUT_FIRE, 0);
+    } else {
+        out_set(OUT_WANT_TARGET, 1);
+        out_set(OUT_FIRE, 0);
+        if alive() == 1 {
+            if api(A_TARGET) != 0 {
+                mo_set(O_MO_ANGLE, api(A_TARGET_ANGLE));
+                out_set(OUT_FIRE, 1);
+            }
+        }
+    }
+}

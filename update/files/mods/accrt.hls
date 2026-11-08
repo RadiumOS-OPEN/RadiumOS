@@ -1,0 +1,14 @@
+// acmod: CRT: scanlines and a curved dark edge
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_SCAN, 0);
+        out_set(OUT_VIG, 0);
+        out_set(OUT_CON, 100);
+    } else {
+        out_set(OUT_SCAN, 35);
+        out_set(OUT_VIG, 40);
+        out_set(OUT_CON, 110);
+    }
+}

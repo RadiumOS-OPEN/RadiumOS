@@ -1,0 +1,32 @@
+// mod: Disco: flashing colors and lights
+include "/disk/mods/doom.hls";
+
+// state: [0] active flag, [4] original radiation suit time
+fn main() {
+    let s = mod_state();
+    if mod_frame() < 0 {
+        if rd(s) == 1 {
+            set_power(3, rd(s + 4));
+            pl_set(O_PL_DAMAGECOUNT, 0);
+            pl_set(O_PL_BONUSCOUNT, 0);
+            pl_set(O_PL_EXTRALIGHT, 0);
+            wr(s, 0);
+        }
+    } else {
+        if in_level() == 1 {
+            if rd(s) == 0 {
+                wr(s + 4, power(3));
+                wr(s, 1);
+            }
+            let beat = mod_frame() / 5;
+            let phase = beat % 4;
+            set_power(3, rd(s + 4));
+            pl_set(O_PL_DAMAGECOUNT, 0);
+            pl_set(O_PL_BONUSCOUNT, 0);
+            if phase == 0 { pl_set(O_PL_DAMAGECOUNT, 30); }
+            if phase == 1 { pl_set(O_PL_BONUSCOUNT, 16); }
+            if phase == 2 { set_power(3, 1000); }
+            pl_set(O_PL_EXTRALIGHT, (beat % 2) * 3);
+        }
+    }
+}

@@ -1,0 +1,70 @@
+src/doom/p_inter.o: src/doom/p_inter.c src/doom/doomdef.h \
+  src/dglibc/stdio.h src/dglibc/dglibc.h src/dglibc/string.h \
+  src/doom/doomtype.h src/dglibc/strings.h src/dglibc/inttypes.h \
+  src/doom/i_timer.h src/doom/d_mode.h src/doom/dstrings.h \
+  src/doom/d_englsh.h src/doom/sounds.h src/doom/i_sound.h \
+  src/doom/deh_main.h src/doom/doomfeatures.h src/doom/deh_str.h \
+  src/doom/sha1.h src/doom/deh_misc.h src/doom/doomstat.h \
+  src/doom/doomdata.h src/doom/d_loop.h src/doom/net_defs.h \
+  src/doom/d_ticcmd.h src/doom/d_player.h src/doom/d_items.h \
+  src/doom/p_pspr.h src/doom/m_fixed.h src/doom/tables.h src/doom/info.h \
+  src/doom/d_think.h src/doom/p_mobj.h src/doom/m_random.h \
+  src/doom/i_system.h src/doom/d_event.h src/doom/am_map.h \
+  src/doom/m_cheat.h src/doom/p_local.h src/doom/r_local.h \
+  src/doom/r_data.h src/doom/r_defs.h src/doom/i_video.h \
+  src/doom/v_patch.h src/doom/r_state.h src/doom/r_main.h \
+  src/doom/r_bsp.h src/doom/r_segs.h src/doom/r_plane.h \
+  src/doom/r_things.h src/doom/r_draw.h src/doom/p_spec.h \
+  src/doom/s_sound.h src/doom/p_inter.h
+src/doom/doomdef.h:
+src/dglibc/stdio.h:
+src/dglibc/dglibc.h:
+src/dglibc/string.h:
+src/doom/doomtype.h:
+src/dglibc/strings.h:
+src/dglibc/inttypes.h:
+src/doom/i_timer.h:
+src/doom/d_mode.h:
+src/doom/dstrings.h:
+src/doom/d_englsh.h:
+src/doom/sounds.h:
+src/doom/i_sound.h:
+src/doom/deh_main.h:
+src/doom/doomfeatures.h:
+src/doom/deh_str.h:
+src/doom/sha1.h:
+src/doom/deh_misc.h:
+src/doom/doomstat.h:
+src/doom/doomdata.h:
+src/doom/d_loop.h:
+src/doom/net_defs.h:
+src/doom/d_ticcmd.h:
+src/doom/d_player.h:
+src/doom/d_items.h:
+src/doom/p_pspr.h:
+src/doom/m_fixed.h:
+src/doom/tables.h:
+src/doom/info.h:
+src/doom/d_think.h:
+src/doom/p_mobj.h:
+src/doom/m_random.h:
+src/doom/i_system.h:
+src/doom/d_event.h:
+src/doom/am_map.h:
+src/doom/m_cheat.h:
+src/doom/p_local.h:
+src/doom/r_local.h:
+src/doom/r_data.h:
+src/doom/r_defs.h:
+src/doom/i_video.h:
+src/doom/v_patch.h:
+src/doom/r_state.h:
+src/doom/r_main.h:
+src/doom/r_bsp.h:
+src/doom/r_segs.h:
+src/doom/r_plane.h:
+src/doom/r_things.h:
+src/doom/r_draw.h:
+src/doom/p_spec.h:
+src/doom/s_sound.h:
+src/doom/p_inter.h:
