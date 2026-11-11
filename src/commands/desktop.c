@@ -1,4 +1,4 @@
-// desktop.c - RadiumDE, a small Xfce-style desktop environment drawn through the Vulkan implementation
+// desktop.c - RadiWM, a minimal window manager and desktop drawn through the Vulkan implementation
 //
 //   desktop            start it (it is a command, nothing runs at boot; boot with `desktop` on the kernel command line to
 //                      start it automatically). Log out from the panel menu or with Ctrl+Alt+Q.
@@ -36,6 +36,7 @@
 #include "../user/sudo.h"
 #include "../kernel/cmdline.h"
 #include "../vulkan/vulkan.h"
+#include "../io/clipboard.h"
 #include "rsd.h"
 #include "update.h"
 #include "apprun.h"
@@ -70,8 +71,18 @@ extern void shell_abort_recover(void);
 #define VT_MAX_H 90
 #define MAX_LAUNCH 6
 #define MAX_AUTO 6
-#define TRANSPARENT 0xFFFFFFFFu
 
+#define MS_W 16                                    // Minesweeper board
+#define MS_H 12
+#define MS_N 30
+#define MS_C 24
+#define MS_HEAD 44
+#define PT_W 560                                   // Paint canvas
+#define PT_H 360
+#define PT_BAR 44
+#define TERM_PREV_Y 106                            // Settings > Terminal: where the preview box starts
+#define TRANSPARENT 0xFFFFFFFFu
+static int g_theme_page;
 typedef struct { int x, y, w, h; } rect_t;
 
 // ---- colour themes ---------------------------------------------------------------------------------------------------
@@ -88,6 +99,13 @@ typedef struct {
 } theme_t;
 
 static const theme_t THEMES[] = {
+    { "radium", 0xe2ded3, 0xd6d1c4,
+      0x1c1c1a, 0xf4f1ea, 0x9a968b, 0x3a3a36, 0x1c1c1a, 0x5f7a52, 0xffffff,
+      0xf4f1ea, 0x1c1c1a, 0xe2ded3, 0x8a867b, 0xb8b3a5, 0x1c1c1a,
+      0xf4f1ea, 0x1c1c1a, 0x7a766b, 0xfbfaf6, 0xd2cdbf,
+      0x1c1c1a, 0xe8e4d8, 0x262624,
+      0xf4f1ea, 0x1c1c1a, 0x5f7a52,
+      0x3f7a3a, 0xa07a1a, 0xb03a2e },
     { "greybird", 0x3a76a8, 0x12304d,
       0x2a2d34, 0xe8eaed, 0x9aa0ab, 0x3d424d, 0x1b1d22, 0x5294e2, 0xffffff,
       0xe7e8ea, 0x2e3436, 0xf2f2f3, 0x80868e, 0x9ea3ab, 0x5294e2,
@@ -116,13 +134,378 @@ static const theme_t THEMES[] = {
       0x21222c, 0xf8f8f2, 0x282a36,
       0x343746, 0xf8f8f2, 0x6272a4,
       0x50fa7b, 0xf1fa8c, 0xff5555 },
+    /* Extra themes: paste after the last entry in THEMES[] (before the closing }; ). */
+    { "fire", 0x2c1d15, 0x110805,
+0x1a0d08, 0xffd9b0, 0x816954, 0x433226, 0x110805, 0xff5a1f, 0x110805,
+0x2c1d15, 0xffe8d0, 0x1a0d08, 0x816954, 0x433226, 0xff5a1f,
+0x1a0d08, 0xffd9b0, 0x816954, 0x110805, 0x433226,
+0x110805, 0xffd9b0, 0x1a0d08,
+0x2c1d15, 0xffd9b0, 0x6a2810,
+0xffb347, 0xffd23f, 0xff2a1a },
+    { "ice", 0x1b2832, 0x070e15,
+0x0b1620, 0xd6f1ff, 0x667984, 0x303d48, 0x070e15, 0x7fd8ff, 0x070e15,
+0x1b2832, 0xe6f7ff, 0x0b1620, 0x667984, 0x303d48, 0x7fd8ff,
+0x0b1620, 0xd6f1ff, 0x667984, 0x070e15, 0x303d48,
+0x070e15, 0xd6f1ff, 0x0b1620,
+0x1b2832, 0xd6f1ff, 0x345a6e,
+0x8ff0c8, 0xffe08a, 0xff7a8a },
+    { "ocean", 0x1a2a39, 0x06101b,
+0x0a1929, 0xcfe8f7, 0x637686, 0x2d3e4e, 0x06101b, 0x2ea8e6, 0x06101b,
+0x1a2a39, 0xe2f1fa, 0x0a1929, 0x637686, 0x2d3e4e, 0x2ea8e6,
+0x0a1929, 0xcfe8f7, 0x637686, 0x06101b, 0x2d3e4e,
+0x06101b, 0xcfe8f7, 0x0a1929,
+0x1a2a39, 0xcfe8f7, 0x174b6b,
+0x3ddc97, 0xf5c542, 0xff5c5c },
+    { "forest", 0x202a21, 0x0a110c,
+0x101a12, 0xd3e6cf, 0x687667, 0x333f34, 0x0a110c, 0x6fbf73, 0x0a110c,
+0x202a21, 0xe5f0e2, 0x101a12, 0x687667, 0x333f34, 0x6fbf73,
+0x101a12, 0xd3e6cf, 0x687667, 0x0a110c, 0x333f34,
+0x0a110c, 0xd3e6cf, 0x101a12,
+0x202a21, 0xd3e6cf, 0x315434,
+0x8bd96b, 0xe0c35a, 0xe0675a },
+    { "sunset", 0x312026, 0x140a10,
+0x1f1018, 0xffd9c2, 0x846a64, 0x473437, 0x140a10, 0xff7e5f, 0x140a10,
+0x312026, 0xffe8da, 0x1f1018, 0x846a64, 0x473437, 0xff7e5f,
+0x1f1018, 0xffd9c2, 0x846a64, 0x140a10, 0x473437,
+0x140a10, 0xffd9c2, 0x1f1018,
+0x312026, 0xffd9c2, 0x6d3631,
+0xffb86b, 0xffe066, 0xff4d6d },
+    { "midnight", 0x191e2a, 0x060911,
+0x0a0e1a, 0xc9d1e8, 0x606677, 0x2c313f, 0x060911, 0x6c8cff, 0x060911,
+0x191e2a, 0xdfe3f1, 0x0a0e1a, 0x606677, 0x2c313f, 0x6c8cff,
+0x0a0e1a, 0xc9d1e8, 0x606677, 0x060911, 0x2c313f,
+0x060911, 0xc9d1e8, 0x0a0e1a,
+0x191e2a, 0xc9d1e8, 0x2c3a6a,
+0x6fe0a3, 0xffd27a, 0xff6b8a },
+    { "cyberpunk", 0x1f1433, 0x080115,
+0x0d0221, 0xf0e6ff, 0x736985, 0x362b49, 0x080115, 0xff2a6d, 0x080115,
+0x1f1433, 0xf6f0ff, 0x0d0221, 0x736985, 0x362b49, 0xff2a6d,
+0x0d0221, 0xf0e6ff, 0x736985, 0x080115, 0x362b49,
+0x080115, 0xf0e6ff, 0x0d0221,
+0x1f1433, 0xf0e6ff, 0x62103c,
+0x05ffa1, 0xfff200, 0xff3860 },
+    { "synthwave", 0x352c3f, 0x17121f,
+0x241b2f, 0xf4eefc, 0x827a8b, 0x494154, 0x17121f, 0xff7edb, 0x17121f,
+0x352c3f, 0xf8f5fd, 0x241b2f, 0x827a8b, 0x494154, 0xff7edb,
+0x241b2f, 0xf4eefc, 0x827a8b, 0x17121f, 0x494154,
+0x17121f, 0xf4eefc, 0x241b2f,
+0x352c3f, 0xf4eefc, 0x713e6b,
+0x72f1b8, 0xfede5d, 0xfe4450 },
+    { "matrix", 0x0f1e0f, 0x000600,
+0x000a00, 0xb6ffb6, 0x527852, 0x213621, 0x000600, 0x00ff41, 0x000600,
+0x0f1e0f, 0xd3ffd3, 0x000a00, 0x527852, 0x213621, 0x00ff41,
+0x000a00, 0xb6ffb6, 0x527852, 0x000600, 0x213621,
+0x000600, 0xb6ffb6, 0x000a00,
+0x0f1e0f, 0xb6ffb6, 0x006017,
+0x00ff41, 0xc8ff00, 0xff3030 },
+    { "amber", 0x271c09, 0x0d0800,
+0x140c00, 0xffcf6b, 0x7e6430, 0x3e2f13, 0x0d0800, 0xffb000, 0x0d0800,
+0x271c09, 0xffe2a6, 0x140c00, 0x7e6430, 0x3e2f13, 0xffb000,
+0x140c00, 0xffcf6b, 0x7e6430, 0x0d0800, 0x3e2f13,
+0x0d0800, 0xffcf6b, 0x140c00,
+0x271c09, 0xffcf6b, 0x664500,
+0xc8d94a, 0xffd23f, 0xff5a3c },
+    { "rosepine", 0x292735, 0x100f17,
+0x191724, 0xe0def4, 0x737182, 0x3d3b49, 0x100f17, 0xc4a7e7, 0x100f17,
+0x292735, 0xecebf8, 0x191724, 0x737182, 0x3d3b49, 0xc4a7e7,
+0x191724, 0xe0def4, 0x737182, 0x100f17, 0x3d3b49,
+0x100f17, 0xe0def4, 0x191724,
+0x292735, 0xe0def4, 0x554968,
+0x9ccfd8, 0xf6c177, 0xeb6f92 },
+    { "everforest", 0x3a4144, 0x1d2226,
+0x2d353b, 0xd3c6aa, 0x78766d, 0x4b4f4f, 0x1d2226, 0xa7c080, 0x1d2226,
+0x3a4144, 0xe5ddcc, 0x2d353b, 0x78766d, 0x4b4f4f, 0xa7c080,
+0x2d353b, 0xd3c6aa, 0x78766d, 0x1d2226, 0x4b4f4f,
+0x1d2226, 0xd3c6aa, 0x2d353b,
+0x3a4144, 0xd3c6aa, 0x586653,
+0xa7c080, 0xdbbc7f, 0xe67e80 },
+    { "kanagawa", 0x2e2e34, 0x14141a,
+0x1f1f28, 0xdcd7ba, 0x74726a, 0x414042, 0x14141a, 0x7e9cd8, 0x14141a,
+0x2e2e34, 0xeae7d6, 0x1f1f28, 0x74726a, 0x414042, 0x7e9cd8,
+0x1f1f28, 0xdcd7ba, 0x74726a, 0x14141a, 0x414042,
+0x14141a, 0xdcd7ba, 0x1f1f28,
+0x2e2e34, 0xdcd7ba, 0x404b66,
+0x98bb6c, 0xe6c384, 0xe82424 },
+    { "ayu", 0x202428, 0x0a0d10,
+0x0f1419, 0xe6e1cf, 0x70706b, 0x36393a, 0x0a0d10, 0x39bae6, 0x0a0d10,
+0x202428, 0xf0ede2, 0x0f1419, 0x70706b, 0x36393a, 0x39bae6,
+0x0f1419, 0xe6e1cf, 0x70706b, 0x0a0d10, 0x36393a,
+0x0a0d10, 0xe6e1cf, 0x0f1419,
+0x202428, 0xe6e1cf, 0x1e4e61,
+0xaad94c, 0xffb454, 0xf07178 },
+    { "material", 0x364248, 0x192024,
+0x263238, 0xeeffff, 0x808e92, 0x4a575c, 0x192024, 0x82aaff, 0x192024,
+0x364248, 0xf5ffff, 0x263238, 0x808e92, 0x4a575c, 0x82aaff,
+0x263238, 0xeeffff, 0x808e92, 0x192024, 0x4a575c,
+0x192024, 0xeeffff, 0x263238,
+0x364248, 0xeeffff, 0x465c7e,
+0xc3e88d, 0xffcb6b, 0xf07178 },
+    { "palenight", 0x333749, 0x1b1d28,
+0x292d3e, 0xa6accd, 0x61667e, 0x404458, 0x1b1d28, 0x82aaff, 0x1b1d28,
+0x333749, 0xcacde1, 0x292d3e, 0x61667e, 0x404458, 0x82aaff,
+0x292d3e, 0xa6accd, 0x61667e, 0x1b1d28, 0x404458,
+0x1b1d28, 0xa6accd, 0x292d3e,
+0x333749, 0xa6accd, 0x485982,
+0xc3e88d, 0xffcb6b, 0xff5370 },
+    { "oceanicnext", 0x2a3942, 0x121c22,
+0x1b2b34, 0xd8dee9, 0x707c85, 0x3d4b55, 0x121c22, 0x6699cc, 0x121c22,
+0x2a3942, 0xe8ebf2, 0x1b2b34, 0x707c85, 0x3d4b55, 0x6699cc,
+0x1b2b34, 0xd8dee9, 0x707c85, 0x121c22, 0x3d4b55,
+0x121c22, 0xd8dee9, 0x1b2b34,
+0x2a3942, 0xd8dee9, 0x355269,
+0x99c794, 0xfac863, 0xec5f67 },
+    { "nightowl", 0x122637, 0x010e19,
+0x011627, 0xd6deeb, 0x61707f, 0x273a4a, 0x010e19, 0x82aaff, 0x010e19,
+0x122637, 0xe6ebf3, 0x011627, 0x61707f, 0x273a4a, 0x82aaff,
+0x011627, 0xd6deeb, 0x61707f, 0x010e19, 0x273a4a,
+0x010e19, 0xd6deeb, 0x011627,
+0x122637, 0xd6deeb, 0x2e4a73,
+0xaddb67, 0xecc48d, 0xef5350 },
+    { "horizon", 0x2c2e35, 0x121419,
+0x1c1e26, 0xe0e0e0, 0x74757a, 0x3f4147, 0x121419, 0xe95678, 0x121419,
+0x2c2e35, 0xececec, 0x1c1e26, 0x74757a, 0x3f4147, 0xe95678,
+0x1c1e26, 0xe0e0e0, 0x74757a, 0x121419, 0x3f4147,
+0x121419, 0xe0e0e0, 0x1c1e26,
+0x2c2e35, 0xe0e0e0, 0x643243,
+0x29d398, 0xfab795, 0xf43e5c },
+    { "zenburn", 0x4c4c4a, 0x292929,
+0x3f3f3f, 0xdcdccc, 0x86867e, 0x5b5b58, 0x292929, 0x8cd0d3, 0x292929,
+0x4c4c4a, 0xeaeae0, 0x3f3f3f, 0x86867e, 0x5b5b58, 0x8cd0d3,
+0x3f3f3f, 0xdcdccc, 0x86867e, 0x292929, 0x5b5b58,
+0x292929, 0xdcdccc, 0x3f3f3f,
+0x4c4c4a, 0xdcdccc, 0x5a7273,
+0x7f9f7f, 0xf0dfaf, 0xcc9393 },
+    { "tomorrow", 0x2a2d2e, 0x131415,
+0x1d1f21, 0xc5c8c6, 0x696b6b, 0x3b3d3f, 0x131415, 0x81a2be, 0x131415,
+0x2a2d2e, 0xdcdedd, 0x1d1f21, 0x696b6b, 0x3b3d3f, 0x81a2be,
+0x1d1f21, 0xc5c8c6, 0x696b6b, 0x131415, 0x3b3d3f,
+0x131415, 0xc5c8c6, 0x1d1f21,
+0x2a2d2e, 0xc5c8c6, 0x404d58,
+0xb5bd68, 0xf0c674, 0xcc6666 },
+    { "ember", 0x2c221e, 0x120c0a,
+0x1c1210, 0xe8d5c4, 0x786a61, 0x413530, 0x120c0a, 0xe25822, 0x120c0a,
+0x2c221e, 0xf1e6dc, 0x1c1210, 0x786a61, 0x413530, 0xe25822,
+0x1c1210, 0xe8d5c4, 0x786a61, 0x120c0a, 0x413530,
+0x120c0a, 0xe8d5c4, 0x1c1210,
+0x2c221e, 0xe8d5c4, 0x612a16,
+0xc9a227, 0xf2a900, 0xc0392b },
+    { "lava", 0x251514, 0x0c0303,
+0x120505, 0xffcfc0, 0x7d6059, 0x3d2927, 0x0c0303, 0xff3d00, 0x0c0303,
+0x251514, 0xffe2d9, 0x120505, 0x7d6059, 0x3d2927, 0xff3d00,
+0x120505, 0xffcfc0, 0x7d6059, 0x0c0303, 0x3d2927,
+0x0c0303, 0xffcfc0, 0x120505,
+0x251514, 0xffcfc0, 0x651903,
+0xff9100, 0xffc400, 0xd50000 },
+    { "volcano", 0x271a19, 0x0e0606,
+0x160a0a, 0xf0d0c0, 0x78635c, 0x3d2e2b, 0x0e0606, 0xff6b35, 0x0e0606,
+0x271a19, 0xf6e3d9, 0x160a0a, 0x78635c, 0x3d2e2b, 0xff6b35,
+0x160a0a, 0xf0d0c0, 0x78635c, 0x0e0606, 0x3d2e2b,
+0x0e0606, 0xf0d0c0, 0x160a0a,
+0x271a19, 0xf0d0c0, 0x682c19,
+0xffa62b, 0xffd166, 0xe63946 },
+    { "neon", 0x1c1c25, 0x06060c,
+0x0a0a12, 0xe8e8ff, 0x6e6e7d, 0x32323d, 0x06060c, 0x00f0ff, 0x06060c,
+0x1c1c25, 0xf1f1ff, 0x0a0a12, 0x6e6e7d, 0x32323d, 0x00f0ff,
+0x0a0a12, 0xe8e8ff, 0x6e6e7d, 0x06060c, 0x32323d,
+0x06060c, 0xe8e8ff, 0x0a0a12,
+0x1c1c25, 0xe8e8ff, 0x065a65,
+0x39ff14, 0xffee00, 0xff0055 },
+    { "vaporwave", 0x2b2143, 0x110a21,
+0x1a1033, 0xf3e8ff, 0x7c718f, 0x413758, 0x110a21, 0x01cdfe, 0x110a21,
+0x2b2143, 0xf8f1ff, 0x1a1033, 0x7c718f, 0x413758, 0x01cdfe,
+0x1a1033, 0xf3e8ff, 0x7c718f, 0x110a21, 0x413758,
+0x110a21, 0xf3e8ff, 0x1a1033,
+0x2b2143, 0xf3e8ff, 0x11527a,
+0x05ffa1, 0xfffb96, 0xff71ce },
+    { "mint", 0x1f302a, 0x0a1411,
+0x0f1f1a, 0xd2f0e4, 0x677d75, 0x32453e, 0x0a1411, 0x4fd1a5, 0x0a1411,
+0x1f302a, 0xe4f6ef, 0x0f1f1a, 0x677d75, 0x32453e, 0x4fd1a5,
+0x0f1f1a, 0xd2f0e4, 0x677d75, 0x0a1411, 0x32453e,
+0x0a1411, 0xd2f0e4, 0x0f1f1a,
+0x1f302a, 0xd2f0e4, 0x255d4b,
+0x7be495, 0xe8d26a, 0xf07178 },
+    { "lavender", 0x2e2a3e, 0x14121e,
+0x1e1b2e, 0xe3dcf5, 0x777288, 0x413e52, 0x14121e, 0xb794f6, 0x14121e,
+0x2e2a3e, 0xeeeaf9, 0x1e1b2e, 0x777288, 0x413e52, 0xb794f6,
+0x1e1b2e, 0xe3dcf5, 0x777288, 0x14121e, 0x413e52,
+0x14121e, 0xe3dcf5, 0x1e1b2e,
+0x2e2a3e, 0xe3dcf5, 0x544574,
+0x8fe3b0, 0xf5d680, 0xf58fa0 },
+    { "sakura", 0x35262c, 0x170e12,
+0x24161c, 0xf7dde4, 0x837076, 0x4a3a40, 0x170e12, 0xff9ebb, 0x170e12,
+0x35262c, 0xfaebef, 0x24161c, 0x837076, 0x4a3a40, 0xff9ebb,
+0x24161c, 0xf7dde4, 0x837076, 0x170e12, 0x4a3a40,
+0x170e12, 0xf7dde4, 0x24161c,
+0x35262c, 0xf7dde4, 0x714654,
+0xa8d8a0, 0xf5d68a, 0xf2607f },
+    { "coffee", 0x2a211b, 0x110c08,
+0x1a120d, 0xe6d3c0, 0x76695e, 0x3f352d, 0x110c08, 0xc08552, 0x110c08,
+0x2a211b, 0xf0e5d9, 0x1a120d, 0x76695e, 0x3f352d, 0xc08552,
+0x1a120d, 0xe6d3c0, 0x76695e, 0x110c08, 0x3f352d,
+0x110c08, 0xe6d3c0, 0x1a120d,
+0x2a211b, 0xe6d3c0, 0x543a25,
+0xa8b565, 0xe0b45a, 0xc85a4a },
+    { "sand", 0x3a352d, 0x1c1915,
+0x2b2620, 0xe8dcc4, 0x80786a, 0x4d473e, 0x1c1915, 0xd4a76a, 0x1c1915,
+0x3a352d, 0xf1eadc, 0x2b2620, 0x80786a, 0x4d473e, 0xd4a76a,
+0x2b2620, 0xe8dcc4, 0x80786a, 0x1c1915, 0x4d473e,
+0x1c1915, 0xe8dcc4, 0x2b2620,
+0x3a352d, 0xe8dcc4, 0x66533a,
+0xa3b86c, 0xe0c068, 0xd1695a },
+    { "slate", 0x2c333e, 0x14181f,
+0x1e2530, 0xd0d7e0, 0x6e757f, 0x3e4550, 0x14181f, 0x6e9bd1, 0x14181f,
+0x2c333e, 0xe3e7ec, 0x1e2530, 0x6e757f, 0x3e4550, 0x6e9bd1,
+0x1e2530, 0xd0d7e0, 0x6e757f, 0x14181f, 0x3e4550,
+0x14181f, 0xd0d7e0, 0x1e2530,
+0x2c333e, 0xd0d7e0, 0x3a4e68,
+0x7fc79a, 0xe3c06d, 0xe07a7a },
+    { "charcoal", 0x272727, 0x101010,
+0x181818, 0xd8d8d8, 0x6e6e6e, 0x3b3b3b, 0x101010, 0x7a9fd0, 0x101010,
+0x272727, 0xe8e8e8, 0x181818, 0x6e6e6e, 0x3b3b3b, 0x7a9fd0,
+0x181818, 0xd8d8d8, 0x6e6e6e, 0x101010, 0x3b3b3b,
+0x101010, 0xd8d8d8, 0x181818,
+0x272727, 0xd8d8d8, 0x3a4758,
+0x8cc084, 0xd9b95c, 0xd46a6a },
+    { "obsidian", 0x1d1d1f, 0x08080a,
+0x0d0d0f, 0xcfcfd4, 0x646468, 0x303032, 0x08080a, 0x8f7bff, 0x08080a,
+0x1d1d1f, 0xe2e2e5, 0x0d0d0f, 0x646468, 0x303032, 0x8f7bff,
+0x0d0d0f, 0xcfcfd4, 0x646468, 0x08080a, 0x303032,
+0x08080a, 0xcfcfd4, 0x0d0d0f,
+0x1d1d1f, 0xcfcfd4, 0x3a3463,
+0x7bd88f, 0xe6c35c, 0xff6b6b },
+    { "ink", 0x1a1e29, 0x070a10,
+0x0b0f19, 0xc8d0e0, 0x606673, 0x2d323d, 0x070a10, 0x4d7cff, 0x070a10,
+0x1a1e29, 0xdee3ec, 0x0b0f19, 0x606673, 0x2d323d, 0x4d7cff,
+0x0b0f19, 0xc8d0e0, 0x606673, 0x070a10, 0x2d323d,
+0x070a10, 0xc8d0e0, 0x0b0f19,
+0x1a1e29, 0xc8d0e0, 0x22356a,
+0x4fd1a1, 0xf2c14e, 0xff5d73 },
+    { "graphite", 0x303439, 0x16191c,
+0x22262b, 0xcfd4da, 0x70747a, 0x41454a, 0x16191c, 0x5ea1ff, 0x16191c,
+0x303439, 0xe2e5e9, 0x22262b, 0x70747a, 0x41454a, 0x5ea1ff,
+0x22262b, 0xcfd4da, 0x70747a, 0x16191c, 0x41454a,
+0x16191c, 0xcfd4da, 0x22262b,
+0x303439, 0xcfd4da, 0x375175,
+0x6cc58a, 0xe0b75a, 0xe5646c },
+    { "copper", 0x2b221e, 0x110c0a,
+0x1a1210, 0xecd5c0, 0x786a5f, 0x403530, 0x110c0a, 0xc8743a, 0x110c0a,
+0x2b221e, 0xf4e6d9, 0x1a1210, 0x786a5f, 0x403530, 0xc8743a,
+0x1a1210, 0xecd5c0, 0x786a5f, 0x110c0a, 0x403530,
+0x110c0a, 0xecd5c0, 0x1a1210,
+0x2b221e, 0xecd5c0, 0x57341f,
+0x9bb05a, 0xe0a83a, 0xc8503a },
+    { "emerald", 0x16251f, 0x050d0a,
+0x07140f, 0xc8eedb, 0x5e766b, 0x2a3b34, 0x050d0a, 0x10b981, 0x050d0a,
+0x16251f, 0xdef5e9, 0x07140f, 0x5e766b, 0x2a3b34, 0x10b981,
+0x07140f, 0xc8eedb, 0x5e766b, 0x050d0a, 0x2a3b34,
+0x050d0a, 0xc8eedb, 0x07140f,
+0x16251f, 0xc8eedb, 0x0a4e37,
+0x34d399, 0xfbbf24, 0xf87171 },
+    { "ruby", 0x2b1a1f, 0x11060a,
+0x1a0a0f, 0xf2cdd5, 0x7b6268, 0x412d33, 0x11060a, 0xe11d48, 0x11060a,
+0x2b1a1f, 0xf7e1e6, 0x1a0a0f, 0x7b6268, 0x412d33, 0xe11d48,
+0x1a0a0f, 0xf2cdd5, 0x7b6268, 0x11060a, 0x412d33,
+0x11060a, 0xf2cdd5, 0x1a0a0f,
+0x2b1a1f, 0xf2cdd5, 0x601123,
+0x4ade80, 0xfbbf24, 0xff3355 },
+    { "sapphire", 0x18223b, 0x050c1c,
+0x08122b, 0xcdd9f5, 0x616c86, 0x2b364f, 0x050c1c, 0x3b82f6, 0x050c1c,
+0x18223b, 0xe1e8f9, 0x08122b, 0x616c86, 0x2b364f, 0x3b82f6,
+0x08122b, 0xcdd9f5, 0x616c86, 0x050c1c, 0x2b364f,
+0x050c1c, 0xcdd9f5, 0x08122b,
+0x18223b, 0xcdd9f5, 0x1a3972,
+0x34d399, 0xfbbf24, 0xf87171 },
+    { "amethyst", 0x27203c, 0x0f0a1c,
+0x17102b, 0xe4d9fb, 0x736a89, 0x3c3450, 0x0f0a1c, 0x9333ea, 0x0f0a1c,
+0x27203c, 0xefe8fd, 0x17102b, 0x736a89, 0x3c3450, 0x9333ea,
+0x17102b, 0xe4d9fb, 0x736a89, 0x0f0a1c, 0x3c3450,
+0x0f0a1c, 0xe4d9fb, 0x17102b,
+0x27203c, 0xe4d9fb, 0x421c6e,
+0x4ade80, 0xfacc15, 0xfb7185 },
+    { "topaz", 0x2d2717, 0x120e05,
+0x1c1608, 0xf3e5c0, 0x7d735b, 0x433b29, 0x120e05, 0xf59e0b, 0x120e05,
+0x2d2717, 0xf8efd9, 0x1c1608, 0x7d735b, 0x433b29, 0xf59e0b,
+0x1c1608, 0xf3e5c0, 0x7d735b, 0x120e05, 0x433b29,
+0x120e05, 0xf3e5c0, 0x1c1608,
+0x2d2717, 0xf3e5c0, 0x684609,
+0xa3e635, 0xfde047, 0xef4444 },
+    { "jade", 0x1b2b28, 0x07110f,
+0x0b1a17, 0xcdeee6, 0x627974, 0x2e403c, 0x07110f, 0x14b8a6, 0x07110f,
+0x1b2b28, 0xe1f5f0, 0x0b1a17, 0x627974, 0x2e403c, 0x14b8a6,
+0x0b1a17, 0xcdeee6, 0x627974, 0x07110f, 0x2e403c,
+0x07110f, 0xcdeee6, 0x0b1a17,
+0x1b2b28, 0xcdeee6, 0x0e5149,
+0x5eead4, 0xfcd34d, 0xfb7185 },
+    { "aurora", 0x1b2b34, 0x071117,
+0x0b1a24, 0xd4eef0, 0x657980, 0x2f4049, 0x071117, 0x5eead4, 0x071117,
+0x1b2b34, 0xe5f5f6, 0x0b1a24, 0x657980, 0x2f4049, 0x5eead4,
+0x0b1a24, 0xd4eef0, 0x657980, 0x071117, 0x2f4049,
+0x071117, 0xd4eef0, 0x0b1a24,
+0x1b2b34, 0xd4eef0, 0x286362,
+0x86efac, 0xfde68a, 0xfda4af },
+    { "twilight", 0x2a2436, 0x110e19,
+0x1a1526, 0xded6f0, 0x726c81, 0x3d384a, 0x110e19, 0x8b7cf6, 0x110e19,
+0x2a2436, 0xebe6f6, 0x1a1526, 0x726c81, 0x3d384a, 0x8b7cf6,
+0x1a1526, 0xded6f0, 0x726c81, 0x110e19, 0x3d384a,
+0x110e19, 0xded6f0, 0x1a1526,
+0x2a2436, 0xded6f0, 0x42396f,
+0x6ee7b7, 0xfcd34d, 0xf472b6 },
+    { "dawn", 0x3a2f33, 0x1b1417,
+0x2a1f24, 0xf6e3dc, 0x867777, 0x4f4245, 0x1b1417, 0xf0a07a, 0x1b1417,
+0x3a2f33, 0xfaeeea, 0x2a1f24, 0x867777, 0x4f4245, 0xf0a07a,
+0x2a1f24, 0xf6e3dc, 0x867777, 0x1b1417, 0x4f4245,
+0x1b1417, 0xf6e3dc, 0x2a1f24,
+0x3a2f33, 0xf6e3dc, 0x6f4c42,
+0xb5d99c, 0xf6d08a, 0xec6a7a },
+    { "mocha", 0x2e2925, 0x14110f,
+0x1e1a17, 0xe5d8cc, 0x787068, 0x423c38, 0x14110f, 0xb68a6a, 0x14110f,
+0x2e2925, 0xefe8e0, 0x1e1a17, 0x787068, 0x423c38, 0xb68a6a,
+0x1e1a17, 0xe5d8cc, 0x787068, 0x14110f, 0x423c38,
+0x14110f, 0xe5d8cc, 0x1e1a17,
+0x2e2925, 0xe5d8cc, 0x534134,
+0xa2b28a, 0xe3c07a, 0xcf6f64 },
+    { "hacker", 0x091909, 0x030303,
+0x050505, 0x33ff33, 0x1a761a, 0x0d320d, 0x030303, 0x33ff33, 0x030303,
+0x091909, 0x85ff85, 0x050505, 0x1a761a, 0x0d320d, 0x33ff33,
+0x050505, 0x33ff33, 0x1a761a, 0x030303, 0x0d320d,
+0x030303, 0x33ff33, 0x050505,
+0x091909, 0x33ff33, 0x155c15,
+0x00cc00, 0xccff33, 0xff3333 },
+    { "terminal", 0x1b1b1b, 0x080808,
+0x0c0c0c, 0xcccccc, 0x626262, 0x2f2f2f, 0x080808, 0x3b78ff, 0x080808,
+0x1b1b1b, 0xe0e0e0, 0x0c0c0c, 0x626262, 0x2f2f2f, 0x3b78ff,
+0x0c0c0c, 0xcccccc, 0x626262, 0x080808, 0x2f2f2f,
+0x080808, 0xcccccc, 0x0c0c0c,
+0x1b1b1b, 0xcccccc, 0x1c3261,
+0x13a10e, 0xc19c00, 0xc50f1f },
+    { "paperdark", 0x2e2e2e, 0x141414,
+0x1f1f1f, 0xe0e0e0, 0x767676, 0x424242, 0x141414, 0x8ab4f8, 0x141414,
+0x2e2e2e, 0xececec, 0x1f1f1f, 0x767676, 0x424242, 0x8ab4f8,
+0x1f1f1f, 0xe0e0e0, 0x767676, 0x141414, 0x424242,
+0x141414, 0xe0e0e0, 0x1f1f1f,
+0x2e2e2e, 0xe0e0e0, 0x44536b,
+0x81c995, 0xfdd663, 0xf28b82 },
+    { "blood", 0x251515, 0x0d0303,
+0x140505, 0xe8cfcf, 0x736060, 0x3a2929, 0x0d0303, 0xb3001b, 0x0d0303,
+0x251515, 0xf1e2e2, 0x140505, 0x736060, 0x3a2929, 0xb3001b,
+0x140505, 0xe8cfcf, 0x736060, 0x0d0303, 0x3a2929,
+0x0d0303, 0xe8cfcf, 0x140505,
+0x251515, 0xe8cfcf, 0x4c030d,
+0x5fa05f, 0xd4a017, 0xff1a1a },
+    { "steel", 0x292f36, 0x12151a,
+0x1b2128, 0xc9d3dc, 0x697179, 0x3a4148, 0x12151a, 0x7aa2c4, 0x12151a,
+0x292f36, 0xdfe5ea, 0x1b2128, 0x697179, 0x3a4148, 0x7aa2c4,
+0x1b2128, 0xc9d3dc, 0x697179, 0x12151a, 0x3a4148,
+0x12151a, 0xc9d3dc, 0x1b2128,
+0x292f36, 0xc9d3dc, 0x3c4e5f,
+0x8fbf9f, 0xe0c07a, 0xd97a7a },
 };
 #define NTHEMES ((int)(sizeof(THEMES) / sizeof(THEMES[0])))
 
 static theme_t TH;
 
-typedef enum { W_TERM, W_FILES, W_MON, W_CLOCK, W_SET, W_VIEW, W_CALC, W_EDIT, W_GAMES, W_SERV, W_SCRIPTS, W_TASKS } wtype_t;
-enum { APP_TERM, APP_FILES, APP_MON, APP_CLOCK, APP_SET, APP_CALC, APP_EDIT, APP_GAMES, APP_SERV, APP_SCRIPTS, APP_TASKS, APP_COUNT };
+typedef enum { W_TERM, W_FILES, W_MON, W_CLOCK, W_SET, W_VIEW, W_CALC, W_EDIT, W_GAMES, W_SERV, W_SCRIPTS, W_TASKS, W_WEB, W_PAINT, W_MINES, W_TIMER, W_CHESS } wtype_t;
+enum { APP_TERM, APP_FILES, APP_MON, APP_CLOCK, APP_SET, APP_CALC, APP_EDIT, APP_GAMES, APP_SERV, APP_SCRIPTS, APP_TASKS, APP_WEB, APP_PAINT, APP_MINES, APP_TIMER, APP_CHESS, APP_COUNT };
 
 typedef struct {
     bool used, minimized, maximized;
@@ -168,9 +551,21 @@ typedef struct {
     // task manager
     struct { uint32_t pid, ticks, prev; int state, pri, cpu; char name[20]; } tk[48];
     int ntk, tsel, ttop;
+    // web browser: the tabs of this window (indices into g_tabs) and the shown one
+    int tabs[6], ntabs, wtab;
+    // terminal: cursor position inside input[]
+    int icur;
+    // minesweeper (bit 0 mine, bit 1 open, bit 2 flag); state 0 ready, 1 playing, 2 won, 3 lost
+    uint8_t ms[MS_W * MS_H];
+    int ms_state;
+    uint32_t ms_t0, ms_t1;
+    // timer: mode 0 stopwatch, 1 countdown
+    int tmo, nlap;
+    bool tr_run;
+    uint32_t t_start, t_acc, t_target, lap[8];
 } win_t;
 
-typedef struct { int mouse_speed, mouse_gain, dblclick, wallpaper; bool dock, icons, desk_files, clock24; int theme; int wp_mode; char wp_file[96]; bool shadows, snap, open_max, run_windowed, tray; int dock_size, term_style; } cfg_t;   // wallpaper: 0 gradient, 1 flat, 2 reverse, 3 picture
+typedef struct { int mouse_speed, mouse_gain, dblclick, wallpaper; bool dock, icons, desk_files, clock24; int theme; int wp_mode; char wp_file[96]; bool shadows, snap, open_max, run_windowed, tray; int dock_size, term_style, term_cursor, term_prompt; bool term_welcome; } cfg_t;   // wallpaper: 0 gradient, 1 flat, 2 reverse, 3 picture
 typedef struct { char label[24]; char cmd[48]; } launcher_t;
 typedef struct { int kind; char arg[48]; } auto_t;
 
@@ -194,11 +589,11 @@ static uint32_t g_busy_ms, g_up_base;
 static uint32_t g_mem_pct, g_dsk_pct;
 
 static const char DEFAULT_CONF[] =
-    "# RadiumDE desktop configuration. Lines starting with # are comments; # followed by six hex digits is a colour.\n"
+    "# RadiWM configuration. Lines starting with # are comments; # followed by six hex digits is a colour.\n"
     "# Settings > Save writes this file; you can also edit it by hand and log in again.\n"
     "\n"
-    "theme greybird               # greybird, dark, nord, dracula\n"
-    "wallpaper default            # default (the mascot picture), gradient, flat or reverse\n"
+    "theme radium                # radium, greybird, dark, nord, dracula\n"
+    "wallpaper flat               # flat, gradient, reverse or default (the mascot picture)\n"
     "# wallpaper_file /disk/Pictures/mine.png   use a PNG of your own\n"
     "# wallpaper_mode fill                      fill, fit, stretch or center (for your own picture)\n"
     "mouse_speed 45               # percent of the raw pointer speed when moving slowly (10-120)\n"
@@ -208,18 +603,21 @@ static const char DEFAULT_CONF[] =
     "icons yes\n"
     "desktop_files yes            # show the files of the Desktop folder on the desktop\n"
     "clock24 yes\n"
-    "window_shadows yes\n"
+    "window_shadows no\n"
     "snap yes                     # windows stick to the screen edges; drop one at the top to maximise it\n"
     "open_maximised no\n"
     "run_in_window yes            # games and graphics programs run in a window (no = take the whole screen)\n"
     "panel_tray yes               # memory and disk in the panel\n"
     "dock_size 48                 # icon size in the dock (32-64)\n"
-    "terminal_colors theme        # theme, classic, amber or light\n"
+    "terminal_colors theme        # theme, classic, amber, light, solarized, dracula, nord or gruvbox\n"
+    "terminal_cursor block        # block, underline or bar\n"
+    "terminal_prompt full         # full (user@radium$), short ($), arrow (>) or radium (radium>)\n"
+    "terminal_welcome yes         # print the greeting in a new terminal\n"
     "\n"
     "# launcher \"Label\" command      adds an entry to the dock and the Applications menu (up to 6)\n"
     "# launcher \"Memory\" meminfo\n"
     "\n"
-    "# windows opened at login: autostart open term|files|monitor|clock|settings|calc|editor|games|services|scripts, autostart exec COMMAND\n"
+    "# windows opened at login: autostart open term|files|monitor|clock|settings|calc|editor|games|services|scripts|tasks|web|paint|mines|timer, autostart exec COMMAND\n"
     "autostart open term\n";
 
 // ---- time and formatting -----------------------------------------------------------------------------------------------
@@ -465,8 +863,10 @@ static void text_center(int x, int w, int y, const char *s, uint32_t fg, uint32_
 
 static const uint32_t VGA_RGB[16] = { 0x000000, 0x4c6ef5, 0x51cf66, 0x22b8cf, 0xff6b6b, 0xcc5de8, 0xfab005, 0xcdd3de,
                                       0x6b7385, 0x74c0fc, 0x8ce99a, 0x66d9e8, 0xff8787, 0xe599f7, 0xffe066, 0xffffff };
-static uint32_t attr_fg(uint8_t a) { return a == 0 ? TH.term_fg : VGA_RGB[a & 15]; }
-static uint32_t attr_bg(uint8_t a, uint32_t dflt) { uint8_t b = (a >> 4) & 15; return b ? VGA_RGB[b] : dflt; }
+#define TA_PROMPT 0x80       // attribute of the prompt part of an echoed command in the scrollback (black on grey is never used by programs)
+static uint32_t term_prompt_col(void) { return C.term_style == 3 ? 0x1a7f37 : 0x69db7c; }
+static uint32_t attr_fg(uint8_t a) { if (a == TA_PROMPT) return term_prompt_col(); return a == 0 ? TH.term_fg : VGA_RGB[a & 15]; }
+static uint32_t attr_bg(uint8_t a, uint32_t dflt) { if (a == TA_PROMPT) return dflt; uint8_t b = (a >> 4) & 15; return b ? VGA_RGB[b] : dflt; }
 
 static void text_attr(int x, int y, const char *s, const uint8_t *at, uint32_t dflt_bg, int max_cols)
 {
@@ -475,7 +875,7 @@ static void text_attr(int x, int y, const char *s, const uint8_t *at, uint32_t d
 
 // ---- icons (drawn from rectangles and discs; coordinates are in a 48-unit grid scaled to s pixels) -------------------------
 
-enum { IC_TERM, IC_FILES, IC_MON, IC_CLOCK, IC_SET, IC_HOME, IC_FILE, IC_RUN, IC_VIEW, IC_APP, IC_CALC, IC_EDIT, IC_GAME, IC_SERV, IC_SCRIPT, IC_CONSOLE, IC_USER };
+enum { IC_TERM, IC_FILES, IC_MON, IC_CLOCK, IC_SET, IC_HOME, IC_FILE, IC_RUN, IC_VIEW, IC_APP, IC_CALC, IC_EDIT, IC_GAME, IC_SERV, IC_SCRIPT, IC_CONSOLE, IC_USER, IC_WEB, IC_PAINT, IC_MINES, IC_TIMER, IC_CHESS };
 
 #define U(v) ((v) * s / 48)
 
@@ -566,6 +966,13 @@ static void draw_icon(int kind, int x, int y, int s)
         fill_rect(x + U(17), y + U(19), U(16), imax(1, U(3)), 0x51cf66); fill_rect(x + U(13), y + U(27), U(8), imax(1, U(3)), 0xfab005);
         fill_rect(x + U(23), y + U(27), U(12), imax(1, U(3)), 0x4c6ef5); fill_rect(x + U(17), y + U(35), U(14), imax(1, U(3)), 0xe64980);
         break;
+    case IC_WEB:
+        disc(x + U(24), y + U(24), U(19), 0x4c6a8a);
+        disc(x + U(24), y + U(24), U(16), 0xf4f1ea);
+        fill_rect(x + U(8), y + U(23), U(32), imax(1, U(2)), 0x4c6a8a);
+        fill_rect(x + U(23), y + U(8), imax(1, U(2)), U(32), 0x4c6a8a);
+        frame_rect(x + U(15), y + U(8), U(18), U(32), 0x4c6a8a);
+        break;
     case IC_CONSOLE:
         round_rect(x + U(3), y + U(6), U(42), U(36), 3, 0x000000);
         frame_rect(x + U(3), y + U(6), U(42), U(36), 0x868e96);
@@ -580,6 +987,36 @@ static void draw_icon(int kind, int x, int y, int s)
         round_rect(x + U(3), y + U(12), U(42), U(24), 3, 0xdee2e6);
         fill_rect(x + U(7), y + U(16), U(34), U(16), 0xffffff);
         fill_rect(x + U(10), y + U(22), U(3), U(4), 0x343a40);
+        break;
+    case IC_PAINT:
+        round_rect(x + U(4), y + U(6), U(40), U(36), 4, 0xf8f9fa);
+        frame_rect(x + U(4), y + U(6), U(40), U(36), 0xadb5bd);
+        disc(x + U(14), y + U(16), imax(2, U(4)), 0xff6b6b);
+        disc(x + U(24), y + U(14), imax(2, U(4)), 0xffd43b);
+        disc(x + U(34), y + U(18), imax(2, U(4)), 0x4c6ef5);
+        line(x + U(12), y + U(36), x + U(36), y + U(28), imax(2, U(3)), 0x51cf66);
+        break;
+    case IC_MINES:
+        round_rect(x + U(4), y + U(4), U(40), U(40), 4, 0xadb5bd);
+        disc(x + U(24), y + U(24), imax(3, U(9)), 0x212529);
+        line(x + U(10), y + U(24), x + U(38), y + U(24), imax(1, U(2)), 0x212529);
+        line(x + U(24), y + U(10), x + U(24), y + U(38), imax(1, U(2)), 0x212529);
+        fill_rect(x + U(20), y + U(20), imax(2, U(3)), imax(2, U(3)), 0xffffff);
+        break;
+    case IC_TIMER:
+        disc(x + U(24), y + U(27), U(17), 0x3b414d);
+        disc(x + U(24), y + U(27), U(14), 0xf8f9fa);
+        fill_rect(x + U(21), y + U(4), U(6), U(5), 0x3b414d);
+        line(x + U(24), y + U(27), x + U(24), y + U(17), imax(2, U(2)), 0xe03131);
+        line(x + U(24), y + U(27), x + U(31), y + U(30), imax(2, U(2)), 0x212529);
+        break;
+    case IC_CHESS:
+        round_rect(x + U(3), y + U(3), U(42), U(42), 4, 0x769656);
+        fill_rect(x + U(3), y + U(3), U(21), U(21), 0xeeeed2);
+        fill_rect(x + U(24), y + U(24), U(21), U(21), 0xeeeed2);
+        disc(x + U(24), y + U(15), imax(2, U(6)), 0x222222);
+        fill_rect(x + U(20), y + U(20), U(8), U(12), 0x222222);
+        fill_rect(x + U(14), y + U(32), U(20), U(6), 0x222222);
         break;
     default:
         round_rect(x + U(6), y + U(6), U(36), U(36), 6, 0x748ffc);
@@ -800,9 +1237,43 @@ static int g_vt_w, g_vt_h;
 static size_t g_vt_crow, g_vt_ccol;
 extern size_t terminal_row, terminal_column;
 
+static const char *const TERM_STYLES[8] = { "theme", "classic", "amber", "light", "solarized", "dracula", "nord", "gruvbox" };
+static const char *const TERM_LABELS[8] = { "Theme", "Classic", "Amber", "Light", "Solarized", "Dracula", "Nord", "Gruvbox" };
+
+static void term_prompt_str(char *out, int n)
+{
+    switch (C.term_prompt) {
+    case 1: put_str(out, n, "$ "); break;
+    case 2: put_str(out, n, "> "); break;
+    case 3: put_str(out, n, "radium> "); break;
+    default: snprintf(out, (size_t)n, "%s@radium%s ", users_current_name(), users_is_root() ? "#" : "$"); break;
+    }
+}
+
+// An echoed command in the scrollback: coloured prompt, then the command in the normal colour.
+static void term_echo(win_t *w, const char *pr, const char *cmd)
+{
+    int row = w->nl - 1, c0 = w->col, pl = (int)strlen(pr), cl = (int)strlen(cmd);
+    term_puts(w, pr);
+    term_puts(w, cmd);
+    if (w->nl - 1 != row || w->col != c0 + pl + cl) return;      // the line wrapped: leave the colours alone
+    for (int i = 0; i < pl; i++) w->lattr[row][c0 + i] = TA_PROMPT;
+    for (int i = pl; i < pl + cl; i++) w->lattr[row][c0 + i] = 0;
+}
+
+static void term_cursor_draw(int x, int y, unsigned char ch)
+{
+    switch (C.term_cursor) {
+    case 1: glyph(x, y, ch, TH.term_fg, TH.term_bg); fill_rect(x, y + CH - 3, CW, 2, TH.accent); break;
+    case 2: glyph(x, y, ch, TH.term_fg, TH.term_bg); fill_rect(x, y + 1, 2, CH - 2, TH.accent); break;
+    default: glyph(x, y, ch, TH.term_bg, TH.accent); break;
+    }
+}
+
 // ---- application renderers (each draws a whole content rectangle; the clip does the rest) --------------------------------
 
 static void render_gfx(win_t *w);
+static void render_web(win_t *w, bool focused);
 
 static void render_term(win_t *w, bool focused)
 {
@@ -818,7 +1289,7 @@ static void render_term(win_t *w, bool focused)
                 uint8_t a = (uint8_t)(cell >> 8);
                 uint32_t bg = attr_bg(a, TH.term_bg);
                 int gx = ox + x * CW, gy = oy + y * CH;
-                if ((size_t)y == g_vt_crow && (size_t)x == g_vt_ccol) { glyph(gx, gy, ch ? ch : ' ', TH.term_bg, TH.accent); continue; }
+                if ((size_t)y == g_vt_crow && (size_t)x == g_vt_ccol) { term_cursor_draw(gx, gy, ch ? ch : ' '); continue; }
                 if ((ch == ' ' || ch == 0) && bg == TH.term_bg) continue;
                 glyph(gx, gy, ch ? ch : ' ', attr_fg(a), bg);
             }
@@ -826,27 +1297,34 @@ static void render_term(win_t *w, bool focused)
         return;
     }
     bool prompt = w->type == W_TERM;
-    int outrows = rows - (prompt ? 1 : 0);
-    if (outrows < 1) return;
-    int start = w->nl - outrows - w->scroll;
+    if (rows < 1) return;
+    // The prompt is the last line of the text itself (a virtual line after the output when the output ends mid-line).
+    int last = w->nl - 1;
+    int pl = (prompt && w->lines[last][0]) ? w->nl : last;
+    int total = prompt ? pl + 1 : w->nl;
+    int start = total - rows - w->scroll;
     if (start < 0) start = 0;
-    for (int i = start; i < w->nl && i < start + outrows; i++) {
+    int stop = prompt ? pl : w->nl;
+    for (int i = start; i < stop && i < start + rows; i++) {
         const char *s = w->lines[i];
         bool plain = true;
         for (int k = 0; s[k]; k++) if (w->lattr[i][k] != 0x07 && w->lattr[i][k] != 0) { plain = false; break; }
         if (plain) text(ox, oy + (i - start) * CH, s, line_color(s), TH.term_bg, cols);
         else text_attr(ox, oy + (i - start) * CH, s, w->lattr[i], TH.term_bg, cols);
     }
-    if (prompt) {
-        int py = oy + (rows - 1) * CH;
-        fill_rect(c.x, py, c.w, c.h - (rows - 1) * CH, TH.term_input);
-        text(ox, py, "$ ", 0x69db7c, TH.term_input, 2);
-        int room = cols - 3;
-        int off = w->inlen > room ? w->inlen - room : 0;
-        text(ox + 2 * CW, py, w->input + off, TH.term_fg, TH.term_input, room);
-        if (focused) fill_rect(ox + (2 + w->inlen - off) * CW, py + 2, CW, CH - 4, TH.accent);
+    if (prompt && pl >= start && pl < start + rows) {
+        int py = oy + (pl - start) * CH;
+        char pr[40];
+        term_prompt_str(pr, sizeof(pr));
+        int plen = (int)strlen(pr), room = imax(4, cols - plen - 1);
+        int off = w->icur > room ? w->icur - room : 0;
+        text(ox, py, pr, term_prompt_col(), TH.term_bg, plen);
+        text(ox + plen * CW, py, w->input + off, TH.term_fg, TH.term_bg, room);
+        int cx = ox + (plen + w->icur - off) * CW;
+        if (focused) term_cursor_draw(cx, py, w->icur < w->inlen ? (unsigned char)w->input[w->icur] : ' ');
+        else frame_rect(cx, py + 1, CW, CH - 2, TH.dim);
     }
-    scrollbar(c.x + c.w - 8, c.y, outrows * CH, w->nl, outrows, start);
+    scrollbar(c.x + c.w - 8, c.y, rows * CH, total, rows, start);
 }
 
 static void bar_graph(int x, int y, int w, int h, const uint8_t *hist, int n, uint32_t col)
@@ -968,6 +1446,10 @@ static void render_clock(win_t *w)
 static void render_files(win_t *w);
 static void render_gfx(win_t *w);
 static void launch_program(const char *cmd, const char *title);
+static void scroll_window(int wi, int lines_n);
+static int open_web(void);
+static void web_release(win_t *w);
+static void web_scroll(int wi, int lines_n);
 static void win_set_fullscreen(int wi, bool on);
 static void mouse_byte(uint8_t b);
 static void render_tasks(win_t *w);
@@ -1573,6 +2055,1840 @@ static void edit_scroll(win_t *w, int lines_n)
     damage_content(w);
 }
 
+// ---- Paint ----------------------------------------------------------------------------------------------------------------------
+
+// The canvas lives on the heap and is allocated on first Paint use: ~790 KB of static
+// storage would bloat the kernel image of every build, including ones that never open Paint.
+static uint32_t *g_paint;
+static uint32_t g_pt_col = 0x000000;
+static int g_pt_size = 3, g_pt_tool, g_pt_lx, g_pt_ly;      // tool: 0 pen, 1 eraser
+static const uint32_t PT_PAL[12] = { 0x000000, 0xffffff, 0x868e96, 0xe03131, 0xf76707, 0xfab005, 0x51cf66, 0x22b8cf, 0x4c6ef5, 0xae3ec9, 0xe64980, 0x7f5539 };
+static const int PT_SIZES[4] = { 1, 3, 6, 12 };
+
+static void paint_clear(void) { for (int i = 0; i < PT_W * PT_H; i++) g_paint[i] = 0xffffff; }
+
+static bool paint_canvas(void)
+{
+    if (g_paint) return true;
+    g_paint = malloc((size_t)PT_W * PT_H * sizeof(uint32_t));
+    if (!g_paint) return false;
+    paint_clear();
+    return true;
+}
+static void paint_origin(const win_t *w, int *ox, int *oy) { rect_t c = content_rect(w); *ox = c.x + 8; *oy = c.y + PT_BAR + 6; }
+static rect_t paint_swatch(const win_t *w, int i) { rect_t c = content_rect(w); rect_t r = { c.x + 8 + (i % 6) * 22, c.y + 4 + (i / 6) * 20, 18, 18 }; return r; }
+
+static rect_t paint_btn(const win_t *w, int i)               // 0 pen, 1 eraser, 2..5 sizes, 6 clear, 7 save
+{
+    static const int X[8] = { 150, 196, 260, 288, 316, 344, 384, 440 }, W[8] = { 40, 56, 24, 24, 24, 24, 50, 50 };
+    rect_t c = content_rect(w);
+    rect_t r = { c.x + X[i], c.y + 9, W[i], 26 };
+    return r;
+}
+
+static void paint_stamp(int cx, int cy, int r, uint32_t col)
+{
+    int h = r / 2, r2 = r * r / 4;
+    for (int y = cy - h; y <= cy + h; y++)
+        for (int x = cx - h; x <= cx + h; x++) {
+            if (x < 0 || x >= PT_W || y < 0 || y >= PT_H) continue;
+            if (r > 2 && (x - cx) * (x - cx) + (y - cy) * (y - cy) > r2) continue;
+            g_paint[y * PT_W + x] = col;
+        }
+}
+
+static void paint_line(int x0, int y0, int x1, int y1, int r, uint32_t col)
+{
+    int dx = iabs(x1 - x0), dy = iabs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy;
+    for (;;) {
+        paint_stamp(x0, y0, r, col);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void paint_damage(const win_t *w, int x0, int y0, int x1, int y1)
+{
+    int ox, oy, r = g_pt_size + 2;
+    paint_origin(w, &ox, &oy);
+    damage(ox + imin(x0, x1) - r, oy + imin(y0, y1) - r, iabs(x1 - x0) + 2 * r + 1, iabs(y1 - y0) + 2 * r + 1);
+}
+
+static void le32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+// 24-bit BMP, written 10 rows at a time (the 'png' command and the Files app open .bmp files).
+static void paint_save(void)
+{
+    enum { ROWS = 10 };                                       // small heap scratch instead of ~50 KB of static BSS
+    uint8_t *buf = malloc(54 + PT_W * 3 * ROWS);
+    if (!buf) { flash("not enough memory to save the picture"); return; }
+    char path[128], m[64];
+    int n;
+    if (!avfs_is_directory(g_desk_dir) && avfs_create_dir(g_desk_dir) != 0) { flash("cannot create the Desktop folder"); return; }
+    for (n = 1; n < 100; n++) { snprintf(path, sizeof(path), "%s/paint%d.bmp", g_desk_dir, n); if (!avfs_file_exists(path)) break; }
+    if (n == 100) { flash("too many pictures on the desktop"); return; }
+    const int rowb = PT_W * 3;                                // a multiple of 4: no row padding
+    memset(buf, 0, 54);
+    buf[0] = 'B'; buf[1] = 'M';
+    le32(buf + 2, (uint32_t)(54 + rowb * PT_H)); le32(buf + 10, 54); le32(buf + 14, 40);
+    le32(buf + 18, PT_W); le32(buf + 22, PT_H); buf[26] = 1; buf[28] = 24;
+    le32(buf + 34, (uint32_t)(rowb * PT_H)); le32(buf + 38, 2835); le32(buf + 42, 2835);
+    int o = 54, rows_in = 0;
+    bool first = true;
+    for (int y = PT_H - 1; y >= 0; y--) {
+        for (int x = 0; x < PT_W; x++) {
+            uint32_t p = g_paint[y * PT_W + x];
+            buf[o++] = (uint8_t)(p & 255); buf[o++] = (uint8_t)((p >> 8) & 255); buf[o++] = (uint8_t)((p >> 16) & 255);
+        }
+        if (++rows_in == ROWS || y == 0) {
+            int rc = first ? avfs_save_file(path, buf, (uint32_t)o, true) : avfs_append_file(path, buf, (uint32_t)o);
+            if (rc != 0) { free(buf); flash("could not save the picture"); return; }
+            first = false; o = 0; rows_in = 0;
+        }
+    }
+    free(buf);
+    snprintf(m, sizeof(m), "saved paint%d.bmp on the Desktop", n);
+    flash(m);
+    desktop_icons_refresh();
+    damage_icons();
+}
+
+static void render_paint(win_t *w)
+{
+    rect_t c = content_rect(w);
+    fill_rect(c.x, c.y, c.w, c.h, TH.bg);
+    fill_rect(c.x, c.y + PT_BAR - 1, c.w, 1, TH.line);
+    for (int i = 0; i < 12; i++) {
+        rect_t r = paint_swatch(w, i);
+        frame_rect(r.x - 1, r.y - 1, r.w + 2, r.h + 2, PT_PAL[i] == g_pt_col && g_pt_tool == 0 ? TH.accent : TH.line);
+        fill_rect(r.x, r.y, r.w, r.h, PT_PAL[i]);
+    }
+    static const char *const LAB[8] = { "Pen", "Eraser", "1", "3", "6", "12", "Clear", "Save" };
+    for (int i = 0; i < 8; i++) {
+        rect_t r = paint_btn(w, i);
+        bool on = (i == 0 && g_pt_tool == 0) || (i == 1 && g_pt_tool == 1) || (i >= 2 && i <= 5 && g_pt_size == PT_SIZES[i - 2]);
+        uint32_t bg = on ? TH.accent : TH.line;
+        round_rect(r.x, r.y, r.w, r.h, 3, bg);
+        text_center(r.x, r.w, r.y + (r.h - CH) / 2, LAB[i], on ? TH.accent_tx : TH.fg, bg, 8);
+    }
+    int ox, oy;
+    paint_origin(w, &ox, &oy);
+    frame_rect(ox - 1, oy - 1, PT_W + 2, PT_H + 2, TH.line);
+    int x0 = imax(ox, clip_x0), x1 = imin(ox + PT_W, clip_x1), y0 = imax(oy, clip_y0), y1 = imin(oy + PT_H, clip_y1);
+    if (x1 > x0)
+        for (int y = y0; y < y1; y++) memcpy(g_store + y * SW + x0, g_paint + (y - oy) * PT_W + (x0 - ox), (size_t)(x1 - x0) * 4);
+}
+
+// True when a stroke starts (the caller then turns the mouse drag into DRAG_PAINT).
+static bool paint_click(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    rect_t c = content_rect(w);
+    if (my < c.y + PT_BAR) {
+        for (int i = 0; i < 12; i++) if (rect_has(paint_swatch(w, i), mx, my)) { g_pt_col = PT_PAL[i]; g_pt_tool = 0; damage_content(w); return false; }
+        for (int i = 0; i < 8; i++) {
+            if (!rect_has(paint_btn(w, i), mx, my)) continue;
+            if (i == 0) g_pt_tool = 0;
+            else if (i == 1) g_pt_tool = 1;
+            else if (i <= 5) g_pt_size = PT_SIZES[i - 2];
+            else if (i == 6) paint_clear();
+            else paint_save();
+            damage_content(w);
+            return false;
+        }
+        return false;
+    }
+    int ox, oy;
+    paint_origin(w, &ox, &oy);
+    int x = mx - ox, y = my - oy;
+    if (x < 0 || y < 0 || x >= PT_W || y >= PT_H) return false;
+    g_pt_lx = x; g_pt_ly = y;
+    paint_stamp(x, y, g_pt_size, g_pt_tool ? 0xffffff : g_pt_col);
+    paint_damage(w, x, y, x, y);
+    return true;
+}
+
+static void paint_drag(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    int ox, oy;
+    paint_origin(w, &ox, &oy);
+    int x = imax(0, imin(PT_W - 1, mx - ox)), y = imax(0, imin(PT_H - 1, my - oy));
+    paint_line(g_pt_lx, g_pt_ly, x, y, g_pt_size, g_pt_tool ? 0xffffff : g_pt_col);
+    paint_damage(w, g_pt_lx, g_pt_ly, x, y);
+    g_pt_lx = x; g_pt_ly = y;
+}
+
+static void paint_key(int wi, uint8_t code, bool ext)
+{
+    (void)wi;
+    if (!ext && g_ctrl && code == 0x1F) paint_save();                 // Ctrl+S
+}
+
+// ---- Minesweeper ----------------------------------------------------------------------------------------------------------------
+
+static const uint32_t MS_COL[8] = { 0x4c6ef5, 0x2f9e44, 0xe03131, 0x364fc7, 0xc92a2a, 0x1098ad, 0xfab005, 0x868e96 };
+
+static void mines_new(win_t *w) { memset(w->ms, 0, sizeof(w->ms)); w->ms_state = 0; w->ms_t0 = w->ms_t1 = 0; }
+static rect_t mines_face(const win_t *w) { rect_t c = content_rect(w); rect_t r = { c.x + c.w / 2 - 20, c.y + 6, 40, 30 }; return r; }
+
+static int mines_adj(const win_t *w, int x, int y)
+{
+    int n = 0;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            int nx = x + dx, ny = y + dy;
+            if ((dx || dy) && nx >= 0 && nx < MS_W && ny >= 0 && ny < MS_H) n += w->ms[ny * MS_W + nx] & 1;
+        }
+    return n;
+}
+
+// Mines are laid on the first click so that it (and its neighbours) are always safe.
+static void mines_place(win_t *w, int sx, int sy)
+{
+    uint32_t s = now_ms() * 2654435761u + 12345u;
+    if (!s) s = 1;
+    for (int placed = 0; placed < MS_N; ) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        int i = (int)(s % (MS_W * MS_H)), x = i % MS_W, y = i / MS_W;
+        if ((iabs(x - sx) <= 1 && iabs(y - sy) <= 1) || (w->ms[i] & 1)) continue;
+        w->ms[i] |= 1;
+        placed++;
+    }
+}
+
+static void mines_open(win_t *w, int x, int y)
+{
+    uint8_t q[MS_W * MS_H];
+    int qn = 0, i = y * MS_W + x;
+    if (w->ms[i] & 6) return;
+    w->ms[i] |= 2;
+    q[qn++] = (uint8_t)i;
+    while (qn) {
+        int c = q[--qn], cx = c % MS_W, cy = c / MS_W;
+        if ((w->ms[c] & 1) || mines_adj(w, cx, cy)) continue;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = cx + dx, ny = cy + dy;
+                if (nx < 0 || nx >= MS_W || ny < 0 || ny >= MS_H) continue;
+                int j = ny * MS_W + nx;
+                if (w->ms[j] & 6) continue;
+                w->ms[j] |= 2;
+                q[qn++] = (uint8_t)j;
+            }
+    }
+}
+
+static bool mines_won(const win_t *w) { for (int i = 0; i < MS_W * MS_H; i++) if (!(w->ms[i] & 3)) return false; return true; }
+
+static bool mines_cell(const win_t *w, int mx, int my, int *gx, int *gy)
+{
+    rect_t c = content_rect(w);
+    int ox = c.x + (c.w - MS_W * MS_C) / 2, oy = c.y + MS_HEAD;
+    if (mx < ox || my < oy) return false;
+    *gx = (mx - ox) / MS_C; *gy = (my - oy) / MS_C;
+    return *gx < MS_W && *gy < MS_H;
+}
+
+static void mines_click(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    int gx, gy;
+    if (rect_has(mines_face(w), mx, my)) { mines_new(w); damage_content(w); return; }
+    if (w->ms_state >= 2 || !mines_cell(w, mx, my, &gx, &gy)) return;
+    int i = gy * MS_W + gx;
+    if (w->ms[i] & 6) return;                                 // open or flagged
+    if (w->ms_state == 0) { mines_place(w, gx, gy); w->ms_state = 1; w->ms_t0 = now_ms(); }
+    if (w->ms[i] & 1) { w->ms_state = 3; w->ms_t1 = now_ms(); }
+    else {
+        mines_open(w, gx, gy);
+        if (mines_won(w)) {
+            w->ms_state = 2; w->ms_t1 = now_ms();
+            for (int k = 0; k < MS_W * MS_H; k++) if (w->ms[k] & 1) w->ms[k] |= 4;
+        }
+    }
+    damage_content(w);
+}
+
+static void mines_rclick(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    int gx, gy;
+    if (w->ms_state >= 2 || !mines_cell(w, mx, my, &gx, &gy)) return;
+    int i = gy * MS_W + gx;
+    if (w->ms[i] & 2) return;
+    w->ms[i] ^= 4;
+    damage_content(w);
+}
+
+static void mines_key(int wi, uint8_t code, bool ext)
+{
+    if (!ext && code == 0x3C) { mines_new(&g_win[wi]); damage_content(&g_win[wi]); }       // F2: new game
+}
+
+static void render_mines(win_t *w)
+{
+    rect_t c = content_rect(w);
+    fill_rect(c.x, c.y, c.w, c.h, TH.bg);
+    int ox = c.x + (c.w - MS_W * MS_C) / 2, oy = c.y + MS_HEAD, flags = 0;
+    for (int i = 0; i < MS_W * MS_H; i++) if (w->ms[i] & 4) flags++;
+    char b[16];
+    int left = MS_N - flags;
+    round_rect(c.x + 12, c.y + 8, 64, 28, 4, TH.field);
+    if (left < 0) { b[0] = '-'; put_uint(b + 1, (uint32_t)(-left)); } else put_uint(b, (uint32_t)left);
+    text_center(c.x + 12, 64, c.y + 14, b, TH.bad, TH.field, 6);
+    rect_t f = mines_face(w);
+    round_rect(f.x, f.y, f.w, f.h, 4, TH.line);
+    text_center(f.x, f.w, f.y + 7, w->ms_state == 3 ? "X(" : (w->ms_state == 2 ? "B)" : ":)"), TH.fg, TH.line, 2);
+    uint32_t t = w->ms_state == 1 ? now_ms() - w->ms_t0 : (w->ms_state >= 2 ? w->ms_t1 - w->ms_t0 : 0);
+    t /= 1000;
+    if (t > 999) t = 999;
+    put_uint(b, t);
+    round_rect(c.x + c.w - 76, c.y + 8, 64, 28, 4, TH.field);
+    text_center(c.x + c.w - 76, 64, c.y + 14, b, TH.accent, TH.field, 6);
+    bool lost = w->ms_state == 3;
+    for (int y = 0; y < MS_H; y++)
+        for (int x = 0; x < MS_W; x++) {
+            uint8_t v = w->ms[y * MS_W + x];
+            int px = ox + x * MS_C, py = oy + y * MS_C;
+            if ((v & 2) || (lost && (v & 1))) {
+                fill_rect(px, py, MS_C - 1, MS_C - 1, TH.field);
+                if (v & 1) disc(px + MS_C / 2 - 1, py + MS_C / 2 - 1, 6, lost && !(v & 2) ? TH.fg : TH.bad);
+                else {
+                    int n = mines_adj(w, x, y);
+                    if (n) { char d[2] = { (char)('0' + n), 0 }; text(px + 8, py + 4, d, MS_COL[n - 1], TH.field, 1); }
+                }
+            } else {
+                round_rect(px, py, MS_C - 1, MS_C - 1, 3, mix(TH.line, 0xffffff, 12));
+                if (v & 4) { fill_rect(px + 11, py + 5, 2, 12, TH.fg); fill_rect(px + 6, py + 5, 6, 5, TH.bad); fill_rect(px + 7, py + 17, 10, 2, TH.fg); }
+            }
+        }
+    frame_rect(ox - 1, oy - 1, MS_W * MS_C + 1, MS_H * MS_C + 1, TH.line);
+}
+
+// ---- Timer (stopwatch and countdown) -----------------------------------------------------------------------------------------------
+
+static uint32_t timer_elapsed(const win_t *w) { return w->t_acc + (w->tr_run ? now_ms() - w->t_start : 0); }
+static rect_t timer_tab(const win_t *w, int i) { rect_t c = content_rect(w); rect_t r = { c.x + 10 + i * 110, c.y + 8, 100, 26 }; return r; }
+static rect_t timer_btn(const win_t *w, int i) { rect_t c = content_rect(w); rect_t r = { c.x + 12 + i * 98, c.y + 108, 90, 30 }; return r; }
+static rect_t timer_pre(const win_t *w, int i) { rect_t c = content_rect(w); rect_t r = { c.x + 12 + i * 66, c.y + 148, 60, 26 }; return r; }
+static const int TM_PRE[4] = { 60000, 300000, 600000, -60000 };
+
+static void timer_action(win_t *w, int i)
+{
+    uint32_t now = now_ms();
+    if (i == 0) {
+        if (w->tr_run) { w->t_acc += now - w->t_start; w->tr_run = false; }
+        else {
+            if (w->tmo == 1) {
+                if (w->t_target == 0) { flash("add some time first"); return; }
+                if (w->t_acc >= w->t_target) w->t_acc = 0;       // finished: start again
+            }
+            w->t_start = now;
+            w->tr_run = true;
+        }
+    } else if (i == 1) {
+        if (w->tmo == 0) {
+            if (!w->tr_run) return;
+            if (w->nlap == 8) { memmove(&w->lap[0], &w->lap[1], 7 * sizeof(w->lap[0])); w->nlap = 7; }
+            w->lap[w->nlap++] = timer_elapsed(w);
+        } else { w->t_target = 0; w->t_acc = 0; w->tr_run = false; }
+    } else { w->t_acc = 0; w->tr_run = false; w->nlap = 0; }
+    damage_content(w);
+}
+
+static void timer_fmt(const win_t *w, uint32_t e, char *d)
+{
+    if (w->tmo == 0) { put_2d(d, (e / 60000) % 100); d[2] = ':'; put_2d(d + 3, (e / 1000) % 60); d[5] = '.'; put_2d(d + 6, (e / 10) % 100); }
+    else { uint32_t rem = e >= w->t_target ? 0 : (w->t_target - e + 999) / 1000; fmt_hms(d, rem); }
+}
+
+static void render_timer(win_t *w)
+{
+    rect_t c = content_rect(w);
+    fill_rect(c.x, c.y, c.w, c.h, TH.bg);
+    static const char *const TAB[2] = { "Stopwatch", "Countdown" };
+    for (int i = 0; i < 2; i++) {
+        rect_t r = timer_tab(w, i);
+        bool sel = i == w->tmo;
+        uint32_t bg = sel ? TH.accent : TH.line;
+        round_rect(r.x, r.y, r.w, r.h, 4, bg);
+        text_center(r.x, r.w, r.y + (r.h - CH) / 2, TAB[i], sel ? TH.accent_tx : TH.fg, bg, 12);
+    }
+    char t[16];
+    uint32_t e = timer_elapsed(w);
+    timer_fmt(w, e, t);
+    int n = (int)strlen(t), s = imax(1, imin(4, (c.w - 20) / (n * 8)));
+    bool done = w->tmo == 1 && w->t_target > 0 && e >= w->t_target;
+    for (int i = 0; i < n; i++) glyph_big(c.x + (c.w - n * 8 * s) / 2 + i * 8 * s, c.y + 54, (unsigned char)t[i], s, done ? TH.bad : TH.accent, TH.bg);
+    const char *b0 = w->tr_run ? (w->tmo == 0 ? "Stop" : "Pause") : "Start";
+    const char *lab[3] = { b0, w->tmo == 0 ? "Lap" : "Clear", "Reset" };
+    for (int i = 0; i < 3; i++) {
+        rect_t r = timer_btn(w, i);
+        uint32_t bg = i == 0 ? (w->tr_run ? TH.warn : TH.good) : TH.line;
+        round_rect(r.x, r.y, r.w, r.h, 4, bg);
+        text_center(r.x, r.w, r.y + (r.h - CH) / 2, lab[i], i == 0 ? 0xffffff : TH.fg, bg, 10);
+    }
+    if (w->tmo == 1) {
+        static const char *const PL[4] = { "+1m", "+5m", "+10m", "-1m" };
+        for (int i = 0; i < 4; i++) {
+            rect_t r = timer_pre(w, i);
+            round_rect(r.x, r.y, r.w, r.h, 4, TH.line);
+            text_center(r.x, r.w, r.y + (r.h - CH) / 2, PL[i], TH.fg, TH.line, 6);
+        }
+    } else {
+        for (int i = 0; i < w->nlap; i++) {
+            char lt[16], row[40];
+            timer_fmt(w, w->lap[i], lt);
+            snprintf(row, sizeof(row), "Lap %d   %s", i + 1, lt);
+            text(c.x + 16, c.y + 150 + i * CH, row, TH.fg, TH.bg, 30);
+        }
+    }
+}
+
+static void timer_click(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    for (int i = 0; i < 2; i++)
+        if (rect_has(timer_tab(w, i), mx, my)) {
+            if (w->tmo != i) { w->tmo = i; w->t_acc = 0; w->tr_run = false; w->nlap = 0; damage_content(w); }
+            return;
+        }
+    for (int i = 0; i < 3; i++) if (rect_has(timer_btn(w, i), mx, my)) { timer_action(w, i); return; }
+    if (w->tmo == 1)
+        for (int i = 0; i < 4; i++)
+            if (rect_has(timer_pre(w, i), mx, my)) {
+                long t = (long)w->t_target + TM_PRE[i];
+                if (t < 0) t = 0;
+                if (t > 359999000L) t = 359999000L;
+                w->t_target = (uint32_t)t;
+                damage_content(w);
+                return;
+            }
+}
+
+static void timer_key(int wi, uint8_t code, bool ext)
+{
+    if (ext) return;
+    win_t *w = &g_win[wi];
+    if (code == 0x39) timer_action(w, 0);              // Space: start / stop
+    else if (code == 0x26) timer_action(w, 1);         // L: lap
+    else if (code == 0x13) timer_action(w, 2);         // R: reset
+}
+
+// Called every 100 ms by the main loop: keeps the running timers and the minesweeper clock moving.
+static void apps_tick(void)
+{
+    for (int i = 0; i < MAX_WIN; i++) {
+        win_t *w = &g_win[i];
+        if (!w->used) continue;
+        if (w->type == W_TIMER && w->tr_run) {
+            if (w->tmo == 1 && timer_elapsed(w) >= w->t_target) { w->tr_run = false; w->t_acc = w->t_target; flash("Timer finished"); }
+            if (win_visible(i)) damage_content(w);
+        } else if (w->type == W_MINES && w->ms_state == 1 && win_visible(i)) {
+            rect_t c = content_rect(w);
+            damage(c.x, c.y, c.w, MS_HEAD);
+        }
+    }
+}
+
+// ---- Chess ----------------------------------------------------------------------------------------------------------------------
+// Board: index = rank_row * 8 + file, row 0 is rank 8 (a8 = 0, h1 = 63). Pieces: +white / -black, 1 P, 2 N, 3 B, 4 R, 5 Q, 6 K.
+
+#define CH_CELL 54
+#define CH_MAXMV 300
+#define CH_MAXPLY 40
+#define CH_MAXGAME 400
+#define CH_MATE 30000
+#define CH_INF 32000
+
+enum { PC_P = 1, PC_N, PC_B, PC_R, PC_Q, PC_K };
+
+typedef struct { int8_t b[64]; uint8_t side, castle; int8_t ep; uint8_t half; } cpos_t;   // castle: 1 WK, 2 WQ, 4 BK, 8 BQ
+typedef uint16_t cmove_t;
+#define CM(f, t, p) ((cmove_t)((f) | ((t) << 6) | ((p) << 12)))
+#define CM_FROM(m) ((m) & 63)
+#define CM_TO(m) (((m) >> 6) & 63)
+#define CM_PROMO(m) (((m) >> 12) & 7)
+
+typedef struct {
+    cpos_t pos;
+    int sel, level, human, state, nundo, nlegal;        // state: 0 playing, 1 white won, 2 black won, 3 draw
+    int mode;                                           // 0 play, 1 train an opening
+    bool check, has_last, ai_pending, thinking, flip, coach, book, tr_done;
+    cmove_t last;
+    uint32_t ai_t;
+    char why[24];
+    int opn_cur, opn_next, nopn_h;                      // opening played / heading for (indices into OPENINGS, -1 none)
+    struct { int ply, idx; } opn_h[10];                 // the openings the game has passed through
+    int tr_open, tr_ok, tr_bad, tr_miss;                // trainer: opening, correct moves, mistakes, misses on this move
+    int hint_from, hint_to;
+    int score_cp, depth_done, msg_col;                  // last search (white's view, centipawns), colour of the message line
+    bool have_score;
+    char ai_msg[48], coach_msg[64], tr_msg[48];
+    cmove_t legal[CH_MAXMV];
+    cmove_t umv[CH_MAXGAME];
+    cpos_t undo[CH_MAXGAME];
+} chess_t;
+
+static chess_t g_ch;
+static bool g_ch_ready;
+static uint64_t g_ch_hist[CH_MAXGAME + 2];
+static int g_ch_nh;
+
+static const int8_t CH_KN[8][2] = { { -2, -1 }, { -2, 1 }, { -1, -2 }, { -1, 2 }, { 1, -2 }, { 1, 2 }, { 2, -1 }, { 2, 1 } };
+static const int8_t CH_KG[8][2] = { { -1, -1 }, { -1, 0 }, { -1, 1 }, { 0, -1 }, { 0, 1 }, { 1, -1 }, { 1, 0 }, { 1, 1 } };
+static const int CH_VAL[7] = { 0, 100, 320, 330, 500, 900, 0 };
+
+// Piece-square tables (white's view, rank 8 first); black uses the vertically mirrored square.
+static const int8_t CH_PST[6][64] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0,   50, 50, 50, 50, 50, 50, 50, 50,   10, 10, 20, 30, 30, 20, 10, 10,   5, 5, 10, 25, 25, 10, 5, 5,
+      0, 0, 0, 20, 20, 0, 0, 0,   5, -5, -10, 0, 0, -10, -5, 5,   5, 10, 10, -20, -20, 10, 10, 5,   0, 0, 0, 0, 0, 0, 0, 0 },
+    { -50, -40, -30, -30, -30, -30, -40, -50,   -40, -20, 0, 0, 0, 0, -20, -40,   -30, 0, 10, 15, 15, 10, 0, -30,   -30, 5, 15, 20, 20, 15, 5, -30,
+      -30, 0, 15, 20, 20, 15, 0, -30,   -30, 5, 10, 15, 15, 10, 5, -30,   -40, -20, 0, 5, 5, 0, -20, -40,   -50, -40, -30, -30, -30, -30, -40, -50 },
+    { -20, -10, -10, -10, -10, -10, -10, -20,   -10, 0, 0, 0, 0, 0, 0, -10,   -10, 0, 5, 10, 10, 5, 0, -10,   -10, 5, 5, 10, 10, 5, 5, -10,
+      -10, 0, 10, 10, 10, 10, 0, -10,   -10, 10, 10, 10, 10, 10, 10, -10,   -10, 5, 0, 0, 0, 0, 5, -10,   -20, -10, -10, -10, -10, -10, -10, -20 },
+    { 0, 0, 0, 0, 0, 0, 0, 0,   5, 10, 10, 10, 10, 10, 10, 5,   -5, 0, 0, 0, 0, 0, 0, -5,   -5, 0, 0, 0, 0, 0, 0, -5,
+      -5, 0, 0, 0, 0, 0, 0, -5,   -5, 0, 0, 0, 0, 0, 0, -5,   -5, 0, 0, 0, 0, 0, 0, -5,   0, 0, 0, 5, 5, 0, 0, 0 },
+    { -20, -10, -10, -5, -5, -10, -10, -20,   -10, 0, 0, 0, 0, 0, 0, -10,   -10, 0, 5, 5, 5, 5, 0, -10,   -5, 0, 5, 5, 5, 5, 0, -5,
+      0, 0, 5, 5, 5, 5, 0, -5,   -10, 5, 5, 5, 5, 5, 0, -10,   -10, 0, 5, 0, 0, 0, 0, -10,   -20, -10, -10, -5, -5, -10, -10, -20 },
+    { -30, -40, -40, -50, -50, -40, -40, -30,   -30, -40, -40, -50, -50, -40, -40, -30,   -30, -40, -40, -50, -50, -40, -40, -30,   -30, -40, -40, -50, -50, -40, -40, -30,
+      -20, -30, -30, -40, -40, -30, -30, -20,   -10, -20, -20, -20, -20, -20, -20, -10,   20, 20, 0, 0, 0, 0, 20, 20,   20, 30, 10, 0, 0, 10, 30, 20 },
+};
+static const int8_t CH_KEG[64] = {
+    -50, -40, -30, -20, -20, -30, -40, -50,   -30, -20, -10, 0, 0, -10, -20, -30,   -30, -10, 20, 30, 30, 20, -10, -30,   -30, -10, 30, 40, 40, 30, -10, -30,
+    -30, -10, 30, 40, 40, 30, -10, -30,   -30, -10, 20, 30, 30, 20, -10, -30,   -30, -30, 0, 0, 0, 0, -30, -30,   -50, -30, -30, -30, -30, -30, -30, -50 };
+
+// ---- rules ----
+
+static bool ch_attacked(const cpos_t *p, int sq, int by)         // is sq attacked by side `by`?
+{
+    int r = sq >> 3, f = sq & 7, s = by == 0 ? 1 : -1, pr = by == 0 ? r + 1 : r - 1;
+    if (pr >= 0 && pr < 8) {
+        if (f > 0 && p->b[pr * 8 + f - 1] == s * PC_P) return true;
+        if (f < 7 && p->b[pr * 8 + f + 1] == s * PC_P) return true;
+    }
+    for (int i = 0; i < 8; i++) {
+        int nr = r + CH_KN[i][0], nf = f + CH_KN[i][1];
+        if (nr >= 0 && nr < 8 && nf >= 0 && nf < 8 && p->b[nr * 8 + nf] == s * PC_N) return true;
+        nr = r + CH_KG[i][0]; nf = f + CH_KG[i][1];
+        if (nr >= 0 && nr < 8 && nf >= 0 && nf < 8 && p->b[nr * 8 + nf] == s * PC_K) return true;
+    }
+    for (int i = 0; i < 8; i++) {
+        int dr = CH_KG[i][0], df = CH_KG[i][1], nr = r + dr, nf = f + df;
+        bool diag = dr && df;
+        while (nr >= 0 && nr < 8 && nf >= 0 && nf < 8) {
+            int pc = p->b[nr * 8 + nf];
+            if (pc) {
+                if (pc == s * PC_Q || pc == s * (diag ? PC_B : PC_R)) return true;
+                break;
+            }
+            nr += dr; nf += df;
+        }
+    }
+    return false;
+}
+
+static bool ch_in_check(const cpos_t *p, int side)
+{
+    int k = side == 0 ? PC_K : -PC_K;
+    for (int i = 0; i < 64; i++) if (p->b[i] == k) return ch_attacked(p, i, side ^ 1);
+    return false;
+}
+
+// Pseudo-legal moves of the side to move; `caps` = captures and queen promotions only (for the quiescence search).
+static int ch_gen(const cpos_t *p, cmove_t *out, bool caps)
+{
+    int n = 0, us = p->side, sg = us == 0 ? 1 : -1;
+    for (int sq = 0; sq < 64; sq++) {
+        int pc = p->b[sq] * sg;
+        if (pc <= 0) continue;
+        int r = sq >> 3, f = sq & 7;
+        if (pc == PC_P) {
+            int dir = us == 0 ? -1 : 1, start = us == 0 ? 6 : 1, last = us == 0 ? 0 : 7, r1 = r + dir;
+            if (r1 < 0 || r1 > 7) continue;
+            int t = r1 * 8 + f;
+            if (!p->b[t]) {
+                if (r1 == last) { for (int pr = caps ? PC_Q : PC_N; pr <= PC_Q; pr++) out[n++] = CM(sq, t, pr); }
+                else if (!caps) {
+                    out[n++] = CM(sq, t, 0);
+                    if (r == start && !p->b[t + dir * 8]) out[n++] = CM(sq, t + dir * 8, 0);
+                }
+            }
+            for (int df = -1; df <= 1; df += 2) {
+                int nf = f + df;
+                if (nf < 0 || nf > 7) continue;
+                int tt = r1 * 8 + nf;
+                if (p->b[tt] * sg < 0 || (tt == p->ep && !p->b[tt])) {
+                    if (r1 == last) { for (int pr = caps ? PC_Q : PC_N; pr <= PC_Q; pr++) out[n++] = CM(sq, tt, pr); }
+                    else out[n++] = CM(sq, tt, 0);
+                }
+            }
+            continue;
+        }
+        if (pc == PC_N || pc == PC_K) {
+            const int8_t (*d)[2] = pc == PC_N ? CH_KN : CH_KG;
+            for (int i = 0; i < 8; i++) {
+                int nr = r + d[i][0], nf = f + d[i][1];
+                if (nr < 0 || nr > 7 || nf < 0 || nf > 7) continue;
+                int t = nr * 8 + nf, tv = p->b[t] * sg;
+                if (tv > 0 || (caps && tv == 0)) continue;
+                out[n++] = CM(sq, t, 0);
+            }
+            if (pc == PC_K && !caps && sq == (us == 0 ? 60 : 4)) {
+                int base = us == 0 ? 56 : 0, ks = us == 0 ? 1 : 4, qs = us == 0 ? 2 : 8;
+                if ((p->castle & ks) && !p->b[base + 5] && !p->b[base + 6] && p->b[base + 7] == sg * PC_R
+                    && !ch_attacked(p, base + 4, us ^ 1) && !ch_attacked(p, base + 5, us ^ 1))
+                    out[n++] = CM(sq, base + 6, 0);
+                if ((p->castle & qs) && !p->b[base + 3] && !p->b[base + 2] && !p->b[base + 1] && p->b[base] == sg * PC_R
+                    && !ch_attacked(p, base + 4, us ^ 1) && !ch_attacked(p, base + 3, us ^ 1))
+                    out[n++] = CM(sq, base + 2, 0);
+            }
+            continue;
+        }
+        for (int i = 0; i < 8; i++) {
+            int dr = CH_KG[i][0], df = CH_KG[i][1];
+            bool diag = dr && df;
+            if ((pc == PC_B && !diag) || (pc == PC_R && diag)) continue;
+            int nr = r + dr, nf = f + df;
+            while (nr >= 0 && nr < 8 && nf >= 0 && nf < 8) {
+                int t = nr * 8 + nf, tv = p->b[t] * sg;
+                if (tv > 0) break;
+                if (tv < 0) { out[n++] = CM(sq, t, 0); break; }
+                if (!caps) out[n++] = CM(sq, t, 0);
+                nr += dr; nf += df;
+            }
+        }
+    }
+    return n;
+}
+
+static void ch_make(cpos_t *p, cmove_t m)
+{
+    int f = CM_FROM(m), t = CM_TO(m), promo = CM_PROMO(m), pc = p->b[f], us = p->side, a = iabs(pc), cap = p->b[t];
+    p->half = (a == PC_P || cap) ? 0 : (uint8_t)(p->half + 1);
+    if (a == PC_P && t == p->ep && !cap) p->b[(f & 56) | (t & 7)] = 0;          // en passant: the captured pawn sits beside the mover
+    p->ep = -1;
+    if (a == PC_P && iabs(t - f) == 16) p->ep = (int8_t)((f + t) / 2);
+    p->b[t] = (int8_t)(promo ? (us == 0 ? promo : -promo) : pc);
+    p->b[f] = 0;
+    if (a == PC_K) {
+        if (t - f == 2) { p->b[t - 1] = p->b[t + 1]; p->b[t + 1] = 0; }          // castling: move the rook too
+        else if (f - t == 2) { p->b[t + 1] = p->b[t - 2]; p->b[t - 2] = 0; }
+        p->castle &= (uint8_t)(us == 0 ? ~3 : ~12);
+    }
+    if (f == 63 || t == 63) p->castle &= (uint8_t)~1;
+    if (f == 56 || t == 56) p->castle &= (uint8_t)~2;
+    if (f == 7 || t == 7) p->castle &= (uint8_t)~4;
+    if (f == 0 || t == 0) p->castle &= (uint8_t)~8;
+    p->side = (uint8_t)(us ^ 1);
+}
+
+static int ch_legal(const cpos_t *p, cmove_t *mv, bool caps)
+{
+    int n = ch_gen(p, mv, caps), m = 0;
+    for (int i = 0; i < n; i++) {
+        cpos_t q = *p;
+        ch_make(&q, mv[i]);
+        if (!ch_in_check(&q, p->side)) mv[m++] = mv[i];
+    }
+    return m;
+}
+
+static uint64_t g_zob[12][64], g_zob_side, g_zob_castle[16], g_zob_ep[9];
+static bool g_zob_ready;
+
+static uint64_t zob_next(uint64_t *s) { *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17; return *s; }
+
+static void zob_init(void)
+{
+    uint64_t s = 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < 12; i++) for (int j = 0; j < 64; j++) g_zob[i][j] = zob_next(&s);
+    g_zob_side = zob_next(&s);
+    for (int i = 0; i < 16; i++) g_zob_castle[i] = zob_next(&s);
+    for (int i = 0; i < 9; i++) g_zob_ep[i] = zob_next(&s);
+    g_zob_ready = true;
+}
+
+static uint64_t ch_hash(const cpos_t *p)
+{
+    if (!g_zob_ready) zob_init();
+    uint64_t h = 0;
+    for (int i = 0; i < 64; i++) { int pc = p->b[i]; if (pc) h ^= g_zob[pc > 0 ? pc - 1 : 5 - pc][i]; }
+    if (p->side) h ^= g_zob_side;
+    h ^= g_zob_castle[p->castle & 15];
+    h ^= g_zob_ep[p->ep >= 0 ? (p->ep & 7) : 8];
+    return h;
+}
+
+// ---- the engine ----
+
+static void draw_frame(void);                                       // defined with the Vulkan code further down
+static void chess_progress(int depth, int score_white);
+
+typedef struct { uint32_t key; int16_t score; int8_t depth; uint8_t flag; cmove_t move; } tt_t;   // flag: 0 empty, 1 exact, 2 lower bound, 3 upper bound
+#define TT_SIZE (1 << 16)
+
+// Search scratch and the transposition table live on the heap (~830 KB): static storage
+// would bloat the kernel image of every build, including ones that never open Chess.
+static tt_t *g_tt;                                                  // 12 B x 65536 = 768 KB, allocated with the scratch
+static cmove_t (*g_ch_mv)[CH_MAXMV], (*g_ch_kill)[2];               // indexed g_ch_mv[ply] and g_ch_kill[ply][0..1]
+static int16_t (*g_ch_sc)[CH_MAXMV], (*g_ch_hh)[64][64];
+static uint64_t g_ch_path[CH_MAXPLY];
+static uint32_t g_ch_nodes, g_ch_deadline, g_ch_rng;
+static bool g_ch_abort, g_ch_live;                                  // g_ch_live: the engine may redraw the window while it thinks
+
+static bool ch_scratch(void)
+{
+    static bool ok;
+    if (ok) return true;
+    if (!g_tt) g_tt = malloc(sizeof(tt_t) * (size_t)TT_SIZE);
+    if (!g_ch_mv) g_ch_mv = malloc(sizeof(cmove_t) * (size_t)CH_MAXPLY * CH_MAXMV);
+    if (!g_ch_sc) g_ch_sc = malloc(sizeof(int16_t) * (size_t)CH_MAXPLY * CH_MAXMV);
+    if (!g_ch_hh) g_ch_hh = malloc(sizeof(int16_t) * 2 * 64 * 64);
+    if (!g_ch_kill) g_ch_kill = malloc(sizeof(cmove_t) * (size_t)CH_MAXPLY * 2);
+    ok = g_tt && g_ch_mv && g_ch_sc && g_ch_hh && g_ch_kill;
+    return ok;
+}
+static char g_ch_san[CH_MAXGAME][10];                               // the moves of the game in standard algebraic notation
+
+static const char *const CH_LEVELS[5] = { "Beginner", "Easy", "Medium", "Hard", "Expert" };
+static const int CH_DEPTH[5] = { 1, 2, 5, 9, 14 };
+static const uint32_t CH_MS[5] = { 150, 300, 900, 2500, 4000 };
+static const int CH_NOISE[5] = { 140, 60, 0, 0, 0 };                 // random centipawns added to the root scores
+static const int CH_RANDOM[5] = { 25, 6, 0, 0, 0 };                  // percent of moves that are simply random
+
+static void ch_seed(void)
+{
+    g_ch_rng ^= now_ms() * 2654435761u + 7u;
+    if (!g_ch_rng) g_ch_rng = 88172645u;
+}
+
+static uint32_t ch_rand(void) { g_ch_rng ^= g_ch_rng << 13; g_ch_rng ^= g_ch_rng >> 17; g_ch_rng ^= g_ch_rng << 5; return g_ch_rng; }
+
+static void tt_store(uint64_t h, int depth, int score, int flag, cmove_t move, int ply)
+{
+    tt_t *e = &g_tt[h & (TT_SIZE - 1)];
+    uint32_t k = (uint32_t)(h >> 32);
+    if (e->flag && e->key == k && e->depth > depth) return;
+    if (score >= CH_MATE - 100) score += ply; else if (score <= -(CH_MATE - 100)) score -= ply;
+    e->key = k; e->score = (int16_t)score; e->depth = (int8_t)depth; e->flag = (uint8_t)flag; e->move = move;
+}
+
+static bool ch_has_pieces(const cpos_t *p, int side)                 // anything besides pawns and the king (null moves are unsafe without)
+{
+    int sg = side == 0 ? 1 : -1;
+    for (int i = 0; i < 64; i++) { int a = p->b[i] * sg; if (a > PC_P && a < PC_K) return true; }
+    return false;
+}
+
+static const int CH_PASSED[6] = { 0, 5, 10, 20, 35, 60 };
+
+static int ch_eval(const cpos_t *p)                                  // centipawns from the side to move's view
+{
+    int mat[2] = { 0, 0 }, nb[2] = { 0, 0 }, np[2] = { 0, 0 }, ksq[2] = { 0, 0 }, pcnt[2][8], score = 0;
+    memset(pcnt, 0, sizeof(pcnt));
+    for (int i = 0; i < 64; i++) {
+        int pc = p->b[i];
+        if (!pc) continue;
+        int a = iabs(pc), s = pc > 0 ? 0 : 1;
+        if (a == PC_P) { pcnt[s][i & 7]++; np[s]++; }
+        else if (a == PC_K) ksq[s] = i;
+        else { mat[s] += CH_VAL[a]; if (a == PC_B) nb[s]++; }
+    }
+    bool eg = mat[0] + mat[1] <= 2600;
+    for (int i = 0; i < 64; i++) {
+        int pc = p->b[i];
+        if (!pc) continue;
+        int a = iabs(pc), s = pc > 0 ? 0 : 1, sg = s == 0 ? 1 : -1, sq = s == 0 ? i : (i ^ 56), r = i >> 3, f = i & 7;
+        int v = CH_VAL[a] + (a == PC_K ? (eg ? CH_KEG[sq] : CH_PST[PC_K - 1][sq]) : CH_PST[a - 1][sq]);
+        if (a == PC_P) {
+            if (pcnt[s][f] > 1) v -= 8;                                                         // doubled
+            if ((f == 0 || !pcnt[s][f - 1]) && (f == 7 || !pcnt[s][f + 1])) v -= 12;           // isolated
+            bool passed = true;
+            int step = s == 0 ? -1 : 1;
+            for (int ff = imax(0, f - 1); ff <= imin(7, f + 1) && passed; ff++)
+                for (int rr = r + step; rr >= 0 && rr < 8; rr += step)
+                    if (p->b[rr * 8 + ff] == -sg * PC_P) { passed = false; break; }
+            if (passed) { int adv = s == 0 ? 6 - r : r - 1; v += CH_PASSED[imax(0, imin(5, adv))] * (eg ? 2 : 1); }
+        } else if (a == PC_R) {
+            if (!pcnt[s][f]) v += pcnt[s ^ 1][f] ? 10 : 20;                                     // open / half-open file
+        }
+        score += s == 0 ? v : -v;
+    }
+    if (nb[0] >= 2) score += 30;
+    if (nb[1] >= 2) score -= 30;
+    if (!eg) {
+        for (int s = 0; s < 2; s++) {                                                           // king safety: pawn shield
+            int k = ksq[s], kr = k >> 3, kf = k & 7, dir = s == 0 ? -1 : 1, sg = s == 0 ? 1 : -1, sh = 0;
+            bool home = s == 0 ? kr >= 6 : kr <= 1;
+            if (!home) sh = -20;
+            else
+                for (int ff = imax(0, kf - 1); ff <= imin(7, kf + 1); ff++) {
+                    int r1 = kr + dir, r2 = kr + 2 * dir;
+                    if (r1 >= 0 && r1 < 8 && p->b[r1 * 8 + ff] == sg * PC_P) sh += 10;
+                    else if (r2 >= 0 && r2 < 8 && p->b[r2 * 8 + ff] == sg * PC_P) sh += 5;
+                    else sh -= 8;
+                }
+            score += s == 0 ? sh : -sh;
+        }
+    } else {
+        for (int w = 0; w < 2; w++) {                                                           // mop-up: drive a lone king to the edge
+            int l = w ^ 1;
+            if (mat[l] == 0 && np[l] == 0 && mat[w] >= 500) {
+                int lk = ksq[l], wk = ksq[w];
+                int cd = iabs(2 * (lk & 7) - 7) + iabs(2 * (lk >> 3) - 7);
+                int kd = iabs((lk & 7) - (wk & 7)) + iabs((lk >> 3) - (wk >> 3));
+                int bonus = cd * 6 + (14 - kd) * 4;
+                score += w == 0 ? bonus : -bonus;
+            }
+        }
+    }
+    score += p->side == 0 ? 8 : -8;                                                             // tempo
+    return p->side == 0 ? score : -score;
+}
+
+static void ch_order(const cpos_t *p, const cmove_t *mv, int16_t *sc, int n, int ply, cmove_t ttm)
+{
+    for (int i = 0; i < n; i++) {
+        int f = CM_FROM(mv[i]), t = CM_TO(mv[i]), v = iabs(p->b[t]), a = iabs(p->b[f]), s;
+        if (ttm && mv[i] == ttm) s = 30000;
+        else if (v || (a == PC_P && t == p->ep)) { if (!v) v = 1; s = 10000 + v * 100 - a; }
+        else if (mv[i] == g_ch_kill[ply][0]) s = 9000;
+        else if (mv[i] == g_ch_kill[ply][1]) s = 8900;
+        else s = g_ch_hh[p->side][f][t] / 4;
+        if (CM_PROMO(mv[i])) s += 5000;
+        sc[i] = (int16_t)(s > 32000 ? 32000 : s);
+    }
+}
+
+static void ch_pick(cmove_t *mv, int16_t *sc, int n, int i)          // selection sort step: best remaining move to index i
+{
+    int bi = i;
+    for (int j = i + 1; j < n; j++) if (sc[j] > sc[bi]) bi = j;
+    if (bi != i) { cmove_t m = mv[i]; int16_t s = sc[i]; mv[i] = mv[bi]; sc[i] = sc[bi]; mv[bi] = m; sc[bi] = s; }
+}
+
+static bool ch_time_up(void)
+{
+    if ((++g_ch_nodes & 1023) == 0 && now_ms() >= g_ch_deadline) g_ch_abort = true;
+    return g_ch_abort;
+}
+
+static int ch_quiesce(const cpos_t *p, int alpha, int beta, int ply)
+{
+    if (ch_time_up()) return 0;
+    int stand = ch_eval(p);
+    if (ply >= CH_MAXPLY - 2) return stand;
+    if (stand >= beta) return beta;
+    if (stand > alpha) alpha = stand;
+    cmove_t *mv = g_ch_mv[ply];
+    int16_t *sc = g_ch_sc[ply];
+    int n = ch_legal(p, mv, true);
+    ch_order(p, mv, sc, n, ply, 0);
+    for (int i = 0; i < n; i++) {
+        ch_pick(mv, sc, n, i);
+        if (!CM_PROMO(mv[i]) && stand + CH_VAL[iabs(p->b[CM_TO(mv[i])])] + 200 < alpha) continue;   // delta pruning
+        cpos_t q = *p;
+        ch_make(&q, mv[i]);
+        int s = -ch_quiesce(&q, -beta, -alpha, ply + 1);
+        if (g_ch_abort) return 0;
+        if (s >= beta) return beta;
+        if (s > alpha) alpha = s;
+    }
+    return alpha;
+}
+
+static int ch_search(const cpos_t *p, int depth, int alpha, int beta, int ply, bool can_null)
+{
+    if (ch_time_up()) return 0;
+    if (ply >= CH_MAXPLY - 2) return ch_eval(p);
+    uint64_t h = ch_hash(p);
+    g_ch_path[ply] = h;
+    if (p->half >= 100) return 0;                                                // fifty-move draw
+    for (int i = ply - 2; i >= 0; i -= 2) if (g_ch_path[i] == h) return 0;        // repetition inside the search
+    for (int i = 1; i <= p->half && i < g_ch_nh; i++) if (g_ch_hist[g_ch_nh - 1 - i] == h) return 0;   // repetition of a game position
+    bool check = ch_in_check(p, p->side), pv = beta - alpha > 1;
+    if (check && ply < CH_MAXPLY - 8) depth++;
+    if (depth <= 0) return ch_quiesce(p, alpha, beta, ply);
+
+    tt_t *e = &g_tt[h & (TT_SIZE - 1)];
+    cmove_t ttm = 0;
+    if (e->flag && e->key == (uint32_t)(h >> 32)) {
+        ttm = e->move;
+        if (e->depth >= depth && !pv) {
+            int s = e->score;
+            if (s >= CH_MATE - 100) s -= ply; else if (s <= -(CH_MATE - 100)) s += ply;
+            if (e->flag == 1 || (e->flag == 2 && s >= beta) || (e->flag == 3 && s <= alpha)) return s;
+        }
+    }
+    if (can_null && !pv && !check && depth >= 3 && ch_has_pieces(p, p->side)) {   // null move: if passing still beats beta, cut
+        cpos_t q = *p;
+        q.side = (uint8_t)(q.side ^ 1);
+        q.ep = -1;
+        int s = -ch_search(&q, depth - 3, -beta, -beta + 1, ply + 1, false);
+        if (g_ch_abort) return 0;
+        if (s >= beta) return s >= CH_MATE - 100 ? beta : s;
+    }
+
+    cmove_t *mv = g_ch_mv[ply];
+    int16_t *sc = g_ch_sc[ply];
+    int n = ch_legal(p, mv, false);
+    if (n == 0) return check ? -(CH_MATE - ply) : 0;
+    ch_order(p, mv, sc, n, ply, ttm);
+    int best = -CH_INF, alpha0 = alpha;
+    cmove_t bestmv = 0;
+    for (int i = 0; i < n; i++) {
+        ch_pick(mv, sc, n, i);
+        cmove_t m = mv[i];
+        bool quiet = !p->b[CM_TO(m)] && !CM_PROMO(m) && !(iabs(p->b[CM_FROM(m)]) == PC_P && CM_TO(m) == p->ep);
+        cpos_t q = *p;
+        ch_make(&q, m);
+        int s;
+        if (i == 0) s = -ch_search(&q, depth - 1, -beta, -alpha, ply + 1, true);
+        else {                                                                    // PVS with late-move reductions
+            int red = 0;
+            if (depth >= 3 && i >= 3 && quiet && !check) { red = (i >= 8 && depth >= 5) ? 2 : 1; if (ch_in_check(&q, q.side)) red = 0; }
+            s = -ch_search(&q, depth - 1 - red, -alpha - 1, -alpha, ply + 1, true);
+            if (s > alpha && red && !g_ch_abort) s = -ch_search(&q, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+            if (s > alpha && s < beta && !g_ch_abort) s = -ch_search(&q, depth - 1, -beta, -alpha, ply + 1, true);
+        }
+        if (g_ch_abort) return 0;
+        if (s > best) { best = s; bestmv = m; }
+        if (s > alpha) alpha = s;
+        if (alpha >= beta) {
+            if (quiet) {
+                if (g_ch_kill[ply][0] != m) { g_ch_kill[ply][1] = g_ch_kill[ply][0]; g_ch_kill[ply][0] = m; }
+                int16_t *hh = &g_ch_hh[p->side][CM_FROM(m)][CM_TO(m)];
+                int v = *hh + depth * depth;
+                *hh = (int16_t)(v > 16000 ? 16000 : v);
+            }
+            break;
+        }
+    }
+    tt_store(h, depth, best, best <= alpha0 ? 3 : (best >= beta ? 2 : 1), bestmv, ply);
+    return best;
+}
+
+// Iterative deepening from the root. exact = full-window score for every root move (used with `noise` by the weak levels).
+// Returns the move; *score_out is the score for the side to move, *depth_out the last completed depth (0 when there was only one move).
+static cmove_t ch_think(const cpos_t *root, int maxd, uint32_t ms, int noise, bool exact, int *score_out, int *depth_out, bool report)
+{
+    if (!ch_scratch()) return 0;
+    cmove_t *mv = g_ch_mv[0];
+    int16_t *sc0 = g_ch_sc[0];
+    int rs[CH_MAXMV];
+    if (score_out) *score_out = 0;
+    if (depth_out) *depth_out = 0;
+    int n = ch_legal(root, mv, false);
+    if (n == 0) return 0;
+    if (n == 1) return mv[0];
+    ch_seed();
+    g_ch_abort = false;
+    g_ch_nodes = 0;
+    g_ch_deadline = now_ms() + ms;
+    memset(g_ch_kill, 0, sizeof(cmove_t) * (size_t)CH_MAXPLY * 2);
+    memset(g_ch_hh, 0, sizeof(int16_t) * 2 * 64 * 64);
+    uint64_t rh = ch_hash(root);
+    g_ch_path[0] = rh;
+    tt_t *te = &g_tt[rh & (TT_SIZE - 1)];
+    ch_order(root, mv, sc0, n, 0, (te->flag && te->key == (uint32_t)(rh >> 32)) ? te->move : 0);
+    for (int i = 0; i < n; i++) ch_pick(mv, sc0, n, i);
+    cmove_t best = mv[0];
+    int best_sc = 0, done = 0;
+    for (int d = 1; d <= maxd; d++) {
+        int alpha = -CH_INF, bscore = -CH_INF, real = 0;
+        cmove_t bm = mv[0];
+        for (int i = 0; i < n; i++) {
+            cpos_t q = *root;
+            ch_make(&q, mv[i]);
+            int s;
+            if (exact || i == 0) s = -ch_search(&q, d - 1, -CH_INF, -alpha, 1, true);
+            else {
+                s = -ch_search(&q, d - 1, -alpha - 1, -alpha, 1, true);
+                if (s > alpha && !g_ch_abort) s = -ch_search(&q, d - 1, -CH_INF, -alpha, 1, true);
+            }
+            if (g_ch_abort) break;
+            rs[i] = s;
+            int sn = s;
+            if (noise) sn += (int)(ch_rand() % (uint32_t)(2 * noise + 1)) - noise;
+            if (sn > bscore) { bscore = sn; bm = mv[i]; real = s; }
+            if (!exact && s > alpha) alpha = s;
+        }
+        if (g_ch_abort) break;                                                   // keep the last completed depth
+        best = bm; best_sc = real; done = d;
+        for (int i = 1; i < n; i++) {                                            // best scores first for the next depth
+            cmove_t m = mv[i];
+            int s = rs[i], j = i - 1;
+            while (j >= 0 && rs[j] < s) { mv[j + 1] = mv[j]; rs[j + 1] = rs[j]; j--; }
+            mv[j + 1] = m; rs[j + 1] = s;
+        }
+        if (report) chess_progress(d, root->side == 0 ? best_sc : -best_sc);
+        if (best_sc > CH_MATE - 100 || best_sc < -(CH_MATE - 100)) break;       // a forced mate is known
+    }
+    if (done) tt_store(rh, done, best_sc, 1, best, 0);
+    if (score_out) *score_out = best_sc;
+    if (depth_out) *depth_out = done;
+    return best;
+}
+
+static int ch_score_move(const cpos_t *root, cmove_t m, int depth, uint32_t ms)    // exact score of one move, or 0x7fff when time ran out
+{
+    g_ch_abort = false;
+    g_ch_nodes = 0;
+    g_ch_deadline = now_ms() + ms;
+    g_ch_path[0] = ch_hash(root);
+    cpos_t q = *root;
+    ch_make(&q, m);
+    int s = -ch_search(&q, depth - 1, -CH_INF, CH_INF, 1, true);
+    return g_ch_abort ? 0x7fff : s;
+}
+
+static cmove_t ch_best(const cpos_t *root, int level)
+{
+    cmove_t *mv = g_ch_mv[0];
+    int n = ch_legal(root, mv, false);
+    if (n == 0) return 0;
+    ch_seed();
+    if (CH_RANDOM[level] && (int)(ch_rand() % 100) < CH_RANDOM[level]) { g_ch.have_score = false; return mv[ch_rand() % (uint32_t)n]; }
+    int sc, dd;
+    return ch_think(root, CH_DEPTH[level], CH_MS[level], CH_NOISE[level], level <= 1, &sc, &dd, true);
+}
+
+static uint32_t ch_perft(const cpos_t *p, int depth, int ply)
+{
+    if (!ch_scratch()) return 0;
+    if (depth == 0) return 1;
+    cmove_t *mv = g_ch_mv[ply];
+    int n = ch_legal(p, mv, false);
+    if (depth == 1) return (uint32_t)n;
+    uint32_t t = 0;
+    for (int i = 0; i < n; i++) { cpos_t q = *p; ch_make(&q, mv[i]); t += ch_perft(&q, depth - 1, ply + 1); }
+    return t;
+}
+
+// ---- notation ----
+
+static void ch_mstr(cmove_t m, char *o)                          // coordinate form: e2e4, e7e8q
+{
+    int f = CM_FROM(m), t = CM_TO(m), p = CM_PROMO(m);
+    o[0] = (char)('a' + (f & 7)); o[1] = (char)('8' - (f >> 3));
+    o[2] = (char)('a' + (t & 7)); o[3] = (char)('8' - (t >> 3));
+    o[4] = p ? "xxnbrq"[p] : 0;
+    o[5] = 0;
+}
+
+// Standard algebraic notation of move m in position p (o needs 10 bytes).
+static void ch_san(const cpos_t *p, cmove_t m, char *o)
+{
+    static cmove_t tmp[CH_MAXMV], tmp2[CH_MAXMV];
+    int f = CM_FROM(m), t = CM_TO(m), promo = CM_PROMO(m), pc = iabs(p->b[f]), k = 0;
+    bool cap = p->b[t] != 0 || (pc == PC_P && t == p->ep);
+    if (pc == PC_K && iabs(t - f) == 2) k = put_str(o, 8, t > f ? "O-O" : "O-O-O");
+    else {
+        if (pc != PC_P) {
+            o[k++] = "?PNBRQK"[pc];
+            int n = ch_legal(p, tmp, false);
+            bool amb = false, same_file = false, same_rank = false;
+            for (int i = 0; i < n; i++) {
+                int f2 = CM_FROM(tmp[i]);
+                if (f2 == f || CM_TO(tmp[i]) != t || iabs(p->b[f2]) != pc) continue;
+                amb = true;
+                if ((f2 & 7) == (f & 7)) same_file = true;
+                if ((f2 >> 3) == (f >> 3)) same_rank = true;
+            }
+            if (amb) {
+                if (!same_file) o[k++] = (char)('a' + (f & 7));
+                else if (!same_rank) o[k++] = (char)('8' - (f >> 3));
+                else { o[k++] = (char)('a' + (f & 7)); o[k++] = (char)('8' - (f >> 3)); }
+            }
+        } else if (cap) o[k++] = (char)('a' + (f & 7));
+        if (cap) o[k++] = 'x';
+        o[k++] = (char)('a' + (t & 7));
+        o[k++] = (char)('8' - (t >> 3));
+        if (promo) { o[k++] = '='; o[k++] = "??NBRQ"[promo]; }
+    }
+    cpos_t q = *p;
+    ch_make(&q, m);
+    if (ch_in_check(&q, q.side)) o[k++] = ch_legal(&q, tmp2, false) ? '+' : '#';
+    o[k] = 0;
+}
+
+static void ch_fmt_cp(int cp, char *o)                           // +0.35, -1.20, +M3 (o needs 12 bytes)
+{
+    int k = 0;
+    if (cp >= CH_MATE - 100 || cp <= -(CH_MATE - 100)) {
+        o[k++] = cp < 0 ? '-' : '+';
+        o[k++] = 'M';
+        k += put_uint(o + k, (uint32_t)((CH_MATE - iabs(cp) + 1) / 2));
+        o[k] = 0;
+        return;
+    }
+    int a = iabs(cp);
+    o[k++] = cp < 0 ? '-' : '+';
+    k += put_uint(o + k, (uint32_t)(a / 100));
+    o[k++] = '.';
+    o[k++] = (char)('0' + (a / 10) % 10);
+    o[k++] = (char)('0' + a % 10);
+    o[k] = 0;
+}
+
+// ---- opening book: names, lines and ideas (coordinate moves, castling as the king's two-square move) ----
+
+typedef struct { const char *eco, *name, *moves, *idea; int w; } opening_t;    // w: how often the AI picks it (0 = never, only for training)
+
+static const opening_t OPENINGS[] = {
+    { "C20", "King's Pawn Game", "e2e4 e7e5", "Claim the centre and open lines for the bishop and queen. Black answers symmetrically.", 4 },
+    { "C40", "King's Knight Opening", "e2e4 e7e5 g1f3", "Develop with tempo: the knight attacks e5 and prepares to castle.", 4 },
+    { "C50", "Italian Game", "e2e4 e7e5 g1f3 b8c6 f1c4", "The bishop eyes f7, Black's weakest point. Develop fast and castle early.", 4 },
+    { "C53", "Giuoco Piano: Main Line", "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4", "Prepare d4 with c3 to build a big centre; Black hits back with ...exd4 and ...d5.", 3 },
+    { "C51", "Evans Gambit", "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4", "Sacrifice the b-pawn for time and a huge centre after c3 and d4.", 1 },
+    { "C55", "Two Knights Defense", "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6", "Black counterattacks e4 instead of defending; White can try d3 or Ng5.", 3 },
+    { "C57", "Fried Liver Attack", "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 f6d5 g5f7", "Ng5 and a knight sacrifice on f7 drag the king out. Very sharp: know the theory.", 1 },
+    { "C60", "Ruy Lopez", "e2e4 e7e5 g1f3 b8c6 f1b5", "Pressure on the defender of e5. A rich, strategic main line for centuries.", 4 },
+    { "C78", "Ruy Lopez: Closed", "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 d7d6 c2c3 e8g8", "White keeps the bishop pair and prepares d4; Black gets a solid, slightly passive position.", 3 },
+    { "C65", "Ruy Lopez: Berlin Defense", "e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6e4 d2d4 e4d6 b5c6 d7c6 d4e5 d6f5", "Black heads for a queenless endgame with a rock-solid structure: the Berlin Wall.", 3 },
+    { "C41", "Philidor Defense", "e2e4 e7e5 g1f3 d7d6 d2d4", "Solid but cramped: Black defends e5 with a pawn and delays piece play.", 2 },
+    { "C42", "Petrov Defense", "e2e4 e7e5 g1f3 g8f6 f3e5 d7d6 e5f3 f6e4 d2d4 d6d5", "Mirror the attack on e4. Very solid and drawish; learn the move order carefully.", 3 },
+    { "C30", "King's Gambit", "e2e4 e7e5 f2f4 e5f4 g1f3", "White gambits a pawn for a fast attack along the f-file. Romantic and risky.", 1 },
+    { "C21", "Danish Gambit", "e2e4 e7e5 d2d4 e5d4 c2c3", "Offer pawns for rapid development and open lines against the king.", 1 },
+    { "C23", "Bishop's Opening", "e2e4 e7e5 f1c4", "Develop the bishop first; keeps Nf3 and Nc3 in reserve.", 2 },
+    { "C25", "Vienna Game", "e2e4 e7e5 b1c3", "Prepares f4 or Bc4 without committing the g1 knight.", 2 },
+    { "C45", "Scotch Game", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4", "Open the centre at once and gain space; Black gets easy piece play.", 3 },
+    { "C47", "Four Knights Game", "e2e4 e7e5 g1f3 b8c6 b1c3 g8f6", "Symmetrical development; both sides keep everything protected.", 2 },
+    { "C48", "Four Knights: Spanish Variation", "e2e4 e7e5 g1f3 b8c6 b1c3 g8f6 f1b5", "Pin the c6 knight; Black usually answers ...Nd4 or ...Bb4.", 2 },
+    { "C00", "French Defense", "e2e4 e7e6 d2d4 d7d5", "Solid pawn chain; Black attacks the centre from the side. The c8 bishop can get stuck.", 4 },
+    { "C11", "French: Classical", "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 c1g5", "Pin the f6 knight and keep tension; Black often plays ...Be7 or ...dxe4.", 3 },
+    { "C02", "French: Advance", "e2e4 e7e6 d2d4 d7d5 e4e5", "Gain space and cramp Black; Black strikes the chain with ...c5.", 3 },
+    { "B20", "Sicilian Defense", "e2e4 c7c5", "Fight for d4 with a flank pawn. Unbalanced: the most popular reply to 1.e4.", 4 },
+    { "B90", "Sicilian: Najdorf", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6", "Flexible ...a6 stops Nb5 and prepares ...b5. Very sharp; a favourite of Fischer and Kasparov.", 4 },
+    { "B70", "Sicilian: Dragon", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 g7g6", "Fianchetto the bishop on the long diagonal. White often castles long and attacks.", 3 },
+    { "B33", "Sicilian: Sveshnikov", "e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5", "Black accepts a hole on d5 for active pieces and space.", 3 },
+    { "B22", "Sicilian: Alapin", "e2e4 c7c5 c2c3", "Prepare d4 and sidestep the heavy theory of the open Sicilians.", 3 },
+    { "B23", "Sicilian: Closed", "e2e4 c7c5 b1c3 b8c6 g2g3", "Fianchetto and slow play; White keeps the centre flexible.", 2 },
+    { "B10", "Caro-Kann Defense", "e2e4 c7c6 d2d4 d7d5", "Rock-solid: Black supports d5 and keeps the bishop out of the pawn chain.", 4 },
+    { "B18", "Caro-Kann: Classical", "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5", "Develop the bishop outside the pawn chain, then ...e6 and ...Nd7.", 3 },
+    { "B12", "Caro-Kann: Advance", "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5", "White gains space; Black attacks the chain with ...c5 and keeps the bishop active.", 3 },
+    { "B01", "Scandinavian Defense", "e2e4 d7d5 e4d5 d8d5 b1c3 d5a5", "Challenge e4 at once; the queen retreats with tempo and Black develops simply.", 2 },
+    { "B07", "Pirc Defense", "e2e4 d7d6 d2d4 g8f6 b1c3 g7g6", "Let White build a centre, then attack it with pieces and ...c5 or ...e5.", 2 },
+    { "B02", "Alekhine's Defense", "e2e4 g8f6 e4e5 f6d5 d2d4 d7d6", "Invite White's pawns forward, then undermine them.", 2 },
+    { "B06", "Modern Defense", "e2e4 g7g6", "Fianchetto first; Black decides on the centre later.", 2 },
+    { "D00", "Queen's Pawn Game", "d2d4 d7d5", "The classical symmetrical reply; the fight is for e4 and c4.", 4 },
+    { "D06", "Queen's Gambit", "d2d4 d7d5 c2c4", "Offer a wing pawn to deflect Black's centre pawn. Not really a gambit.", 4 },
+    { "D20", "Queen's Gambit Accepted", "d2d4 d7d5 c2c4 d5c4", "Black takes the pawn and gives it back later in return for free development.", 3 },
+    { "D37", "Queen's Gambit Declined", "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 f8e7", "Solid. Black defends d5 and aims to equalise with ...O-O and ...c5 or ...dxc4.", 4 },
+    { "D10", "Slav Defense", "d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 d5c4", "Support d5 with a pawn while keeping the bishop free. Very reliable.", 4 },
+    { "D02", "London System", "d2d4 d7d5 g1f3 g8f6 c1f4", "A solid setup for White: Bf4, e3, c3, Bd3. Easy to learn, hard to crack.", 3 },
+    { "D01", "Veresov Attack", "d2d4 d7d5 b1c3 g8f6 c1g5", "Pin the knight early; leads to unusual, practical positions.", 2 },
+    { "A46", "Torre Attack", "d2d4 g8f6 g1f3 e7e6 c1g5", "Bg5 pins before committing the c-pawn. A quiet system opening.", 2 },
+    { "A45", "Trompowsky Attack", "d2d4 g8f6 c1g5", "Attack the knight early to take Black out of theory.", 2 },
+    { "E60", "King's Indian Defense", "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6", "Black lets White take the centre and attacks it with ...e5 or ...c5.", 4 },
+    { "D70", "Grunfeld Defense", "d2d4 g8f6 c2c4 g7g6 b1c3 d7d5", "Strike the centre immediately with pieces and pressure on d4.", 3 },
+    { "E20", "Nimzo-Indian Defense", "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4", "Pin the knight to control e4 and fight for the centre. Very respected.", 4 },
+    { "E12", "Queen's Indian Defense", "d2d4 g8f6 c2c4 e7e6 g1f3 b7b6", "Control e4 with a fianchettoed bishop.", 3 },
+    { "E00", "Catalan Opening", "d2d4 g8f6 c2c4 e7e6 g2g3 d5d5 f1g2", "Fianchetto the bishop to pressure the long diagonal and the c4 pawn.", 3 },
+    { "A60", "Benoni Defense", "d2d4 g8f6 c2c4 c7c5 d4d5 e7e6", "Create an imbalance: Black gets queenside play, White a big centre.", 2 },
+    { "A57", "Benko Gambit", "d2d4 g8f6 c2c4 c7c5 d4d5 b7b5", "Sacrifice a pawn for open lines on the queenside and long-term pressure.", 1 },
+    { "A52", "Budapest Gambit", "d2d4 g8f6 c2c4 e7e5 d4e5 f6g4", "A surprise gambit: win the pawn back with ...Bc5 and ...Nc6.", 1 },
+    { "A80", "Dutch Defense", "d2d4 f7f5", "Take control of e4 at once. Aggressive but weakens the king.", 2 },
+    { "A10", "English Opening", "c2c4", "Flank opening: control d5 and keep the centre flexible.", 4 },
+    { "A20", "English: Reversed Sicilian", "c2c4 e7e5", "A Sicilian with an extra tempo for White.", 3 },
+    { "A09", "Reti Opening", "g1f3 d7d5 c2c4", "Hypermodern: control the centre from the flanks.", 3 },
+    { "A07", "King's Indian Attack", "g1f3 d7d5 g2g3", "A flexible fianchetto setup that works against almost anything.", 2 },
+    { "A02", "Bird's Opening", "f2f4", "Control e5 with a flank pawn; leads to Dutch-like positions.", 0 },
+    { "A01", "Nimzowitsch-Larsen Attack", "b2b3", "Fianchetto the queen's bishop to hit the long diagonal.", 1 },
+    { "A00", "Grob Attack", "g2g4", "A provocative flank thrust: risky, but it surprises many opponents.", 0 },
+};
+#define NOPEN ((int)(sizeof(OPENINGS) / sizeof(OPENINGS[0])))
+
+static int opn_len(const opening_t *o)
+{
+    int n = 0;
+    for (const char *p = o->moves; *p; ) { n++; p += 4; if (*p == ' ') p++; }
+    return n;
+}
+
+static const char *opn_tok(const opening_t *o, int idx)           // the idx-th move of the line, or NULL
+{
+    const char *p = o->moves;
+    for (int i = 0; *p; i++) { if (i == idx) return p; p += 4; if (*p == ' ') p++; }
+    return NULL;
+}
+
+static bool opn_match(const opening_t *o, const cmove_t *mv, int count)   // do the first `count` plies of mv follow the line?
+{
+    const char *p = o->moves;
+    for (int i = 0; i < count; i++) {
+        char s[8];
+        if (!*p) return false;
+        ch_mstr(mv[i], s);
+        if (strncmp(s, p, 4) != 0) return false;
+        p += 4;
+        if (*p == ' ') p++;
+    }
+    return true;
+}
+
+// The longest opening that has been played completely (index or -1); *next = the shortest opening the game is still heading for.
+static int opn_find(const cmove_t *mv, int n, int *next)
+{
+    int best = -1, bestlen = 0, nextlen = 1 << 30;
+    *next = -1;
+    for (int i = 0; i < NOPEN; i++) {
+        int L = opn_len(&OPENINGS[i]);
+        if (L <= n) { if (L > bestlen && opn_match(&OPENINGS[i], mv, L)) { best = i; bestlen = L; } }
+        else if (L < nextlen && opn_match(&OPENINGS[i], mv, n)) { *next = i; nextlen = L; }
+    }
+    return best;
+}
+
+// The line's move number idx as a legal move of the current position.
+static bool opn_tok_move(const opening_t *o, int idx, cmove_t *out)
+{
+    const char *t = opn_tok(o, idx);
+    if (!t) return false;
+    for (int i = 0; i < g_ch.nlegal; i++) {
+        char s[8];
+        if (CM_PROMO(g_ch.legal[i])) continue;
+        ch_mstr(g_ch.legal[i], s);
+        if (strncmp(s, t, 4) == 0) { *out = g_ch.legal[i]; return true; }
+    }
+    return false;
+}
+
+static bool opn_move_in_book(cmove_t m)
+{
+    int n = g_ch.nundo;
+    for (int i = 0; i < NOPEN; i++) {
+        const opening_t *o = &OPENINGS[i];
+        cmove_t bm;
+        if (opn_len(o) > n && opn_match(o, g_ch.umv, n) && opn_tok_move(o, n, &bm) && bm == m) return true;
+    }
+    return false;
+}
+
+// The AI's book move: openings that fit the game so far vote for their next move, weighted by popularity.
+static cmove_t ch_book_move(int *open_idx)
+{
+    int n = g_ch.nundo, nc = 0, total = 0, wt[24], src[24];
+    cmove_t cm[24];
+    for (int i = 0; i < NOPEN; i++) {
+        const opening_t *o = &OPENINGS[i];
+        cmove_t m;
+        if (!o->w || opn_len(o) <= n || !opn_match(o, g_ch.umv, n) || !opn_tok_move(o, n, &m)) continue;
+        int k = 0;
+        while (k < nc && cm[k] != m) k++;
+        if (k == nc) { if (nc == 24) continue; cm[nc] = m; wt[nc] = 0; src[nc] = i; nc++; }
+        wt[k] += o->w;
+        total += o->w;
+    }
+    if (!nc) return 0;
+    ch_seed();
+    int r = (int)(ch_rand() % (uint32_t)total);
+    for (int k = 0; k < nc; k++) { if (r < wt[k]) { *open_idx = src[k]; return cm[k]; } r -= wt[k]; }
+    *open_idx = src[0];
+    return cm[0];
+}
+
+// ---- the game ----
+
+static bool ch_insufficient(const cpos_t *p)
+{
+    int minors = 0;
+    for (int i = 0; i < 64; i++) {
+        int a = iabs(p->b[i]);
+        if (a == PC_P || a == PC_R || a == PC_Q) return false;
+        if (a == PC_N || a == PC_B) minors++;
+    }
+    return minors <= 1;
+}
+
+static void ch_opening_update(void)
+{
+    int n = g_ch.nundo, prev = -1, dummy;
+    g_ch.nopn_h = 0;
+    for (int k = 1; k <= n && k <= 24; k++) {
+        int idx = opn_find(g_ch.umv, k, &dummy);
+        if (idx < 0 || idx == prev) continue;
+        if (g_ch.nopn_h == 10) { memmove(&g_ch.opn_h[0], &g_ch.opn_h[1], 9 * sizeof(g_ch.opn_h[0])); g_ch.nopn_h--; }
+        g_ch.opn_h[g_ch.nopn_h].ply = k;
+        g_ch.opn_h[g_ch.nopn_h].idx = idx;
+        g_ch.nopn_h++;
+        prev = idx;
+    }
+    g_ch.opn_cur = opn_find(g_ch.umv, n, &g_ch.opn_next);
+}
+
+static void ch_refresh(void)
+{
+    cpos_t *p = &g_ch.pos;
+    g_ch.nlegal = ch_legal(p, g_ch.legal, false);
+    g_ch.check = ch_in_check(p, p->side);
+    g_ch.state = 0;
+    g_ch.why[0] = 0;
+    if (g_ch.nlegal == 0) {
+        if (g_ch.check) g_ch.state = p->side == 0 ? 2 : 1;
+        else { g_ch.state = 3; put_str(g_ch.why, sizeof(g_ch.why), "Stalemate"); }
+    } else if (p->half >= 100) { g_ch.state = 3; put_str(g_ch.why, sizeof(g_ch.why), "Draw: 50-move rule"); }
+    else if (ch_insufficient(p)) { g_ch.state = 3; put_str(g_ch.why, sizeof(g_ch.why), "Draw: no material"); }
+    else if (g_ch.nundo >= CH_MAXGAME - 2) { g_ch.state = 3; put_str(g_ch.why, sizeof(g_ch.why), "Draw: move limit"); }
+    else {
+        int reps = 0;
+        uint64_t h = g_ch_hist[g_ch_nh - 1];
+        for (int i = 0; i < g_ch_nh; i++) if (g_ch_hist[i] == h) reps++;
+        if (reps >= 3) { g_ch.state = 3; put_str(g_ch.why, sizeof(g_ch.why), "Draw: repetition"); }
+    }
+    ch_opening_update();
+}
+
+static void ch_new(void)
+{
+    if (!ch_scratch()) return;
+    static const int8_t BACK[8] = { PC_R, PC_N, PC_B, PC_Q, PC_K, PC_B, PC_N, PC_R };
+    memset(&g_ch.pos, 0, sizeof(g_ch.pos));
+    for (int f = 0; f < 8; f++) {
+        g_ch.pos.b[f] = (int8_t)-BACK[f];
+        g_ch.pos.b[8 + f] = -PC_P;
+        g_ch.pos.b[48 + f] = PC_P;
+        g_ch.pos.b[56 + f] = BACK[f];
+    }
+    g_ch.pos.castle = 15;
+    g_ch.pos.ep = -1;
+    g_ch.nundo = 0;
+    g_ch.sel = -1;
+    g_ch.has_last = false;
+    g_ch.ai_pending = g_ch.thinking = false;
+    g_ch.hint_from = g_ch.hint_to = -1;
+    g_ch.have_score = false;
+    g_ch.depth_done = g_ch.msg_col = 0;
+    g_ch.ai_msg[0] = g_ch.coach_msg[0] = g_ch.tr_msg[0] = 0;
+    g_ch.tr_ok = g_ch.tr_bad = g_ch.tr_miss = 0;
+    g_ch.tr_done = false;
+    if (g_ch.mode == 1) put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Play the book moves (H = hint)");
+    memset(g_tt, 0, sizeof(tt_t) * (size_t)TT_SIZE);
+    g_ch_hist[0] = ch_hash(&g_ch.pos);
+    g_ch_nh = 1;
+    ch_refresh();
+    if (g_ch.human == 1) { g_ch.ai_pending = true; g_ch.ai_t = now_ms(); }
+}
+
+static void chess_init(void)
+{
+    static bool ready;
+    if (ready) return;
+    g_ch.level = 2;
+    g_ch.human = 0;
+    g_ch.coach = true;
+    g_ch.book = true;
+    g_ch.tr_open = 2;                                             // the Italian Game
+    ch_new();
+    ready = true;
+}
+
+static void ch_apply(cmove_t m)
+{
+    if (g_ch.nundo >= CH_MAXGAME - 1) return;
+    ch_san(&g_ch.pos, m, g_ch_san[g_ch.nundo]);
+    g_ch.undo[g_ch.nundo] = g_ch.pos;
+    g_ch.umv[g_ch.nundo] = m;
+    g_ch.nundo++;
+    ch_make(&g_ch.pos, m);
+    g_ch_hist[g_ch.nundo] = ch_hash(&g_ch.pos);
+    g_ch_nh = g_ch.nundo + 1;
+    g_ch.last = m;
+    g_ch.has_last = true;
+    g_ch.sel = -1;
+    g_ch.hint_from = g_ch.hint_to = -1;
+    ch_refresh();
+}
+
+static void ch_undo(void)
+{
+    int n = 1;
+    if ((((g_ch.nundo - 1) & 1) != g_ch.human)) n = 2;            // go back to a position where the human is to move
+    if (n > g_ch.nundo) { flash("nothing to undo"); return; }
+    g_ch.pos = g_ch.undo[g_ch.nundo - n];
+    g_ch.nundo -= n;
+    g_ch_nh = g_ch.nundo + 1;
+    g_ch.sel = -1;
+    g_ch.ai_pending = false;
+    g_ch.hint_from = g_ch.hint_to = -1;
+    g_ch.coach_msg[0] = g_ch.ai_msg[0] = g_ch.tr_msg[0] = 0;
+    g_ch.tr_done = false;
+    g_ch.has_last = g_ch.nundo > 0;
+    if (g_ch.has_last) g_ch.last = g_ch.umv[g_ch.nundo - 1];
+    ch_refresh();
+}
+
+static bool ch_flipped(void) { return (g_ch.human == 1) != g_ch.flip; }
+
+// ---- trainer ----
+
+static bool ch_train_active(void) { return g_ch.mode == 1 && g_ch.nundo < opn_len(&OPENINGS[g_ch.tr_open]); }
+static bool ch_expected(cmove_t *m) { return opn_tok_move(&OPENINGS[g_ch.tr_open], g_ch.nundo, m); }
+
+static void ch_train_check_done(void)
+{
+    if (g_ch.mode != 1 || g_ch.tr_done || g_ch.nundo < opn_len(&OPENINGS[g_ch.tr_open])) return;
+    g_ch.tr_done = true;
+    g_ch.msg_col = 1;
+    put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Line complete! Play on against the engine.");
+}
+
+static void train_step(int d)
+{
+    g_ch.tr_open = ((g_ch.tr_open + d) % NOPEN + NOPEN) % NOPEN;
+    ch_new();
+}
+
+static void chess_set_mode(int mode)
+{
+    g_ch.mode = mode;
+    if (mode == 1 && g_ch.opn_cur >= 0) g_ch.tr_open = g_ch.opn_cur;
+    ch_new();
+}
+
+// ---- coach and hints ----
+
+static void ch_coach(cmove_t played)                              // called with the position before the move
+{
+    int sc, dd;
+    g_ch.coach_msg[0] = 0;
+    g_ch.msg_col = 0;
+    if (opn_move_in_book(played)) { put_str(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Coach: book move"); g_ch.msg_col = 1; return; }
+    cmove_t best = ch_think(&g_ch.pos, 4, 350, 0, false, &sc, &dd, false);
+    if (!best || dd == 0) return;                                 // only one legal move: nothing to say
+    if (best == played) { put_str(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Coach: best move!"); g_ch.msg_col = 1; return; }
+    int s = ch_score_move(&g_ch.pos, played, 4, 350);
+    if (s == 0x7fff) return;
+    int loss = sc - s;
+    if (loss < 0) loss = 0;
+    char bs[10];
+    ch_san(&g_ch.pos, best, bs);
+    if (loss <= 15) { put_str(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Coach: excellent"); g_ch.msg_col = 1; }
+    else if (loss <= 40) { put_str(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Coach: good move"); g_ch.msg_col = 1; }
+    else {
+        const char *tag = loss <= 90 ? "inaccuracy" : (loss <= 200 ? "mistake" : "blunder");
+        snprintf(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Coach: %s - better %s", tag, bs);
+        g_ch.msg_col = loss <= 90 ? 2 : 3;
+    }
+}
+
+static void chess_hint(void)
+{
+    g_ch.hint_from = g_ch.hint_to = -1;
+    if (g_ch.state != 0 || g_ch.ai_pending || g_ch.pos.side != g_ch.human) return;
+    cmove_t m = 0;
+    char san[10];
+    if (g_ch.mode == 1 && ch_train_active()) {
+        if (!ch_expected(&m)) { put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "No book move here"); return; }
+        ch_san(&g_ch.pos, m, san);
+        snprintf(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Hint: %s", san);
+    } else {
+        int sc, dd;
+        m = ch_think(&g_ch.pos, 6, 700, 0, false, &sc, &dd, false);
+        if (!m) return;
+        ch_san(&g_ch.pos, m, san);
+        if (dd) { char ev[12]; ch_fmt_cp(sc, ev); snprintf(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Hint: %s (%s for you)", san, ev); }
+        else snprintf(g_ch.coach_msg, sizeof(g_ch.coach_msg), "Hint: %s (the only move)", san);
+    }
+    g_ch.msg_col = 2;
+    g_ch.hint_from = CM_FROM(m);
+    g_ch.hint_to = CM_TO(m);
+}
+
+// ---- PGN ----
+
+static void chess_save_pgn(void)
+{
+    static char buf[6000];
+    char path[128], m[64], res[8];
+    int n;
+    if (g_ch.nundo == 0) { flash("play a few moves first"); return; }
+    if (!avfs_is_directory(g_desk_dir) && avfs_create_dir(g_desk_dir) != 0) { flash("cannot create the Desktop folder"); return; }
+    for (n = 1; n < 100; n++) { snprintf(path, sizeof(path), "%s/chess%d.pgn", g_desk_dir, n); if (!avfs_file_exists(path)) break; }
+    if (n == 100) { flash("too many games on the desktop"); return; }
+    put_str(res, sizeof(res), g_ch.state == 1 ? "1-0" : (g_ch.state == 2 ? "0-1" : (g_ch.state == 3 ? "1/2-1/2" : "*")));
+    char eng[24];
+    snprintf(eng, sizeof(eng), "RadiWM %s", CH_LEVELS[g_ch.level]);
+    int o = snprintf(buf, sizeof(buf), "[Event \"RadiWM chess\"]\n[Site \"RadiumOS\"]\n[White \"%s\"]\n[Black \"%s\"]\n[Result \"%s\"]\n",
+                     g_ch.human == 0 ? "You" : eng, g_ch.human == 0 ? eng : "You", res);
+    if (g_ch.opn_cur >= 0) o += snprintf(buf + o, sizeof(buf) - (size_t)o, "[ECO \"%s\"]\n[Opening \"%s\"]\n", OPENINGS[g_ch.opn_cur].eco, OPENINGS[g_ch.opn_cur].name);
+    buf[o++] = '\n';
+    int col = 0;
+#define PGN_ADD(s_) do { int l_ = (int)strlen(s_); if (col + l_ + 1 > 78) { buf[o++] = '\n'; col = 0; } else if (col) { buf[o++] = ' '; col++; } memcpy(buf + o, s_, (size_t)l_); o += l_; col += l_; } while (0)
+    for (int i = 0; i < g_ch.nundo && o < (int)sizeof(buf) - 40; i++) {
+        if ((i & 1) == 0) { char num[12]; int k = put_uint(num, (uint32_t)(i / 2 + 1)); num[k++] = '.'; num[k] = 0; PGN_ADD(num); }
+        PGN_ADD(g_ch_san[i]);
+    }
+    PGN_ADD(res);
+#undef PGN_ADD
+    buf[o++] = '\n';
+    if (avfs_save_file(path, buf, (uint32_t)o, true) != 0) { flash("could not save the game"); return; }
+    snprintf(m, sizeof(m), "saved chess%d.pgn on the Desktop", n);
+    flash(m);
+    desktop_icons_refresh();
+    damage_icons();
+}
+
+// ---- the computer's turn ----
+
+static void chess_progress(int depth, int score_white)           // called by the engine after every completed depth
+{
+    g_ch.depth_done = depth;
+    g_ch.score_cp = score_white;
+    g_ch.have_score = true;
+    if (!g_ch_live || depth < 3) return;
+    for (int i = 0; i < MAX_WIN; i++) if (g_win[i].used && g_win[i].type == W_CHESS) damage_content(&g_win[i]);
+    draw_frame();
+}
+
+// Called by the main loop: the computer (or the trainer) moves shortly after the human, once "Thinking..." has been drawn.
+static void chess_tick(void)
+{
+    if (!g_ch.ai_pending || now_ms() - g_ch.ai_t < 150) return;
+    g_ch.ai_pending = false;
+    if (g_ch.state != 0 || g_ch.pos.side == g_ch.human) return;
+    cmove_t m = 0;
+    char san[10];
+    g_ch.ai_msg[0] = 0;
+    if (g_ch.mode == 1 && ch_train_active() && ch_expected(&m)) {            // the trainer plays the other side of the line
+        ch_san(&g_ch.pos, m, san);
+        snprintf(g_ch.ai_msg, sizeof(g_ch.ai_msg), "Opponent plays %s (book)", san);
+        g_ch.msg_col = 0;
+    }
+    if (!m && g_ch.book && g_ch.mode == 0 && g_ch.level >= 1) {
+        int oi = 0;
+        m = ch_book_move(&oi);
+        if (m) {
+            ch_san(&g_ch.pos, m, san);
+            snprintf(g_ch.ai_msg, sizeof(g_ch.ai_msg), "AI book move %s", san);
+            g_ch.have_score = false;
+        }
+    }
+    if (!m) {
+        g_ch.thinking = true;
+        g_ch.have_score = false;
+        g_ch.depth_done = 0;
+        g_ch_live = true;
+        m = ch_best(&g_ch.pos, g_ch.level);
+        g_ch_live = false;
+        g_ch.thinking = false;
+        if (m) {
+            ch_san(&g_ch.pos, m, san);
+            if (g_ch.have_score) {
+                char ev[12];
+                ch_fmt_cp(g_ch.score_cp, ev);
+                snprintf(g_ch.ai_msg, sizeof(g_ch.ai_msg), "AI plays %s (depth %d, %s)", san, g_ch.depth_done, ev);
+            } else snprintf(g_ch.ai_msg, sizeof(g_ch.ai_msg), "AI plays %s", san);
+        }
+    }
+    if (m) { ch_apply(m); ch_train_check_done(); }
+    for (int i = 0; i < MAX_WIN; i++) if (g_win[i].used && g_win[i].type == W_CHESS) damage_content(&g_win[i]);
+}
+
+// ---- pieces and window ----
+
+static void ch_draw_piece(int kind, int x, int y, int s, uint32_t fill, uint32_t edge)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t col = pass == 0 ? edge : fill;
+        int g = pass == 0 ? (s >= 36 ? 2 : 1) : 0;                              // pass 0 draws the outline, pass 1 the filling
+#define XR(rx, ry, rw, rh) fill_rect(x + (rx) * s / 48 - g, y + (ry) * s / 48 - g, (rw) * s / 48 + 2 * g, (rh) * s / 48 + 2 * g, col)
+#define XD(cx, cy, r) disc(x + (cx) * s / 48, y + (cy) * s / 48, imax(1, (r) * s / 48) + g, col)
+        XR(9, 38, 30, 6);
+        switch (kind) {
+        case PC_P: XD(24, 14, 7); XR(20, 19, 8, 5); XR(16, 24, 16, 6); XR(13, 30, 22, 9); break;
+        case PC_R: XR(12, 5, 6, 9); XR(21, 5, 6, 9); XR(30, 5, 6, 9); XR(12, 12, 24, 5); XR(16, 17, 16, 14); XR(12, 31, 24, 8); break;
+        case PC_N: XR(17, 9, 13, 11); XR(7, 17, 14, 7); XR(19, 6, 4, 5); XR(21, 18, 17, 21); XR(13, 24, 10, 15); break;
+        case PC_B: XD(24, 6, 3); XD(24, 15, 7); XR(20, 20, 8, 5); XR(16, 25, 16, 6); XR(12, 31, 24, 8); break;
+        case PC_Q: XD(8, 9, 3); XD(16, 6, 3); XD(24, 4, 3); XD(32, 6, 3); XD(40, 9, 3); XR(9, 11, 30, 6); XR(14, 17, 20, 12); XR(11, 29, 26, 10); break;
+        default: XR(22, 2, 4, 12); XR(18, 6, 12, 4); XD(24, 20, 6); XR(15, 24, 18, 8); XR(11, 31, 26, 8); break;
+        }
+    }
+#undef XR
+#undef XD
+    if (kind == PC_N) fill_rect(x + 22 * s / 48, y + 12 * s / 48, imax(2, s / 18), imax(2, s / 18), edge);
+    if (kind == PC_B) line(x + 21 * s / 48, y + 18 * s / 48, x + 27 * s / 48, y + 11 * s / 48, imax(1, s / 24), edge);
+}
+
+static rect_t chess_board_rect(const win_t *w) { rect_t c = content_rect(w); rect_t r = { c.x + 22, c.y + 12, 8 * CH_CELL, 8 * CH_CELL }; return r; }
+
+static rect_t chess_btn(const win_t *w, int i)                    // 10 buttons in two columns
+{
+    rect_t b = chess_board_rect(w), c = content_rect(w);
+    int x = b.x + b.w + 18, bw = (imax(150, c.x + c.w - x - 12) - 6) / 2;
+    rect_t r = { x + (i & 1) * (bw + 6), c.y + 96 + (i >> 1) * 34, bw, 28 };
+    return r;
+}
+
+static int chess_sq(const win_t *w, int mx, int my)              // board square under the pointer, or -1
+{
+    rect_t b = chess_board_rect(w);
+    if (mx < b.x || my < b.y || mx >= b.x + b.w || my >= b.y + b.h) return -1;
+    int dc = (mx - b.x) / CH_CELL, dr = (my - b.y) / CH_CELL;
+    return ch_flipped() ? (7 - dr) * 8 + (7 - dc) : dr * 8 + dc;
+}
+
+static void chess_taken(int lost_side, int *cnt)                  // pieces of that colour that are no longer on the board
+{
+    static const int START[6] = { 0, 8, 2, 2, 2, 1 };
+    int have[7] = { 0 };
+    for (int i = 0; i < 64; i++) { int pc = g_ch.pos.b[i]; if (pc && (pc > 0) == (lost_side == 0)) have[iabs(pc)]++; }
+    for (int t = 1; t <= 5; t++) cnt[t] = imax(0, START[t] - have[t]);
+}
+
+static int chess_wrap(int x, int y, const char *s, int cols, int maxlines, uint32_t fg)   // word-wrapped text; returns the lines used
+{
+    int lines = 0;
+    while (*s && lines < maxlines) {
+        char tmp[64];
+        int len = (int)strlen(s), cut = len;
+        if (cols > 60) cols = 60;
+        if (len > cols) {
+            cut = cols;
+            while (cut > 0 && s[cut] != ' ') cut--;
+            if (cut == 0) cut = cols;
+        }
+        memcpy(tmp, s, (size_t)cut);
+        tmp[cut] = 0;
+        text(x, y + lines * CH, tmp, fg, TH.bg, cols);
+        s += cut;
+        while (*s == ' ') s++;
+        lines++;
+    }
+    return lines;
+}
+
+static void render_chess(win_t *w)
+{
+    rect_t c = content_rect(w), b = chess_board_rect(w);
+    fill_rect(c.x, c.y, c.w, c.h, TH.bg);
+    bool flip = ch_flipped(), hint[64] = { false };
+    int ksq = -1;
+    if (g_ch.check) for (int i = 0; i < 64; i++) if (g_ch.pos.b[i] == (g_ch.pos.side == 0 ? PC_K : -PC_K)) ksq = i;
+    if (g_ch.sel >= 0) for (int i = 0; i < g_ch.nlegal; i++) if (CM_FROM(g_ch.legal[i]) == g_ch.sel) hint[CM_TO(g_ch.legal[i])] = true;
+    for (int dr = 0; dr < 8; dr++)
+        for (int dc = 0; dc < 8; dc++) {
+            int sq = flip ? (7 - dr) * 8 + (7 - dc) : dr * 8 + dc;
+            int px = b.x + dc * CH_CELL, py = b.y + dr * CH_CELL;
+            bool light = (((sq >> 3) + (sq & 7)) & 1) == 0;
+            uint32_t col = light ? 0xeeeed2 : 0x769656;
+            if (g_ch.has_last && (sq == CM_FROM(g_ch.last) || sq == CM_TO(g_ch.last))) col = light ? 0xf5f682 : 0xbaca44;
+            if (sq == g_ch.hint_from || sq == g_ch.hint_to) col = mix(col, 0x3b82f6, 55);
+            if (sq == g_ch.sel) col = light ? 0xf7ec59 : 0xdbc531;
+            if (sq == ksq) col = 0xe86a5e;
+            fill_rect(px, py, CH_CELL, CH_CELL, col);
+            int pc = g_ch.pos.b[sq];
+            if (pc) ch_draw_piece(iabs(pc), px + 4, py + 4, CH_CELL - 8, pc > 0 ? 0xf8f4e8 : 0x2a2a2a, pc > 0 ? 0x1c1c1a : 0xe8e4d8);
+            if (hint[sq]) {
+                bool cap = pc != 0 || (iabs(g_ch.pos.b[g_ch.sel]) == PC_P && sq == g_ch.pos.ep);
+                if (cap) { frame_rect(px + 1, py + 1, CH_CELL - 2, CH_CELL - 2, 0xcc4444); frame_rect(px + 2, py + 2, CH_CELL - 4, CH_CELL - 4, 0xcc4444); }
+                else disc(px + CH_CELL / 2, py + CH_CELL / 2, 8, mix(col, 0x000000, 28));
+            }
+            if (dc == 0) { char l[2] = { (char)('0' + 8 - (sq >> 3)), 0 }; text(b.x - 14, py + (CH_CELL - CH) / 2, l, TH.dim, TH.bg, 1); }
+            if (dr == 7) { char l[2] = { (char)('a' + (sq & 7)), 0 }; text(px + (CH_CELL - CW) / 2, b.y + 8 * CH_CELL + 4, l, TH.dim, TH.bg, 1); }
+        }
+    frame_rect(b.x - 1, b.y - 1, b.w + 2, b.h + 2, TH.line);
+
+    // the opening, under the board
+    {
+        int by = b.y + 8 * CH_CELL + 22, bcols = 8 * CH_CELL / CW;
+        char l1[96], l2[160];
+        const opening_t *cur = g_ch.opn_cur >= 0 ? &OPENINGS[g_ch.opn_cur] : NULL;
+        if (g_ch.mode == 1) {
+            const opening_t *t = &OPENINGS[g_ch.tr_open];
+            snprintf(l1, sizeof(l1), "Training: %s (%s)", t->name, t->eco);
+            snprintf(l2, sizeof(l2), "%s", t->idea);
+        } else {
+            if (cur) snprintf(l1, sizeof(l1), "%s (%s)", cur->name, cur->eco);
+            else put_str(l1, sizeof(l1), g_ch.nundo ? "Unusual opening" : "Starting position");
+            if (g_ch.opn_next >= 0 && g_ch.nundo) snprintf(l2, sizeof(l2), "Heading for: %s", OPENINGS[g_ch.opn_next].name);
+            else if (cur && opn_len(cur) == g_ch.nundo) snprintf(l2, sizeof(l2), "%s", cur->idea);
+            else put_str(l2, sizeof(l2), g_ch.nundo ? "Out of book: you are on your own now" : "Make a move; the opening name appears here");
+        }
+        text(b.x, by, l1, TH.accent, TH.bg, bcols);
+        text(b.x, by + CH, l2, TH.dim, TH.bg, bcols);
+    }
+
+    int px = b.x + b.w + 18, tcols = (c.x + c.w - px - 8) / CW, pw = c.x + c.w - px - 12;
+    text(px, c.y + 14, "Chess", TH.accent, TH.bg, 8);
+    text(px + 8 * CW + 8, c.y + 14, g_ch.mode ? "- opening trainer" : "- vs engine", TH.dim, TH.bg, 20);
+    char stbuf[40];
+    const char *st = "Your move";
+    uint32_t sc = TH.fg;
+    if (g_ch.state == 1 || g_ch.state == 2) {
+        bool win = (g_ch.state == 1 && g_ch.human == 0) || (g_ch.state == 2 && g_ch.human == 1);
+        st = win ? "Checkmate: you win!" : "Checkmate: you lose";
+        sc = win ? TH.good : TH.bad;
+    } else if (g_ch.state == 3) { st = g_ch.why; sc = TH.warn; }
+    else if (g_ch.thinking || g_ch.ai_pending) {
+        if (g_ch.thinking && g_ch.depth_done) { snprintf(stbuf, sizeof(stbuf), "Thinking... depth %d", g_ch.depth_done); st = stbuf; }
+        else st = "Thinking...";
+        sc = TH.dim;
+    } else if (g_ch.check) { st = "Check! Your move"; sc = TH.warn; }
+    text(px, c.y + 38, st, sc, TH.bg, tcols);
+    {
+        const char *msg = g_ch.mode == 1 ? g_ch.tr_msg : (g_ch.coach_msg[0] ? g_ch.coach_msg : g_ch.ai_msg);
+        uint32_t mc = g_ch.msg_col == 1 ? TH.good : (g_ch.msg_col == 2 ? TH.warn : (g_ch.msg_col == 3 ? TH.bad : TH.dim));
+        if (!g_ch.coach_msg[0] && g_ch.mode == 0) mc = TH.dim;
+        text(px, c.y + 56, msg, mc, TH.bg, tcols);
+    }
+    if (g_ch.have_score && g_ch.mode == 0 && pw > 40) {                           // evaluation bar (white on the left)
+        int e = imax(-600, imin(600, g_ch.score_cp)), wpart = pw * (50 + e / 12) / 100;
+        fill_rect(px, c.y + 76, wpart, 8, 0xf4f1ea);
+        fill_rect(px + wpart, c.y + 76, pw - wpart, 8, 0x2a2a2a);
+        frame_rect(px - 1, c.y + 75, pw + 2, 10, TH.line);
+    }
+
+    char lv[24];
+    snprintf(lv, sizeof(lv), "Level: %s", CH_LEVELS[g_ch.level]);
+    const char *lab[10] = { g_ch.mode ? "Restart line" : "New game", "Undo", g_ch.human == 0 ? "Play: White" : "Play: Black", lv,
+                            g_ch.mode ? "Mode: Train" : "Mode: Play", "Hint", g_ch.mode ? "< Prev line" : "Flip board", g_ch.mode ? "Next line >" : "Save PGN",
+                            g_ch.coach ? "Coach: on" : "Coach: off", g_ch.book ? "Book: on" : "Book: off" };
+    for (int i = 0; i < 10; i++) {
+        rect_t r = chess_btn(w, i);
+        bool on = (i == 4 && g_ch.mode) || (i == 8 && g_ch.coach) || (i == 9 && g_ch.book);
+        uint32_t bg = on ? TH.accent : TH.line;
+        round_rect(r.x, r.y, r.w, r.h, 4, bg);
+        text_center(r.x, r.w, r.y + (r.h - CH) / 2, lab[i], on ? TH.accent_tx : TH.fg, bg, r.w / CW);
+    }
+
+    int y = c.y + 270;
+    char row[96];
+    if (g_ch.mode == 0) {
+        text(px, y, "Opening history", TH.dim, TH.bg, 16);
+        y += CH + 2;
+        if (g_ch.nopn_h == 0) { text(px, y, "(none yet)", TH.dim, TH.bg, 12); y += CH; }
+        for (int i = imax(0, g_ch.nopn_h - 3); i < g_ch.nopn_h; i++) {            // who made the opening change, and with which move
+            int ply = g_ch.opn_h[i].ply;
+            bool white = (ply & 1) == 1, me = white == (g_ch.human == 0);
+            snprintf(row, sizeof(row), "%d%s %s (%s) %s", (ply + 1) / 2, white ? "." : "...", g_ch_san[ply - 1], me ? "you" : "AI", OPENINGS[g_ch.opn_h[i].idx].name);
+            text(px, y, row, TH.fg, TH.bg, tcols);
+            y += CH;
+        }
+        if (g_ch.opn_cur >= 0) y += 4 + chess_wrap(px, y + 4, OPENINGS[g_ch.opn_cur].idea, tcols, 3, TH.dim) * CH;
+    } else {
+        const opening_t *t = &OPENINGS[g_ch.tr_open];
+        int L = opn_len(t);
+        snprintf(row, sizeof(row), "Line: %d of %d moves  (you: %s)", imin(g_ch.nundo, L), L, g_ch.human == 0 ? "White" : "Black");
+        text(px, y, row, TH.fg, TH.bg, tcols);
+        snprintf(row, sizeof(row), "Correct %d   Mistakes %d", g_ch.tr_ok, g_ch.tr_bad);
+        text(px, y + CH, row, g_ch.tr_bad ? TH.warn : TH.good, TH.bg, tcols);
+        chess_wrap(px, y + 2 * CH + 6, t->idea, tcols, 4, TH.dim);
+    }
+
+    y = c.y + 396;
+    for (int side = 0; side < 2; side++) {                                        // side = colour that lost the pieces
+        int cnt[6], ry = y + side * 28, xx = px + 92;
+        chess_taken(side, cnt);
+        text(px, ry + 4, side == 1 ? "White took" : "Black took", TH.dim, TH.bg, 12);
+        for (int t = PC_Q; t >= PC_P; t--)
+            for (int k = 0; k < cnt[t]; k++) {
+                ch_draw_piece(t, xx, ry, 22, side == 0 ? 0xf8f4e8 : 0x2a2a2a, side == 0 ? 0x1c1c1a : 0xe8e4d8);
+                xx += 11;
+            }
+    }
+
+    y = c.y + 456;
+    text(px, y, "Moves", TH.dim, TH.bg, 8);
+    int y0 = y + CH + 2, lines = (c.y + c.h - 6 - y0) / CH, turns = (g_ch.nundo + 1) / 2, first = imax(0, turns - lines);
+    for (int t = first; t < turns; t++) {
+        snprintf(row, sizeof(row), "%d. %s %s", t + 1, g_ch_san[2 * t], 2 * t + 1 < g_ch.nundo ? g_ch_san[2 * t + 1] : "");
+        text(px, y0 + (t - first) * CH, row, TH.fg, TH.bg, tcols);
+    }
+}
+
+static void chess_button(int i)
+{
+    if (i == 0) ch_new();
+    else if (i == 1) ch_undo();
+    else if (i == 2) { g_ch.human ^= 1; g_ch.flip = false; ch_new(); }
+    else if (i == 3) g_ch.level = (g_ch.level + 1) % 5;
+    else if (i == 4) chess_set_mode(g_ch.mode ^ 1);
+    else if (i == 5) chess_hint();
+    else if (i == 6) { if (g_ch.mode) train_step(-1); else g_ch.flip = !g_ch.flip; }
+    else if (i == 7) { if (g_ch.mode) train_step(1); else chess_save_pgn(); }
+    else if (i == 8) g_ch.coach = !g_ch.coach;
+    else if (i == 9) g_ch.book = !g_ch.book;
+}
+
+// A move chosen by the human: checked by the trainer, judged by the coach, then played; the computer answers shortly after.
+static void ch_try_move(cmove_t m)
+{
+    g_ch.hint_from = g_ch.hint_to = -1;
+    g_ch.coach_msg[0] = 0;
+    g_ch.msg_col = 0;
+    if (g_ch.mode == 1 && ch_train_active()) {
+        cmove_t exp;
+        if (ch_expected(&exp)) {
+            if (m != exp) {
+                g_ch.tr_bad++;
+                g_ch.tr_miss++;
+                g_ch.sel = -1;
+                g_ch.msg_col = 3;
+                if (g_ch.tr_miss >= 2) {
+                    g_ch.hint_from = CM_FROM(exp);
+                    g_ch.hint_to = CM_TO(exp);
+                    put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Not the book move - see the highlight");
+                } else put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Not the book move - try again");
+                return;
+            }
+            g_ch.tr_ok++;
+            g_ch.tr_miss = 0;
+            g_ch.msg_col = 1;
+            put_str(g_ch.tr_msg, sizeof(g_ch.tr_msg), "Correct!");
+        }
+    } else if (g_ch.mode == 0 && g_ch.coach) ch_coach(m);
+    g_ch.ai_msg[0] = 0;
+    ch_apply(m);
+    ch_train_check_done();
+    if (g_ch.state == 0) { g_ch.ai_pending = true; g_ch.ai_t = now_ms(); }
+}
+
+static void chess_click(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    for (int i = 0; i < 10; i++) if (rect_has(chess_btn(w, i), mx, my)) { chess_button(i); damage_content(w); return; }
+    int sq = chess_sq(w, mx, my);
+    if (sq < 0 || g_ch.state != 0 || g_ch.ai_pending || g_ch.pos.side != g_ch.human) return;
+    int pc = g_ch.pos.b[sq];
+    if (g_ch.sel >= 0) {
+        int want = g_shift ? PC_N : (g_ctrl ? PC_R : (g_alt ? PC_B : PC_Q));   // promotion piece (queen by default)
+        for (int i = 0; i < g_ch.nlegal; i++) {
+            cmove_t m = g_ch.legal[i];
+            if (CM_FROM(m) == g_ch.sel && CM_TO(m) == sq && (!CM_PROMO(m) || CM_PROMO(m) == want)) {
+                ch_try_move(m);
+                damage_content(w);
+                return;
+            }
+        }
+    }
+    bool mine = pc != 0 && ((pc > 0) == (g_ch.human == 0));
+    g_ch.sel = (mine && sq != g_ch.sel) ? sq : -1;
+    damage_content(w);
+}
+
+static void chess_key(int wi, uint8_t code, bool ext)
+{
+    if (ext) {
+        if (g_ch.mode == 1) {
+            if (code == 0x4B) train_step(-1);                    // Left / Right: previous / next opening
+            else if (code == 0x4D) train_step(1);
+            else if (code == 0x48) train_step(-5);               // Up / Down: five openings at a time
+            else if (code == 0x50) train_step(5);
+        }
+    } else if (code == 0x3C) ch_new();                           // F2
+    else if (code == 0x16) ch_undo();                            // U
+    else if (code == 0x01) g_ch.sel = -1;                        // Esc
+    else if (code == 0x23) chess_hint();                         // H
+    else if (code == 0x14) chess_set_mode(g_ch.mode ^ 1);        // T
+    else if (code == 0x13 && g_ch.mode == 1) { ch_seed(); g_ch.tr_open = (int)(ch_rand() % (uint32_t)NOPEN); ch_new(); }   // R: random opening
+    damage_content(&g_win[wi]);
+}
+
 // ---- Games ----------------------------------------------------------------------------------------------------------------------
 
 typedef struct { char name[24]; char desc[56]; char cmd[48]; } game_t;
@@ -1869,8 +4185,10 @@ static void scripts_click(int wi, int mx, int my, bool dbl)
 typedef struct { int kind, id, x, y, w, h, val, lo, hi; char label[48]; bool on; } ctl_t;
 enum { CTL_BUTTON, CTL_TOGGLE, CTL_LABEL, CTL_HINT, CTL_SLIDER };
 enum { ID_SHADOWS = 140, ID_SNAP, ID_OPENMAX, ID_RUNWIN, ID_TRAY, ID_DOCKSZ, ID_TERMS = 160,
-       ID_THEME = 10, ID_WP = 20, ID_WPM = 100, ID_PIC = 120, ID_SPEED = 30, ID_ACCEL, ID_DBL, ID_ICONS, ID_DOCK, ID_CLOCK24, ID_DESKFILES, ID_SAVE, ID_BOOTDESK,
+       ID_THEME = 200, ID_THEMEPREV = 900, ID_THEMENEXT, ID_WP = 20, ID_WPM = 100, ID_PIC = 120, ID_SPEED = 30, ID_ACCEL, ID_DBL, ID_ICONS, ID_DOCK, ID_CLOCK24, ID_DESKFILES, ID_SAVE, ID_BOOTDESK,
        ID_AUTOTERM, ID_LOCK, ID_LOGOUT, ID_RESTART, ID_SHUT, ID_CONSOLE, ID_PASSWD, ID_ADDUSER, ID_OPENMON };
+
+enum { ID_TCUR = 170, ID_TPROMPT = 175, ID_TWELCOME = 180 };
 
 static const char *const SET_TABS[] = { "Appearance", "Windows", "Panel & Dock", "Desktop", "Terminal", "Mouse", "Keyboard", "Session", "Users", "About" };
 #define NSETTABS 10
@@ -1896,30 +4214,52 @@ static int settings_layout(const win_t *w, ctl_t *c, int max)
 #define SLIDER(i, yy, lab, v, l, h) do { CTL(CTL_SLIDER, (i), x0, (yy), SLIDER_W, 40, (lab), false); if (n) { c[n - 1].val = (v); c[n - 1].lo = (l); c[n - 1].hi = (h); } } while (0)
     char tmp[48];
     switch (w->tab) {
-    case 0:
+    case 0: {
+        int cols = (r.w - SET_SIDE - 48) / 100;
+        if (cols < 1) cols = 1;
+        if (cols > 6) cols = 6;
+        int per_page = cols * 3;
+        int pages = (NTHEMES + per_page - 1) / per_page;
+        if (g_theme_page >= pages) g_theme_page = pages - 1;
+        if (g_theme_page < 0) g_theme_page = 0;
+        int first = g_theme_page * per_page;
+        int last = first + per_page;
+        if (last > NTHEMES) last = NTHEMES;
+
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Colour theme", false);
-        y += 26;
-        for (int i = 0; i < NTHEMES; i++) CTL(CTL_BUTTON, ID_THEME + i, x0 + i * 100, y, 94, 28, THEMES[i].name, C.theme == i);
-        y += 48;
+        y += 22;
+        for (int i = first; i < last; i++) {
+            int k = i - first;
+            CTL(CTL_BUTTON, ID_THEME + i, x0 + (k % cols) * 100, y + (k / cols) * 28, 94, 24, THEMES[i].name, C.theme == i);
+        }
+        y += 3 * 28 + 4;
+        if (pages > 1) {
+            CTL(CTL_BUTTON, ID_THEMEPREV, x0, y, 70, 24, "< Prev", false);
+            snprintf(tmp, sizeof(tmp), "Page %d of %d", g_theme_page + 1, pages);
+            CTL(CTL_HINT, 0, x0 + 90, y + 4, 0, 0, tmp, false);
+            CTL(CTL_BUTTON, ID_THEMENEXT, x0 + 220, y, 70, 24, "Next >", false);
+        }
+        y += 34;
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Wallpaper", false);
-        y += 26;
+        y += 22;
         {
             static const char *const WL[4] = { "Mascot", "Gradient", "Flat", "Reverse" };
             bool on[4] = { C.wallpaper == 3 && !C.wp_file[0], C.wallpaper == 0, C.wallpaper == 1, C.wallpaper == 2 };
             for (int i = 0; i < 4; i++) CTL(CTL_BUTTON, ID_WP + i, x0 + i * 100, y, 94, 28, WL[i], on[i]);
-            y += 38;
+            y += 32;
             static const char *const ML[4] = { "Fill", "Fit", "Stretch", "Center" };
             for (int i = 0; i < 4; i++) CTL(CTL_BUTTON, ID_WPM + i, x0 + i * 100, y, 94, 24, ML[i], C.wp_mode == i);
         }
-        y += 38;
+        y += 34;
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Your pictures", false);
-        y += 24;
-        for (int i = 0; i < g_npics; i++) CTL(CTL_BUTTON, ID_PIC + i, x0, y + i * 28, 250, 24, g_pics[i].name, C.wp_file[0] && strcmp(C.wp_file, g_pics[i].path) == 0);
+        y += 22;
+        for (int i = 0; i < g_npics; i++) CTL(CTL_BUTTON, ID_PIC + i, x0, y + i * 26, 250, 22, g_pics[i].name, C.wp_file[0] && strcmp(C.wp_file, g_pics[i].path) == 0);
         if (g_npics == 0) {
             CTL(CTL_HINT, 0, x0, y, 0, 0, "Copy .png files to /disk/Pictures", false);
             CTL(CTL_HINT, 0, x0, y + 20, 0, 0, "(or into your Desktop folder).", false);
         }
         break;
+    }
     case 1:
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Windows", false);
         y += 30;
@@ -1953,14 +4293,27 @@ static int settings_layout(const win_t *w, ctl_t *c, int max)
         break;
     case 4:
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Terminal colours", false);
-        y += 26;
+        y += 24;
+        for (int i = 0; i < 8; i++) CTL(CTL_BUTTON, ID_TERMS + i, x0 + (i % 4) * 100, y + (i / 4) * 30, 94, 26, TERM_LABELS[i], C.term_style == i);
+        y += 64 + 112 + 14;                                  // the preview box sits in between (see render_settings)
+        CTL(CTL_LABEL, 0, x0, y, 0, 0, "Cursor", false);
+        y += 22;
         {
-            static const char *const TL_[4] = { "Theme", "Classic", "Amber", "Light" };
-            for (int i = 0; i < 4; i++) CTL(CTL_BUTTON, ID_TERMS + i, x0 + i * 100, y, 94, 28, TL_[i], C.term_style == i);
+            static const char *const CL[3] = { "Block", "Underline", "Bar" };
+            for (int i = 0; i < 3; i++) CTL(CTL_BUTTON, ID_TCUR + i, x0 + i * 100, y, 94, 26, CL[i], C.term_cursor == i);
         }
-        y += 150;
-        CTL(CTL_HINT, 0, x0, y, 0, 0, "Alt+F2 runs one command, Ctrl+Alt+T opens a", false); y += 20;
-        CTL(CTL_HINT, 0, x0, y, 0, 0, "terminal. Ctrl+C stops a command that hangs.", false);
+        y += 36;
+        CTL(CTL_LABEL, 0, x0, y, 0, 0, "Prompt", false);
+        y += 22;
+        {
+            static const char *const PL[4] = { "user@radium", "$", ">", "radium>" };
+            for (int i = 0; i < 4; i++) CTL(CTL_BUTTON, ID_TPROMPT + i, x0 + i * 100, y, 94, 26, PL[i], C.term_prompt == i);
+        }
+        y += 36;
+        CTL(CTL_TOGGLE, ID_TWELCOME, x0, y, 20, 20, "Greeting in a new terminal", C.term_welcome);
+        y += 30;
+        CTL(CTL_HINT, 0, x0, y, 0, 0, "Tab completes, Up/Down recall, Ctrl+A/E/U/K/W edit", false); y += 20;
+        CTL(CTL_HINT, 0, x0, y, 0, 0, "the line, Ctrl+V pastes, Ctrl+C cancels the line.", false);
         break;
     case 6:
         CTL(CTL_LABEL, 0, x0, y, 0, 0, "Keyboard shortcuts", false);
@@ -2055,7 +4408,7 @@ static int settings_layout(const win_t *w, ctl_t *c, int max)
         y += 28;
         snprintf(tmp, sizeof(tmp), "Version        %s", update_current_version());
         CTL(CTL_HINT, 0, x0, y, 0, 0, tmp, false); y += 20;
-        CTL(CTL_HINT, 0, x0, y, 0, 0, "Desktop        RadiumDE", false); y += 20;
+        CTL(CTL_HINT, 0, x0, y, 0, 0, "Desktop        RadiWM", false); y += 20;
         snprintf(tmp, sizeof(tmp), "Memory         %u of %u MB in use", tm > fm ? tm - fm : 0, tm);
         CTL(CTL_HINT, 0, x0, y, 0, 0, tmp, false); y += 20;
         uint32_t dt = 0, du = 0;
@@ -2080,7 +4433,6 @@ static int settings_layout(const win_t *w, ctl_t *c, int max)
 #undef CTL
     return n;
 }
-
 static void settings_preview(int x, int y)
 {
     int pw = 230, ph = 130;
@@ -2126,8 +4478,8 @@ static void render_settings(win_t *w)
     round_rect(sv.x, sv.y, sv.w, sv.h, 4, shot ? shade(TH.good, 112) : TH.good);
     text_center(sv.x, sv.w, sv.y + (sv.h - CH) / 2, "Save", 0xffffff, shot ? shade(TH.good, 112) : TH.good, 10);
 
-    ctl_t ctl[32];
-    int n = settings_layout(w, ctl, 32);
+    ctl_t ctl[48];
+    int n = settings_layout(w, ctl, 48);
     for (int i = 0; i < n; i++) {
         ctl_t *k = &ctl[i];
         switch (k->kind) {
@@ -2160,17 +4512,21 @@ static void render_settings(win_t *w)
         }
         }
     }
-    if (w->tab == 0) settings_preview(c.x + SET_SIDE + 24 + 270, c.y + 230);
+    if (w->tab == 0) settings_preview(c.x + SET_SIDE + 24 + 270, c.y + 262);
     if (w->tab == 4) {
-        int px = c.x + SET_SIDE + 24, py = c.y + 18 + 26 + 40;
-        round_rect(px - 1, py - 1, 382, 112, 4, TH.line);
-        fill_rect(px, py, 380, 110, TH.term_bg);
-        text(px + 8, py + 6, "$ ls /disk", 0x69db7c, TH.term_bg, 40);
+        int px = c.x + SET_SIDE + 24, py = c.y + TERM_PREV_Y;
+        char pr[40];
+        term_prompt_str(pr, sizeof(pr));
+        int pl = (int)strlen(pr);
+        uint32_t pc = term_prompt_col();
+        round_rect(px - 1, py - 1, 382, 114, 4, TH.line);
+        fill_rect(px, py, 380, 112, TH.term_bg);
+        text(px + 8, py + 6, pr, pc, TH.term_bg, pl);          text(px + 8 + pl * CW, py + 6, "ls /disk", TH.term_fg, TH.term_bg, 30);
         text(px + 8, py + 22, "etc  home  games  Pictures", TH.term_fg, TH.term_bg, 40);
-        text(px + 8, py + 38, "$ top -b", 0x69db7c, TH.term_bg, 40);
+        text(px + 8, py + 38, pr, pc, TH.term_bg, pl);         text(px + 8 + pl * CW, py + 38, "top -b", TH.term_fg, TH.term_bg, 30);
         text(px + 8, py + 54, "up 0:12:03   tasks 7   memory 41 of 2048 MB", TH.term_fg, TH.term_bg, 44);
-        fill_rect(px, py + 88, 380, 22, TH.term_input);
-        text(px + 8, py + 91, "$ _", 0x69db7c, TH.term_input, 4);
+        text(px + 8, py + 70, pr, pc, TH.term_bg, pl);         text(px + 8 + pl * CW, py + 70, "desktop check", TH.term_fg, TH.term_bg, 30);
+        term_cursor_draw(px + 8 + (pl + 13) * CW, py + 70, ' ');
     }
 }
 
@@ -2192,8 +4548,8 @@ static void settings_click(int wi, int mx, int my)
     win_t *w = &g_win[wi];
     for (int i = 0; i < NSETTABS; i++) if (rect_has(set_tab_rect(w, i), mx, my)) { w->tab = i; if (i == 0) pics_scan(); damage_content(w); return; }
     if (rect_has(set_save_rect(w), mx, my)) { save_settings(); return; }
-    ctl_t ctl[32];
-    int n = settings_layout(w, ctl, 32);
+    ctl_t ctl[48];
+    int n = settings_layout(w, ctl, 48);
     for (int i = 0; i < n; i++) {
         ctl_t *k = &ctl[i];
         if (k->kind == CTL_LABEL || k->kind == CTL_HINT) continue;
@@ -2201,7 +4557,9 @@ static void settings_click(int wi, int mx, int my)
         int hit_w = k->kind == CTL_TOGGLE ? 260 : k->w;
         if (mx < k->x - (k->kind == CTL_SLIDER ? 10 : 0) || mx >= k->x + hit_w + (k->kind == CTL_SLIDER ? 10 : 0) || my < hit_y || my >= hit_y + hit_h) continue;
         if (k->kind == CTL_SLIDER) { settings_slider_set(k->id, mx, k->x); g_drag_slider_id = k->id; g_drag_slider_x = k->x; damage_content(w); return; }
-        if (k->id >= ID_THEME && k->id < ID_THEME + NTHEMES) apply_theme(k->id - ID_THEME);
+        if (k->id == ID_THEMEPREV) { if (g_theme_page > 0) g_theme_page--; }
+        else if (k->id == ID_THEMENEXT) { g_theme_page++; }
+        else if (k->id >= ID_THEME && k->id < ID_THEME + NTHEMES) apply_theme(k->id - ID_THEME);
         else if (k->id >= ID_WP && k->id < ID_WP + 4) {
             static const int KIND[4] = { 3, 0, 1, 2 };
             C.wallpaper = KIND[k->id - ID_WP];
@@ -2216,7 +4574,10 @@ static void settings_click(int wi, int mx, int my)
         else if (k->id == ID_OPENMAX) C.open_max = !C.open_max;
         else if (k->id == ID_RUNWIN) C.run_windowed = !C.run_windowed;
         else if (k->id == ID_TRAY) { C.tray = !C.tray; damage(0, 0, SW, PANEL_H); }
-        else if (k->id >= ID_TERMS && k->id < ID_TERMS + 4) { C.term_style = k->id - ID_TERMS; apply_theme(C.theme); }
+        else if (k->id >= ID_TERMS && k->id < ID_TERMS + 8) { C.term_style = k->id - ID_TERMS; apply_theme(C.theme); }
+        else if (k->id >= ID_TCUR && k->id < ID_TCUR + 3) { C.term_cursor = k->id - ID_TCUR; damage_all(); }
+        else if (k->id >= ID_TPROMPT && k->id < ID_TPROMPT + 4) { C.term_prompt = k->id - ID_TPROMPT; damage_all(); }
+        else if (k->id == ID_TWELCOME) C.term_welcome = !C.term_welcome;
         else if (k->id == ID_ICONS) { C.icons = !C.icons; damage_all(); }
         else if (k->id == ID_DESKFILES) { C.desk_files = !C.desk_files; desktop_icons_refresh(); damage_all(); }
         else if (k->id == ID_DOCK) { C.dock = !C.dock; damage_all(); }
@@ -2318,6 +4679,11 @@ static int win_icon(const win_t *w)
     case W_SERV: return IC_SERV;
     case W_SCRIPTS: return IC_SCRIPT;
     case W_TASKS: return IC_MON;
+    case W_WEB: return IC_WEB;
+    case W_PAINT: return IC_PAINT;
+    case W_MINES: return IC_MINES;
+    case W_TIMER: return IC_TIMER;
+    case W_CHESS: return IC_CHESS;
     default: return IC_VIEW;
     }
 }
@@ -2385,7 +4751,9 @@ static void render_panel(void)
 
 static const struct { const char *label; int icon; int kind; wtype_t type; } DOCK[] = {
     { "Terminal", IC_TERM, APP_TERM, W_TERM }, { "Files", IC_FILES, APP_FILES, W_FILES }, { "Text Editor", IC_EDIT, APP_EDIT, W_EDIT },
-    { "Calculator", IC_CALC, APP_CALC, W_CALC }, { "Games", IC_GAME, APP_GAMES, W_GAMES }, { "Task Manager", IC_MON, APP_TASKS, W_TASKS },
+    { "Web", IC_WEB, APP_WEB, W_WEB }, { "Calculator", IC_CALC, APP_CALC, W_CALC }, { "Games", IC_GAME, APP_GAMES, W_GAMES }, { "Task Manager", IC_MON, APP_TASKS, W_TASKS },
+    { "Paint", IC_PAINT, APP_PAINT, W_PAINT },
+    { "Chess", IC_CHESS, APP_CHESS, W_CHESS },
     { "Settings", IC_SET, APP_SET, W_SET },
 };
 #define NDOCK ((int)(sizeof(DOCK) / sizeof(DOCK[0])))
@@ -2599,6 +4967,7 @@ static void desktop_icons_refresh(void)
     home_dir(home, sizeof(home));
     dic_add("Home", "Home", IC_HOME, 1, 0, home);
     dic_add("Terminal", "Terminal", IC_TERM, 0, APP_TERM, "");
+    dic_add("Web", "Web", IC_WEB, 0, APP_WEB, "");
     dic_add("Games", "Games", IC_GAME, 0, APP_GAMES, "");
     dic_add("Settings", "Settings", IC_SET, 0, APP_SET, "");
     if (C.desk_files && g_desk_dir[0] && avfs_is_directory(g_desk_dir)) {
@@ -2686,6 +5055,11 @@ static void draw_content(int wi, bool foc)
     case W_SERV: render_serv(w); break;
     case W_SCRIPTS: render_scripts(w); break;
     case W_TASKS: render_tasks(w); break;
+    case W_WEB: render_web(w, foc); break;
+    case W_PAINT: render_paint(w); break;
+    case W_MINES: render_mines(w); break;
+    case W_TIMER: render_timer(w); break;
+    case W_CHESS: render_chess(w); break;
     default: render_term(w, foc); break;
     }
 }
@@ -2727,10 +5101,10 @@ static void draw_window(int wi)
 
 enum { ACT_NONE, ACT_OPEN, ACT_RUNBOX, ACT_LOGOUT, ACT_REBOOT, ACT_POWEROFF, ACT_CUSTOM, ACT_WIN_MIN, ACT_WIN_MAX, ACT_WIN_CLOSE,
        ACT_THEME, ACT_HELP, ACT_ABOUT, ACT_SUBMENU, ACT_GAME, ACT_CONSOLE, ACT_LOCK, ACT_RSHIDT, ACT_NEWFILE, ACT_NEWDIR, ACT_REFRESH,
-       ACT_ICON_OPEN, ACT_ICON_EDIT, ACT_ICON_DELETE, ACT_ICON_WALL, ACT_ARRANGE, ACT_FILES };
+       ACT_ICON_OPEN, ACT_ICON_EDIT, ACT_ICON_DELETE, ACT_ICON_WALL, ACT_ARRANGE, ACT_FILES, ACT_TERM_PASTE, ACT_TERM_CLEAR, ACT_TERM_SET };
 
 typedef struct { char label[32]; int act, arg, icon; bool sep; } mitem_t;
-static struct { bool open; int x, y, w, h, n, hover; mitem_t it[24]; } g_menu;
+static struct { bool open; int x, y, w, h, n, hover; mitem_t it[32]; } g_menu;
 
 #define MENU_ROW 26
 #define MENU_SEP 10
@@ -2739,13 +5113,13 @@ static void menu_clear(void) { g_menu.n = 0; }
 
 static void menu_add(const char *label, int act, int arg, int icon)
 {
-    if (g_menu.n >= 24) return;
+    if (g_menu.n >= 32) return;
     mitem_t *m = &g_menu.it[g_menu.n++];
     put_str(m->label, sizeof(m->label), label);
     m->act = act; m->arg = arg; m->icon = icon; m->sep = false;
 }
 
-static void menu_sep(void) { if (g_menu.n < 24) { g_menu.it[g_menu.n].sep = true; g_menu.it[g_menu.n].act = ACT_NONE; g_menu.it[g_menu.n].label[0] = 0; g_menu.n++; } }
+static void menu_sep(void) { if (g_menu.n < 32) { g_menu.it[g_menu.n].sep = true; g_menu.it[g_menu.n].act = ACT_NONE; g_menu.it[g_menu.n].label[0] = 0; g_menu.n++; } }
 
 static rect_t menu_rect(void) { rect_t r = { g_menu.x, g_menu.y, g_menu.w, g_menu.h }; return r; }
 
@@ -3398,6 +5772,11 @@ static void defaults_for(wtype_t t, int *w, int *h, const char *title, win_t *wi
     case W_SERV: *w = 660; *h = 430; break;
     case W_SCRIPTS: *w = 620; *h = 420; break;
     case W_TASKS: *w = 660; *h = 480; break;
+    case W_WEB: *w = 900; *h = 600; break;
+    case W_PAINT: *w = 580; *h = 450; break;
+    case W_MINES: *w = 412; *h = 384; break;
+    case W_TIMER: *w = 360; *h = 360; break;
+    case W_CHESS: *w = 840; *h = 600; break;
     default: *w = 640; *h = 440; break;
     }
     put_str(win->title, sizeof(win->title), title);
@@ -3435,6 +5814,7 @@ static void close_window(int wi)
 {
     if (wi < 0 || !g_win[wi].used || g_win[wi].running) return;
     damage_win(&g_win[wi]);
+    if (g_win[wi].type == W_WEB) web_release(&g_win[wi]);
     g_win[wi].used = false;
     z_remove(wi);
     if (g_hover_win == wi) g_hover_win = -1;
@@ -3496,8 +5876,8 @@ static int open_app(int kind)
     switch (kind) {
     case APP_TERM: {
         int i = new_window(W_TERM, "Terminal");
-        if (i >= 0) {
-            term_puts(&g_win[i], "Welcome to RadiumDE. Type a command and press Enter; Ctrl+C stops one that hangs.\n");
+        if (i >= 0 && C.term_welcome) {
+            term_puts(&g_win[i], "Welcome to RadiWM. Type a command and press Enter; Ctrl+C stops one that hangs.\n");
             term_puts(&g_win[i], "Alt+F1 opens the menu, Alt+F2 runs a command, Alt+Tab switches windows.\n");
         }
         return i;
@@ -3516,7 +5896,20 @@ static int open_app(int kind)
     case APP_EDIT: return open_editor(NULL);
     case APP_GAMES: { int i = new_window(W_GAMES, "Games"); if (i >= 0) games_build(); return i; }
     case APP_SERV: { int i = new_window(W_SERV, "Services"); if (i >= 0) { serv_refresh(&g_win[i]); g_win[i].lsel = -1; } return i; }
+    case APP_WEB: return open_web();
     case APP_SCRIPTS: { int i = new_window(W_SCRIPTS, "Scripts"); if (i >= 0) { scripts_scan(&g_win[i]); g_win[i].lsel = -1; } return i; }
+    case APP_PAINT: {
+        for (int k = 0; k < MAX_WIN; k++) if (g_win[k].used && g_win[k].type == W_PAINT) { focus_and_raise(k); return k; }
+        if (!paint_canvas()) { flash("not enough memory for the canvas"); return -1; }
+        return new_window(W_PAINT, "Paint");
+    }
+    case APP_MINES: { int i = new_window(W_MINES, "Minesweeper"); if (i >= 0) mines_new(&g_win[i]); return i; }
+    case APP_TIMER: return new_window(W_TIMER, "Timer");
+    case APP_CHESS: {
+        for (int k = 0; k < MAX_WIN; k++) if (g_win[k].used && g_win[k].type == W_CHESS) { focus_and_raise(k); return k; }
+        chess_init();
+        return new_window(W_CHESS, "Chess");
+    }
     default: pics_scan(); return new_window(W_SET, "Settings");
     }
 }
@@ -3530,6 +5923,1380 @@ static int open_editor(const char *path)
     ed_new(&g_win[i]);
     if (path && !ed_load(&g_win[i], path)) { put_str(g_win[i].path, sizeof(g_win[i].path), path); put_str(g_win[i].emsg, sizeof(g_win[i].emsg), "new file"); ed_set_title(&g_win[i]); }
     damage_content(&g_win[i]);
+    return i;
+}
+
+// ---- web browser ---------------------------------------------------------------------------------------------------------------
+// A window holds tabs; every tab is a page reduced to text (lines[], with the link number of every character in lattr[]),
+// or a picture. The address bar works like the ytm search box: an address is fetched (one GET through the fetch engine,
+// redirects followed), any other text is searched for and the engine's results page becomes a clean list of results.
+// Pictures (PNG, JPEG, GIF, BMP) are decoded and shown in the tab; videos are downloaded and played with the mp4 player.
+
+extern int rust_http_get_page(const uint8_t *url, uint8_t *out, uint32_t out_cap, int *status, uint8_t *final_url, uint32_t final_cap,
+                              uint8_t *content_type, uint32_t content_type_cap);
+extern void rust_http_error(char *out, uint32_t cap);
+extern int rust_fetch(int argc, const uint8_t *const *argv);
+extern int rust_disk_store_size(const uint8_t *path);
+extern int rust_disk_store_remove(const uint8_t *path);
+extern int rust_image_decode_fit(const uint8_t *data, uint32_t len, uint32_t max_w, uint32_t max_h, uint32_t *out, uint32_t out_cap, uint32_t *w_out, uint32_t *h_out);
+extern int rust_image_kind(const uint8_t *data, uint32_t len);
+
+#define WEB_BUF (1024 * 1024)
+#define WEB_RES 32768
+#define WEB_MAXTABS 6
+#define WEB_TL 700
+#define WEB_TC 156
+#define WEB_IMG_W 760
+#define WEB_IMG_H 500
+#define WEB_TABS 36
+#define WEB_NAV 44
+#define WEB_BAR (WEB_TABS + WEB_NAV)
+#define WEB_SEARCH "https://www.bing.com/search?q="
+#define WEB_VIDEO_FILE "/disk/webvideo.mp4"
+#define WA_LINK 0x3f
+#define WA_HEAD 0x40
+#define WA_DIM 0x80
+enum { WB_BACK = 1001, WB_FWD, WB_RELOAD, WB_HOME, WB_NEWTAB, WB_TAB = 1100, WB_TABCLOSE = 1200, WB_TILE = 1300 };
+
+typedef struct {
+    bool used, start, loading;
+    char lines[WEB_TL][WEB_TC];
+    uint8_t lattr[WEB_TL][WEB_TC];
+    int nl, col, scroll, wcols;
+    char url[160], addr[160], stat[72], title[40], refresh[160];
+    int addrlen, nhist, nfwd, nlink, status;
+    char hist[8][160], fwd[8][160];
+    char link[63][140];
+    uint8_t lkind[63];                 // 0 page, 1 picture, 2 video
+    int img_w, img_h, img_kind;        // a decoded picture (0 x 0 when the tab shows text)
+} webtab_t;
+
+static webtab_t g_tabs[WEB_MAXTABS];
+static uint32_t g_webimg[WEB_MAXTABS][WEB_IMG_W * WEB_IMG_H];
+static uint8_t g_webbuf[WEB_BUF + 1];
+static char g_webres[WEB_RES];
+
+static const struct { const char *label; const char *url; uint32_t col; } WEB_TILES[] = {
+    { "RadiumOS", "https://radiumos.github.io", 0x5f7a52 }, { "GitHub", "https://github.com/RadiumOS-OPEN/RadiumOS", 0x24292f },
+    { "Wikipedia", "https://en.wikipedia.org", 0x3a3a3a }, { "Bing", "https://www.bing.com", 0x0078d4 },
+    { "Hacker News", "https://news.ycombinator.com", 0xff6600 }, { "Lite DDG", "https://lite.duckduckgo.com/lite/", 0xde5833 },
+};
+#define NWEB_TILES ((int)(sizeof(WEB_TILES) / sizeof(WEB_TILES[0])))
+
+static webtab_t *web_tab(const win_t *w) { return w->ntabs > 0 ? &g_tabs[w->tabs[w->wtab]] : NULL; }
+
+static const struct { const char *n; unsigned cp; } WEB_ENT[] = {
+    { "amp", '&' }, { "lt", '<' }, { "gt", '>' }, { "quot", '"' }, { "apos", '\'' }, { "nbsp", 160 }, { "mdash", 0x2014 },
+    { "ndash", 0x2013 }, { "hellip", 0x2026 }, { "lsquo", 0x2018 }, { "rsquo", 0x2019 }, { "ldquo", 0x201C }, { "rdquo", 0x201D },
+    { "copy", 0xA9 }, { "reg", 0xAE }, { "bull", 0x2022 }, { "middot", 0xB7 }, { "laquo", 0xAB }, { "raquo", 0xBB },
+    { "rarr", 0x2192 }, { "larr", 0x2190 }, { "times", 0xD7 },
+};
+#define NWEB_ENT ((int)(sizeof(WEB_ENT) / sizeof(WEB_ENT[0])))
+
+typedef struct {
+    webtab_t *w;
+    char word[WEB_TC];
+    uint8_t wat[WEB_TC];
+    int wn, link, pend;
+    bool sp, pre, head, dim, started, trunc;
+} wp_t;
+
+static int web_lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+
+static const char *web_find_ci(const char *p, const char *end, const char *needle)
+{
+    int n = (int)strlen(needle);
+    for (; p + n <= end; p++) {
+        int k = 0;
+        while (k < n && web_lower((unsigned char)p[k]) == needle[k]) k++;
+        if (k == n) return p;
+    }
+    return NULL;
+}
+
+static void wp_row(wp_t *p)
+{
+    webtab_t *w = p->w;
+    if (w->nl >= WEB_TL) { p->trunc = true; return; }
+    w->lines[w->nl][0] = 0;
+    memset(w->lattr[w->nl], 0, WEB_TC);
+    w->nl++;
+    w->col = 0;
+}
+
+static void wp_put(wp_t *p, char ch, uint8_t at)
+{
+    webtab_t *w = p->w;
+    if (p->trunc) return;
+    if (w->col >= w->wcols) { wp_row(p); if (p->trunc) return; }
+    w->lines[w->nl - 1][w->col] = ch;
+    w->lattr[w->nl - 1][w->col] = at;
+    w->col++;
+    w->lines[w->nl - 1][w->col] = 0;
+    p->started = true;
+}
+
+// A block boundary asked for earlier (pend: 1 = new line, 2 = blank line) takes effect when the next text arrives.
+static void wp_pending(wp_t *p)
+{
+    webtab_t *w = p->w;
+    if (p->pend && p->started) {
+        if (w->col > 0) wp_row(p);
+        if (p->pend >= 2) wp_row(p);
+        p->sp = false;
+    }
+    p->pend = 0;
+}
+
+static void wp_word(wp_t *p)
+{
+    webtab_t *w = p->w;
+    if (p->wn == 0) return;
+    wp_pending(p);
+    if (w->col > 0 && p->wn <= w->wcols && w->col + (p->sp ? 1 : 0) + p->wn > w->wcols) { wp_row(p); p->sp = false; }
+    if (w->col > 0 && p->sp) wp_put(p, ' ', 0);
+    for (int i = 0; i < p->wn; i++) wp_put(p, p->word[i], p->wat[i]);
+    p->wn = 0;
+    p->sp = false;
+}
+
+static uint8_t wp_attr(const wp_t *p) { return (uint8_t)((p->link & WA_LINK) | (p->head ? WA_HEAD : 0) | (p->dim ? WA_DIM : 0)); }
+
+static void wp_add(wp_t *p, char c, uint8_t at)
+{
+    if (p->wn >= WEB_TC - 2) wp_word(p);
+    p->word[p->wn] = c;
+    p->wat[p->wn] = at;
+    p->wn++;
+}
+
+static void wp_ch(wp_t *p, char c)
+{
+    if (c == '\r') return;
+    if (p->pre) {
+        wp_word(p);
+        wp_pending(p);
+        if (c == '\n') { wp_row(p); return; }
+        if (c == '\t') { for (int k = 0; k < 4; k++) wp_put(p, ' ', wp_attr(p)); return; }
+        if ((unsigned char)c >= 32 && (unsigned char)c < 127) wp_put(p, c, wp_attr(p));
+        return;
+    }
+    if (c == ' ' || c == '\n' || c == '\t') { wp_word(p); p->sp = true; return; }
+    if ((unsigned char)c < 32 || (unsigned char)c > 126) return;
+    wp_add(p, c, wp_attr(p));
+}
+
+static void wp_str(wp_t *p, const char *s) { while (*s) wp_ch(p, *s++); }
+
+static void wp_break(wp_t *p, int n)
+{
+    wp_word(p);
+    if (n > p->pend) p->pend = n;
+}
+
+// The page's characters outside printable ASCII become their nearest plain equivalent.
+static const char *wp_cp(unsigned cp, char *one)
+{
+    switch (cp) {
+    case 160: return " ";
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2212: return "-";
+    case 0x2018: case 0x2019: case 0x201A: return "'";
+    case 0x201C: case 0x201D: return "\"";
+    case 0x2022: case 0xB7: case 0x25CF: return "*";
+    case 0x2026: return "...";
+    case 0xA9: return "(c)";
+    case 0xAE: return "(R)";
+    case 0xAB: return "<<";
+    case 0xBB: return ">>";
+    case 0x2192: return "->";
+    case 0x2190: return "<-";
+    case 0xD7: return "x";
+    default:
+        if (cp >= 32 && cp < 127) { one[0] = (char)cp; one[1] = 0; return one; }
+        return "?";
+    }
+}
+
+// s points at '&'; returns how many characters the entity takes (0 when it is not one).
+static int wp_entity(const char *s, const char *end, unsigned *cp)
+{
+    const char *q = s + 1;
+    if (q < end && *q == '#') {
+        bool hex = false;
+        unsigned v = 0;
+        q++;
+        if (q < end && (*q == 'x' || *q == 'X')) { hex = true; q++; }
+        const char *d0 = q;
+        for (; q < end && q - d0 < 8; q++) {
+            int c = web_lower((unsigned char)*q), dv;
+            if (c >= '0' && c <= '9') dv = c - '0';
+            else if (hex && c >= 'a' && c <= 'f') dv = c - 'a' + 10;
+            else break;
+            v = v * (hex ? 16u : 10u) + (unsigned)dv;
+        }
+        if (q == d0) return 0;
+        if (q < end && *q == ';') q++;
+        *cp = v;
+        return (int)(q - s);
+    }
+    for (int i = 0; i < NWEB_ENT; i++) {
+        int l = (int)strlen(WEB_ENT[i].n);
+        if (q + l < end && strncmp(q, WEB_ENT[i].n, (size_t)l) == 0 && q[l] == ';') { *cp = WEB_ENT[i].cp; return l + 2; }
+    }
+    return 0;
+}
+
+static void wp_cpstr(wp_t *p, unsigned cp)
+{
+    char one[2];
+    wp_str(p, wp_cp(cp, one));
+}
+
+static int web_hex(int c)
+{
+    c = web_lower(c);
+    return c >= '0' && c <= '9' ? c - '0' : (c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1);
+}
+
+static void web_urlenc(const char *in, char *out, int cap)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    int n = 0;
+    for (; *in && n + 4 < cap; in++) {
+        unsigned char c = (unsigned char)*in;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out[n++] = (char)c;
+        else if (c == ' ') out[n++] = '+';
+        else { out[n++] = '%'; out[n++] = hex[c >> 4]; out[n++] = hex[c & 15]; }
+    }
+    out[n] = 0;
+}
+
+// Removes "." and ".." segments from the path of an address (the query stays as it is).
+static void web_dots(char *u)
+{
+    char *p = strstr(u, "://");
+    if (!p || !(p = strchr(p + 3, '/'))) return;
+    char tail[300], *qm = p, *src = p, *dst = p;
+    while (*qm && *qm != '?') qm++;
+    put_str(tail, sizeof(tail), qm);
+    *qm = 0;
+    while (*src) {
+        char *seg = src + 1, *e = seg;
+        while (*e && *e != '/') e++;
+        int l = (int)(e - seg);
+        if (l == 1 && seg[0] == '.') { }
+        else if (l == 2 && seg[0] == '.' && seg[1] == '.') { if (dst > p) { dst--; while (dst > p && *dst != '/') dst--; } }
+        else { memmove(dst, src, (size_t)(e - src)); dst += e - src; }
+        src = e;
+    }
+    if (dst == p) *dst++ = '/';
+    memcpy(dst, tail, strlen(tail) + 1);
+}
+
+// href as found in a page -> a full address; out stays empty for links that cannot be followed (mailto:, #anchor ...).
+static void web_resolve(const char *base, const char *href, char *out, int cap)
+{
+    char head[200], tmp[360];
+    int n = 0;
+    out[0] = 0;
+    while (*href == ' ') href++;
+    if (!*href || *href == '#') return;
+    static const char *const SKIP[] = { "mailto:", "javascript:", "tel:", "data:", NULL };
+    for (int i = 0; SKIP[i]; i++) if (strncmp(href, SKIP[i], strlen(SKIP[i])) == 0) return;
+    head[0] = 0;
+    if (strncmp(href, "http://", 7) != 0 && strncmp(href, "https://", 8) != 0) {
+        const char *o = strstr(base, "://");
+        if (!o) return;
+        const char *oe = o + 3, *q = base;
+        while (*oe && *oe != '/' && *oe != '?' && *oe != '#') oe++;
+        while (*q && *q != '?' && *q != '#') q++;
+        int ol = (int)(oe - base);
+        if (ol >= (int)sizeof(head) - 2) return;
+        if (href[0] == '/' && href[1] == '/') { int sl = (int)(o - base); memcpy(head, base, (size_t)sl); head[sl] = 0; }
+        else if (href[0] == '/') { memcpy(head, base, (size_t)ol); head[ol] = 0; }
+        else if (href[0] == '?') { int ql = (int)(q - base); if (ql >= (int)sizeof(head)) return; memcpy(head, base, (size_t)ql); head[ql] = 0; }
+        else {
+            const char *slash = NULL;
+            for (const char *k = oe; k < q; k++) if (*k == '/') slash = k;
+            int dl = slash ? (int)(slash - base) + 1 : ol;
+            if (dl >= (int)sizeof(head) - 2) return;
+            memcpy(head, base, (size_t)dl);
+            head[dl] = 0;
+            if (!slash) { head[dl++] = '/'; head[dl] = 0; }
+        }
+    }
+    for (const char *k = head; *k && n < (int)sizeof(tmp) - 1; k++) tmp[n++] = *k;
+    for (const char *k = href; *k && *k != '#' && n < (int)sizeof(tmp) - 4; k++) {
+        if (strncmp(k, "&amp;", 5) == 0) { tmp[n++] = '&'; k += 4; }
+        else if (*k == ' ') { tmp[n++] = '%'; tmp[n++] = '2'; tmp[n++] = '0'; }
+        else if ((unsigned char)*k > 32 && (unsigned char)*k < 127) tmp[n++] = *k;
+    }
+    tmp[n] = 0;
+    web_dots(tmp);
+    // search engines wrap results in a redirect; open the real address directly
+    char *u = strstr(tmp, "uddg=");
+    if (u && strstr(tmp, "duckduckgo.com/l/")) {
+        char *d = tmp;
+        for (const char *k = u + 5; *k && *k != '&'; k++) {
+            if (*k == '%' && web_hex(k[1]) >= 0 && web_hex(k[2]) >= 0) { *d++ = (char)(web_hex(k[1]) * 16 + web_hex(k[2])); k += 2; }
+            else *d++ = *k;
+        }
+        *d = 0;
+        if (strncmp(tmp, "http", 4) != 0) return;
+    }
+    if ((int)strlen(tmp) >= cap) return;
+    put_str(out, cap, tmp);
+}
+
+static const char *web_tag_end(const char *p, const char *end)
+{
+    char q = 0;
+    for (; p < end; p++) {
+        if (q) { if (*p == q) q = 0; }
+        else if (*p == '"' || *p == '\'') q = *p;
+        else if (*p == '>') return p;
+    }
+    return NULL;
+}
+
+static bool web_attr(const char *t, const char *te, const char *name, char *out, int cap)
+{
+    int nl = (int)strlen(name);
+    out[0] = 0;
+    for (const char *p = t; p + nl < te; p++) {
+        if (p == t || (p[-1] != ' ' && p[-1] != '\n' && p[-1] != '\t' && p[-1] != '\r')) continue;
+        int k = 0;
+        while (k < nl && web_lower((unsigned char)p[k]) == name[k]) k++;
+        if (k < nl) continue;
+        const char *v = p + nl;
+        while (v < te && *v == ' ') v++;
+        if (v >= te || *v != '=') continue;
+        v++;
+        while (v < te && *v == ' ') v++;
+        char q = (v < te && (*v == '"' || *v == '\'')) ? *v++ : 0;
+        int n = 0;
+        while (v < te && n < cap - 1 && (q ? *v != q : (*v != ' ' && *v != '>'))) out[n++] = *v++;
+        out[n] = 0;
+        return true;
+    }
+    return false;
+}
+
+static const char *web_after_close(const char *s, const char *end, const char *name)
+{
+    char needle[16];
+    snprintf(needle, sizeof(needle), "</%s", name);
+    const char *e = web_find_ci(s, end, needle);
+    if (!e) return end;
+    while (e < end && *e != '>') e++;
+    return e < end ? e + 1 : end;
+}
+
+// s points at '<'; handles one tag or comment and returns where the text goes on.
+// Adds a link to the tab; 0 when there is no room. kind: 0 page, 1 picture, 2 video.
+static int web_add_link(webtab_t *w, const char *base, const char *href, int kind)
+{
+    char url[160];
+    if (w->nlink >= 63) return 0;
+    web_resolve(base, href, url, sizeof(url));
+    if (!url[0] || strlen(url) >= sizeof(w->link[0])) return 0;
+    put_str(w->link[w->nlink], sizeof(w->link[0]), url);
+    w->lkind[w->nlink] = (uint8_t)kind;
+    w->nlink++;
+    return w->nlink;
+}
+
+static bool web_has_ext(const char *url, const char *ext)
+{
+    const char *q = url;
+    while (*q && *q != '?' && *q != '#') q++;
+    int l = (int)(q - url), el = (int)strlen(ext);
+    if (l < el) return false;
+    for (int i = 0; i < el; i++) if (web_lower((unsigned char)url[l - el + i]) != ext[i]) return false;
+    return true;
+}
+
+static int web_link_kind_for(const char *url)
+{
+    if (web_has_ext(url, ".mp4") || web_has_ext(url, ".m4v")) return 2;
+    if (web_has_ext(url, ".png") || web_has_ext(url, ".jpg") || web_has_ext(url, ".jpeg") || web_has_ext(url, ".gif") || web_has_ext(url, ".bmp")) return 1;
+    return 0;
+}
+
+// Writes a tag's number marker "[n]" with the link attribute so it can be clicked.
+static void wp_link_marker(wp_t *p, int n, const char *label)
+{
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%s[%d]", label, n);
+    for (int k = 0; buf[k]; k++) wp_add(p, buf[k], (uint8_t)(WA_DIM | n));
+}
+
+// The matching close tag of an element that is not shown (display:none, hidden); nested same-name elements counted.
+static const char *web_skip_element(const char *name, const char *s, const char *end)
+{
+    int depth = 1;
+    char open[16], close[16];
+    snprintf(open, sizeof(open), "<%s", name);
+    snprintf(close, sizeof(close), "</%s", name);
+    const char *q = s;
+    while (depth > 0) {
+        const char *o = web_find_ci(q, end, open), *c = web_find_ci(q, end, close);
+        if (!c) return end;
+        if (o && o < c && (o[strlen(open)] == ' ' || o[strlen(open)] == '>' || o[strlen(open)] == '/' || o[strlen(open)] == '\n')) { depth++; q = o + 1; continue; }
+        depth--;
+        q = c + 1;
+    }
+    while (q < end && *q != '>') q++;
+    return q < end ? q + 1 : end;
+}
+
+static bool web_hidden(const char *t, const char *te)
+{
+    char v[200];
+    if (web_attr(t, te, "hidden", v, sizeof(v))) return true;
+    for (const char *q = t + 1; q + 6 <= te; q++)
+        if ((q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\n') && strncmp(q, "hidden", 6) == 0 && (q[6] == ' ' || q[6] == '>' || q[6] == '/' || q[6] == '\n')) return true;
+    if (!web_attr(t, te, "style", v, sizeof(v))) return false;
+    for (char *c = v; *c; c++) *c = (char)web_lower((unsigned char)*c);
+    const char *d = strstr(v, "display");
+    if (d) { d += 7; while (*d == ' ' || *d == ':') d++; if (strncmp(d, "none", 4) == 0) return true; }
+    const char *vi = strstr(v, "visibility");
+    if (vi) { vi += 10; while (*vi == ' ' || *vi == ':') vi++; if (strncmp(vi, "hidden", 6) == 0) return true; }
+    return false;
+}
+
+static const char *web_tag(wp_t *p, const char *base, const char *s, const char *end, char *title, int tcap)
+{
+    if (s + 3 < end && s[1] == '!' && s[2] == '-' && s[3] == '-') {
+        const char *e = web_find_ci(s + 4, end, "-->");
+        return e ? e + 3 : end;
+    }
+    const char *t = s + 1;
+    bool close = false;
+    if (t < end && *t == '/') { close = true; t++; }
+    if (t < end && (*t == '!' || *t == '?')) { const char *g = web_tag_end(t, end); return g ? g + 1 : end; }
+    char name[12];
+    int nn = 0;
+    while (t + nn < end && nn < 11 && ((web_lower((unsigned char)t[nn]) >= 'a' && web_lower((unsigned char)t[nn]) <= 'z') || (t[nn] >= '0' && t[nn] <= '9'))) { name[nn] = (char)web_lower((unsigned char)t[nn]); nn++; }
+    name[nn] = 0;
+    if (nn == 0) { wp_ch(p, '<'); return s + 1; }
+    const char *te = web_tag_end(t, end);
+    if (!te) return end;
+    webtab_t *w = p->w;
+#define TAG_IS(x) (strcmp(name, x) == 0)
+    if (!close && (TAG_IS("script") || TAG_IS("style") || TAG_IS("template") || TAG_IS("svg") || TAG_IS("noscript") || TAG_IS("select") || TAG_IS("iframe") || TAG_IS("object") || TAG_IS("head") || TAG_IS("canvas") || TAG_IS("map"))) {
+        if (TAG_IS("head")) {                            // the title is still wanted
+            const char *body = web_find_ci(te + 1, end, "<body");
+            const char *tt = web_find_ci(te + 1, body ? body : end, "<title");
+            if (tt) { const char *tte = web_tag_end(tt, end); if (tte) web_tag(p, base, tt, end, title, tcap); }
+            const char *mr = te + 1;
+            while ((mr = web_find_ci(mr, body ? body : end, "<meta")) != NULL) {
+                const char *me = web_tag_end(mr, end);
+                if (!me) break;
+                char eq[40], content[300];
+                if (web_attr(mr + 1, me, "http-equiv", eq, sizeof(eq)) && web_lower(eq[0]) == 'r' && web_attr(mr + 1, me, "content", content, sizeof(content))) {
+                    const char *u = web_find_ci(content, content + strlen(content), "url=");
+                    if (u) { u += 4; while (*u == ' ' || *u == '\'' || *u == '"') u++; char tmp[300]; put_str(tmp, sizeof(tmp), u); char *e = tmp; while (*e && *e != '\'' && *e != '"' && *e != ' ') e++; *e = 0; web_resolve(base, tmp, w->refresh, sizeof(w->refresh)); }
+                }
+                mr = me + 1;
+            }
+            return body ? body : web_after_close(te + 1, end, "head");
+        }
+        return web_after_close(te + 1, end, name);
+    }
+    if (!close && !TAG_IS("br") && !TAG_IS("hr") && !TAG_IS("img") && !TAG_IS("input") && web_hidden(t, te)) return web_skip_element(name, te + 1, end);
+    if (TAG_IS("b") || TAG_IS("strong")) { wp_word(p); p->head = !close; }
+    if (!close && TAG_IS("title")) {
+        const char *after = web_after_close(te + 1, end, "title");
+        int n = 0;
+        bool space = true;
+        for (const char *k = te + 1; k < after && *k != '<' && n < tcap - 1; k++) {
+            unsigned char c = (unsigned char)*k;
+            if (c == ' ' || c == '\n' || c == '\t' || c == '\r') { if (!space) title[n++] = ' '; space = true; }
+            else if (c == '&' && strncmp(k, "&amp;", 5) == 0) { title[n++] = '&'; k += 4; space = false; }
+            else if (c >= 32 && c < 127) { title[n++] = (char)c; space = false; }
+        }
+        while (n > 0 && title[n - 1] == ' ') n--;
+        title[n] = 0;
+        return after;
+    }
+    if (TAG_IS("br")) { wp_word(p); if (p->pend < 2) p->pend++; }
+    else if (TAG_IS("p") || TAG_IS("ul") || TAG_IS("ol") || TAG_IS("table") || TAG_IS("blockquote") || TAG_IS("dl")) wp_break(p, 2);
+    else if (TAG_IS("pre")) { wp_break(p, 2); p->pre = !close; }
+    else if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0) { wp_break(p, 2); p->head = !close; }
+    else if (TAG_IS("li")) { wp_break(p, 1); if (!close) wp_str(p, "* "); }
+    else if (TAG_IS("hr")) {
+        wp_break(p, 1);
+        for (int k = 0; k < 24; k++) wp_add(p, '-', WA_DIM);
+        wp_break(p, 1);
+    }
+    else if (TAG_IS("small") || TAG_IS("cite")) { wp_word(p); p->dim = !close; }
+    else if (TAG_IS("td") || TAG_IS("th")) { wp_word(p); p->sp = true; }
+    else if (TAG_IS("div") || TAG_IS("tr") || TAG_IS("section") || TAG_IS("article") || TAG_IS("header") || TAG_IS("footer") || TAG_IS("nav") ||
+             TAG_IS("main") || TAG_IS("aside") || TAG_IS("form") || TAG_IS("center") || TAG_IS("dd") || TAG_IS("dt") || TAG_IS("figure") ||
+             TAG_IS("caption") || TAG_IS("address")) wp_break(p, 1);
+    else if (TAG_IS("a")) {
+        if (!close) {
+            char href[200];
+            p->link = 0;
+            if (web_attr(t, te, "href", href, sizeof(href))) {
+                char url[160];
+                web_resolve(base, href, url, sizeof(url));
+                p->link = web_add_link(w, base, href, url[0] ? web_link_kind_for(url) : 0);
+            }
+        } else if (p->link) {
+            wp_link_marker(p, p->link, "");
+            p->link = 0;
+        }
+    }
+    else if (TAG_IS("img") && !close) {
+        char alt[60], src[300];
+        bool has_src = web_attr(t, te, "src", src, sizeof(src)) || web_attr(t, te, "data-src", src, sizeof(src));
+        if (!(web_attr(t, te, "alt", alt, sizeof(alt)) && alt[0])) put_str(alt, sizeof(alt), "picture");
+        if (has_src && strncmp(src, "data:", 5) != 0) {
+            int n = web_add_link(w, base, src, 1);
+            wp_word(p);
+            if (n) { char lab[80]; snprintf(lab, sizeof(lab), "[%s]", alt); wp_link_marker(p, n, lab); }
+            else { wp_ch(p, '['); wp_str(p, alt); wp_ch(p, ']'); }
+        } else { wp_ch(p, '['); wp_str(p, alt); wp_ch(p, ']'); }
+    }
+    else if ((TAG_IS("video") || TAG_IS("source") || TAG_IS("audio")) && !close) {
+        char src[300];
+        if (web_attr(t, te, "src", src, sizeof(src)) && strncmp(src, "blob:", 5) != 0) {
+            wp_break(p, 1);
+            int n = web_add_link(w, base, src, TAG_IS("audio") ? 0 : 2);
+            if (n) wp_link_marker(p, n, TAG_IS("audio") ? "[audio]" : "[video]");
+        }
+    }
+    else if (TAG_IS("button")) { wp_word(p); if (!close) wp_str(p, "[ "); else wp_str(p, " ]"); }
+    else if (TAG_IS("input") && !close) {
+        char type[20], val[80];
+        if (!web_attr(t, te, "type", type, sizeof(type))) put_str(type, sizeof(type), "text");
+        for (char *c = type; *c; c++) *c = (char)web_lower((unsigned char)*c);
+        if (strcmp(type, "hidden") == 0) { }
+        else if (strcmp(type, "submit") == 0 || strcmp(type, "button") == 0) { wp_word(p); wp_str(p, "[ "); wp_str(p, web_attr(t, te, "value", val, sizeof(val)) && val[0] ? val : "Submit"); wp_str(p, " ]"); }
+        else if (strcmp(type, "checkbox") == 0 || strcmp(type, "radio") == 0) wp_str(p, "[ ]");
+        else { wp_word(p); wp_str(p, "[______]"); }
+    }
+    else if (TAG_IS("textarea") && !close) { wp_break(p, 1); wp_str(p, "[________________]"); return web_after_close(te + 1, end, "textarea"); }
+#undef TAG_IS
+    return te + 1;
+}
+
+static void web_convert(webtab_t *w, const char *base, const char *s, int len, bool html, char *title, int tcap)
+{
+    wp_t p;
+    memset(&p, 0, sizeof(p));
+    p.w = w;
+    const char *end = s + len;
+    title[0] = 0;
+    w->refresh[0] = 0;
+    if (!html) {
+        p.pre = true;
+        for (; s < end && !p.trunc; s++) wp_ch(&p, *s);
+        return;
+    }
+    while (s < end && !p.trunc) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '<') { s = web_tag(&p, base, s, end, title, tcap); continue; }
+        if (c == '&') {
+            unsigned cp;
+            int k = wp_entity(s, end, &cp);
+            if (k) { wp_cpstr(&p, cp); s += k; continue; }
+        }
+        if (c >= 0xC0) {
+            int l = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : 2);
+            unsigned cp = c & (0xFFu >> (l + 1));
+            int k = 1;
+            for (; k < l && s + k < end && ((unsigned char)s[k] & 0xC0) == 0x80; k++) cp = (cp << 6) | ((unsigned char)s[k] & 0x3F);
+            wp_cpstr(&p, cp);
+            s += k;
+        } else if (c >= 0x80) s++;
+        else { wp_ch(&p, (char)c); s++; }
+    }
+    wp_word(&p);
+}
+
+static bool web_is_html(const char *b, int n)
+{
+    int lim = n < 1024 ? n : 1024;
+    return n > 0 && (b[0] == '<' || web_find_ci(b, b + lim, "<html") || web_find_ci(b, b + lim, "<!doctype html") || web_find_ci(b, b + lim, "<body") || web_find_ci(b, b + lim, "<head"));
+}
+
+// Fetches url into g_webbuf (one GET, redirects followed). The page's full size, or -1; *status gets the HTTP status,
+// final_url the address the page was read from and ctype its media type.
+static int web_download(const char *url, int *status, char *final_url, int final_cap, char *ctype, int ctype_cap)
+{
+    *status = 0;
+    final_url[0] = 0;
+    ctype[0] = 0;
+    int size = rust_http_get_page((const uint8_t *)url, g_webbuf, WEB_BUF, status, (uint8_t *)final_url, (uint32_t)final_cap, (uint8_t *)ctype, (uint32_t)ctype_cap);
+    if (size < 0) return -1;
+    g_webbuf[size < WEB_BUF ? size : WEB_BUF] = 0;
+    if (!final_url[0]) put_str(final_url, final_cap, url);
+    return size;
+}
+
+static int web_b64(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '-' || c == '+') return 62;
+    if (c == '_' || c == '/') return 63;
+    return -1;
+}
+
+// Copies the text between s and e into out with tags removed and entities kept (the converter decodes them).
+static int web_inner_text(const char *s, const char *e, char *out, int cap)
+{
+    int n = 0;
+    bool tag = false, space = true;
+    for (; s < e && n < cap - 1; s++) {
+        if (*s == '<') { tag = true; continue; }
+        if (tag) { if (*s == '>') tag = false; continue; }
+        unsigned char c = (unsigned char)*s;
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') { if (!space) out[n++] = ' '; space = true; continue; }
+        out[n++] = (char)c;
+        space = false;
+    }
+    while (n > 0 && out[n - 1] == ' ') n--;
+    out[n] = 0;
+    return n;
+}
+
+// The search engine's page -> a small page of our own in g_webres: one heading per result with its address and summary.
+// Results come as <li class="b_algo"> blocks; the link inside goes through a redirect whose u=a1<base64> parameter is the
+// real address. False when nothing looked like a result (the page is then shown as it is).
+static bool web_search_results(const char *query, int len, int *nres)
+{
+    const char *end = (const char *)g_webbuf + len, *p = (const char *)g_webbuf;
+    int o = 0, n = 0;
+    o += snprintf(g_webres + o, sizeof(g_webres) - (size_t)o, "<h1>Results for %s</h1>", query);
+    while ((p = web_find_ci(p, end, "<li class=\"b_algo\"")) != NULL && o < WEB_RES - 1400) {
+        const char *li_end = web_find_ci(p, end, "</li>");
+        if (!li_end) li_end = end;
+        const char *h2 = web_find_ci(p, li_end, "<h2>");
+        const char *a = h2 ? web_find_ci(h2, li_end, "<a ") : NULL;
+        if (!a) { p = li_end; continue; }
+        const char *ae = web_tag_end(a, li_end);
+        const char *a_close = ae ? web_find_ci(ae, li_end, "</a>") : NULL;
+        if (!ae || !a_close) { p = li_end; continue; }
+        char href[600], url[200], title[160], snip[400], host[100];
+        if (!web_attr(a + 1, ae, "href", href, sizeof(href))) { p = li_end; continue; }
+        url[0] = 0;
+        const char *u = strstr(href, "u=a1");
+        if (u) {
+            int k = 0, bits = 0;
+            unsigned val = 0;
+            for (const char *q = u + 4; *q && *q != '&' && k < (int)sizeof(url) - 1; q++) {
+                if (strncmp(q, "&amp;", 5) == 0) break;
+                int d = web_b64(*q);
+                if (d < 0) break;
+                val = ((val << 6) | (unsigned)d) & 0xffffu;
+                bits += 6;
+                if (bits >= 8) { bits -= 8; url[k++] = (char)((val >> bits) & 0xff); }
+            }
+            url[k] = 0;
+        } else if (strncmp(href, "http", 4) == 0 && !strstr(href, "bing.com/ck/")) web_resolve("", href, url, sizeof(url));
+        if (strncmp(url, "http", 4) != 0) { p = li_end; continue; }
+        web_inner_text(ae + 1, a_close, title, sizeof(title));
+        snip[0] = 0;
+        const char *h2e = web_find_ci(a_close, li_end, "</h2>");
+        const char *pp = h2e ? web_find_ci(h2e, li_end, "<p") : NULL;
+        if (pp) {
+            const char *pe = web_tag_end(pp, li_end), *pc = pe ? web_find_ci(pe, li_end, "</p>") : NULL;
+            if (pe && pc) web_inner_text(pe + 1, pc, snip, sizeof(snip));
+        }
+        const char *hs = strstr(url, "://");
+        int hl = 0;
+        if (hs) { hs += 3; while (hs[hl] && hs[hl] != '/' && hl < (int)sizeof(host) - 1) { host[hl] = hs[hl]; hl++; } }
+        host[hl] = 0;
+        char safe_url[260];
+        int sn = 0;
+        for (const char *q = url; *q && sn < (int)sizeof(safe_url) - 6; q++) {
+            if (*q == '&') { memcpy(safe_url + sn, "&amp;", 5); sn += 5; }
+            else if (*q == '"') sn += snprintf(safe_url + sn, sizeof(safe_url) - (size_t)sn, "%%22");
+            else safe_url[sn++] = *q;
+        }
+        safe_url[sn] = 0;
+        o += snprintf(g_webres + o, sizeof(g_webres) - (size_t)o, "<h3><a href=\"%s\">%s</a></h3><p>%s<br><small>%s</small></p>",
+                      safe_url, title[0] ? title : url, snip[0] ? snip : "(no summary)", host);
+        n++;
+        p = li_end;
+    }
+    if (n == 0) return false;
+    o += snprintf(g_webres + o, sizeof(g_webres) - (size_t)o, "<hr><p><small>%d result%s from Bing.</small></p>", n, n == 1 ? "" : "s");
+    *nres = n;
+    return true;
+}
+
+// ---- tabs ------------------------------------------------------------------------------------------------------------------------
+
+static int web_rows(const win_t *w) { return imax(1, (content_rect(w).h - WEB_BAR - 8) / CH); }
+
+static int web_first_row(const win_t *w, webtab_t *t)
+{
+    int maxs = imax(0, t->nl - web_rows(w));
+    t->scroll = imax(0, imin(t->scroll, maxs));
+    return imax(0, t->nl - web_rows(w) - t->scroll);
+}
+
+static void web_tab_set_title(win_t *w, webtab_t *t, const char *page_title)
+{
+    if (page_title[0]) put_str(t->title, sizeof(t->title), page_title);
+    else if (t->url[0]) { const char *h = strstr(t->url, "://"); put_str(t->title, sizeof(t->title), h ? h + 3 : t->url); }
+    else put_str(t->title, sizeof(t->title), "New Tab");
+    if (web_tab(w) == t) { put_str(w->title, sizeof(w->title), t->title); damage_title(w); damage(0, 0, SW, PANEL_H); }
+}
+
+static void web_tab_clear(webtab_t *t)
+{
+    t->nl = 1;
+    t->lines[0][0] = 0;
+    memset(t->lattr[0], 0, WEB_TC);
+    t->col = 0;
+    t->scroll = 0;
+    t->nlink = 0;
+    t->img_w = t->img_h = t->img_kind = 0;
+}
+
+static void web_tab_puts(webtab_t *t, const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '\n') { if (t->nl < WEB_TL) { t->lines[t->nl][0] = 0; memset(t->lattr[t->nl], 0, WEB_TC); t->nl++; t->col = 0; } continue; }
+        if (t->col < WEB_TC - 1) { t->lines[t->nl - 1][t->col] = *s; t->lattr[t->nl - 1][t->col] = 0; t->col++; t->lines[t->nl - 1][t->col] = 0; }
+    }
+}
+
+// Turns a page into lines. base is the address the relative links are resolved against.
+static void web_show(win_t *w, webtab_t *t, const char *base, const char *buf, int len, bool html, bool truncated)
+{
+    char title[40];
+    web_tab_clear(t);
+    t->start = false;
+    t->wcols = imax(20, imin(WEB_TC - 2, (w->w - 2 * BORD - 2 * PADX - 40) / CW));
+    web_convert(t, base, buf, len, html, title, sizeof(title));
+    if (truncated && t->nl < WEB_TL) web_tab_puts(t, "\n[the page goes on; this browser reads the first megabyte]");
+    else if (t->nl >= WEB_TL) put_str(t->lines[WEB_TL - 1], WEB_TC, "[the page goes on; this browser shows the first 700 lines]");
+    t->scroll = imax(0, t->nl - web_rows(w));
+    web_tab_set_title(w, t, title);
+}
+
+// A picture becomes the tab's content: decoded into the tab's pixel buffer, shrunk to fit the window.
+static bool web_show_image(win_t *w, webtab_t *t, const char *url, int len)
+{
+    rect_t c = content_rect(w);
+    uint32_t iw = 0, ih = 0;
+    int ti = (int)(t - g_tabs);
+    int kind = rust_image_decode_fit(g_webbuf, (uint32_t)len, (uint32_t)imin(WEB_IMG_W, imax(64, c.w - 32)), (uint32_t)imin(WEB_IMG_H, imax(64, c.h - WEB_BAR - 44)),
+                                     g_webimg[ti], WEB_IMG_W * WEB_IMG_H, &iw, &ih);
+    if (kind <= 0) return false;
+    static const char *const KIND[5] = { "", "PNG", "JPEG", "GIF", "BMP" };
+    web_tab_clear(t);
+    t->start = false;
+    t->img_w = (int)iw; t->img_h = (int)ih; t->img_kind = kind;
+    const char *name = url;
+    for (const char *q = url; *q && *q != '?'; q++) if (*q == '/') name = q + 1;
+    char title[40];
+    put_str(title, sizeof(title), name[0] ? name : "picture");
+    web_tab_set_title(w, t, title);
+    snprintf(t->stat, sizeof(t->stat), "%s picture, %d KB, shown at %u x %u", KIND[kind], (len + 1023) / 1024, iw, ih);
+    return true;
+}
+
+static void web_push(char hist[8][160], int *n, const char *url)
+{
+    if (*n == 8) { memmove(hist[0], hist[1], 7 * sizeof(hist[0])); (*n)--; }
+    put_str(hist[(*n)++], sizeof(hist[0]), url);
+}
+
+static bool web_video_url(const char *url, const char *ctype)
+{
+    return web_link_kind_for(url) == 2 || strncmp(ctype, "video/", 6) == 0;
+}
+
+// Downloads a video to the fetch store and plays it; the desktop steps aside while it plays.
+static void web_play_video(int wi, const char *url)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    put_str(t->stat, sizeof(t->stat), "Downloading the video ...");
+    damage_content(w);
+    if (win_visible(wi)) draw_frame();
+    const uint8_t *args[] = {
+        (const uint8_t *)"fetch", (const uint8_t *)"-L", (const uint8_t *)"-f", (const uint8_t *)"-s", (const uint8_t *)"--overwrite",
+        (const uint8_t *)"--timeout", (const uint8_t *)"600", (const uint8_t *)"-o", (const uint8_t *)WEB_VIDEO_FILE, (const uint8_t *)url,
+    };
+    if (rust_fetch((int)(sizeof(args) / sizeof(args[0])), args) != 0 || rust_disk_store_size((const uint8_t *)WEB_VIDEO_FILE) <= 0) {
+        char why[100];
+        rust_http_error(why, sizeof(why));
+        rust_disk_store_remove((const uint8_t *)WEB_VIDEO_FILE);
+        snprintf(t->stat, sizeof(t->stat), "Video download failed: %s", why);
+        damage_content(w);
+        return;
+    }
+    run_leave("mp4 " WEB_VIDEO_FILE);
+    rust_disk_store_remove((const uint8_t *)WEB_VIDEO_FILE);
+    put_str(t->stat, sizeof(t->stat), "Video finished");
+    damage_content(w);
+}
+
+static void web_load(int wi, const char *url, const char *shown, bool push)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    if (push) {
+        if (t->url[0] && strcmp(t->url, url) != 0) web_push(t->hist, &t->nhist, t->url);
+        t->nfwd = 0;
+    }
+    char copy[160], final_url[160], ctype[64];
+    put_str(copy, sizeof(copy), url);
+    put_str(t->url, sizeof(t->url), url);
+    t->addrlen = put_str(t->addr, sizeof(t->addr), shown);
+    put_str(t->stat, sizeof(t->stat), "Loading ...");
+    t->loading = true;
+    damage_content(w);
+    if (win_visible(wi)) draw_frame();
+
+    int status = 0;
+    int size = web_download(copy, &status, final_url, sizeof(final_url), ctype, sizeof(ctype));
+    t->loading = false;
+    t->status = status;
+    if (size < 0) {
+        char why[120], msg[520];
+        rust_http_error(why, sizeof(why));
+        int n;
+        if (strstr(why, "exceeds")) n = snprintf(msg, sizeof(msg), "<h1>This page is very large</h1><p>It is bigger than the 24 MB this browser reads into memory. Save it with:</p><pre>fetch -L -o /disk/NAME %s</pre>", copy);
+        else n = snprintf(msg, sizeof(msg), "<h1>Hmm. We're having trouble finding that site.</h1><p>%s</p><p>Checking the address and the network connection "
+                          "often helps. The fetch command gives the same answer in a terminal:</p><pre>fetch -L %s</pre>", why, copy);
+        web_show(w, t, copy, msg, n, true, false);
+        put_str(t->stat, sizeof(t->stat), why);
+    } else {
+        bool search = strncmp(copy, WEB_SEARCH, strlen(WEB_SEARCH)) == 0;
+        if (strcmp(final_url, copy) != 0 && !search) { put_str(t->url, sizeof(t->url), final_url); t->addrlen = put_str(t->addr, sizeof(t->addr), final_url); }
+        int got = size < WEB_BUF ? size : WEB_BUF, bin = 0, nres = 0;
+        for (int i = 0; i < got && i < 512; i++) if (g_webbuf[i] == 0 || g_webbuf[i] < 9) bin++;
+        if (size == 0) {
+            char msg[200];
+            int n = snprintf(msg, sizeof(msg), "<h1>HTTP %d</h1><p>The server sent an empty page.</p>", status);
+            web_show(w, t, copy, msg, n, true, false);
+            snprintf(t->stat, sizeof(t->stat), "HTTP %d, empty page", status);
+        } else if ((strncmp(ctype, "image/", 6) == 0 || rust_image_kind(g_webbuf, (uint32_t)got) > 0) && size <= WEB_BUF && web_show_image(w, t, final_url, got)) {
+            // shown; the status line was written by web_show_image
+        } else if (web_video_url(final_url, ctype)) {
+            char msg[400];
+            int n = snprintf(msg, sizeof(msg), "<h1>Video</h1><p>%d KB. <a href=\"%s\">Play it</a> (the player takes the whole screen; the desktop comes back when it ends).</p>", (size + 1023) / 1024, final_url);
+            web_show(w, t, copy, msg, n, true, false);
+            put_str(t->stat, sizeof(t->stat), "Click Play to watch the video");
+        } else if (bin > 4 || (ctype[0] && strncmp(ctype, "text/", 5) != 0 && !strstr(ctype, "html") && !strstr(ctype, "xml") && !strstr(ctype, "json") && !strstr(ctype, "javascript"))) {
+            char msg[300];
+            int n = snprintf(msg, sizeof(msg), "<h1>%s</h1><p>%d KB that are not a page. Save the file with:</p><pre>fetch -L -o /disk/NAME %s</pre>", ctype[0] ? ctype : "Binary file", (size + 1023) / 1024, copy);
+            web_show(w, t, copy, msg, n, true, false);
+            snprintf(t->stat, sizeof(t->stat), "%d KB, not a page", (size + 1023) / 1024);
+        } else if (search && web_search_results(shown, got, &nres)) {
+            web_show(w, t, copy, g_webres, (int)strlen(g_webres), true, false);
+            char tt[40];
+            snprintf(tt, sizeof(tt), "%s - Search", shown);
+            web_tab_set_title(w, t, tt);
+            snprintf(t->stat, sizeof(t->stat), "%d result%s", nres, nres == 1 ? "" : "s");
+        } else {
+            bool html = strstr(ctype, "html") != NULL || (!ctype[0] && web_is_html((const char *)g_webbuf, got)) || (strncmp(ctype, "text/plain", 10) != 0 && web_is_html((const char *)g_webbuf, got));
+            web_show(w, t, final_url, (const char *)g_webbuf, got, html, size > got);
+            if (t->refresh[0] && t->nl <= 3 && strcmp(t->refresh, copy) != 0) {       // a page that only forwards somewhere else
+                char next[160];
+                put_str(next, sizeof(next), t->refresh);
+                web_load(wi, next, next, false);
+                return;
+            }
+            if (status >= 400) snprintf(t->stat, sizeof(t->stat), "HTTP %d", status);
+            else if (search) snprintf(t->stat, sizeof(t->stat), "No results found; the whole page is shown");
+            else snprintf(t->stat, sizeof(t->stat), "%d KB, %d link%s", (size + 1023) / 1024, t->nlink, t->nlink == 1 ? "" : "s");
+        }
+    }
+    t->scroll = imax(0, t->nl - web_rows(w));
+    damage_content(w);
+}
+
+static void web_follow(int wi, int n)
+{
+    webtab_t *t = web_tab(&g_win[wi]);
+    if (!t || n < 1 || n > t->nlink) return;
+    char url[160];
+    put_str(url, sizeof(url), t->link[n - 1]);
+    if (t->lkind[n - 1] == 2) { web_play_video(wi, url); return; }
+    web_load(wi, url, url, true);
+}
+
+static void web_go(int wi, const char *input)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    char url[160], enc[130];
+    while (*input == ' ') input++;
+    if (!*input) return;
+    bool digits = true;
+    for (const char *k = input; *k; k++) if (*k < '0' || *k > '9') digits = false;
+    if (digits && !t->start && t->nlink) {
+        int n = atoi(input);
+        if (n < 1 || n > t->nlink) { put_str(t->stat, sizeof(t->stat), "There is no such link on this page"); damage_content(w); return; }
+        web_follow(wi, n);
+        return;
+    }
+    bool host = strchr(input, ' ') == NULL && strchr(input, '.') != NULL && input[0] != '.' && input[strlen(input) - 1] != '.';
+    if (strncmp(input, "http://", 7) == 0 || strncmp(input, "https://", 8) == 0) put_str(url, sizeof(url), input);
+    else if (host || strncmp(input, "localhost", 9) == 0) snprintf(url, sizeof(url), "https://%s", input);
+    else {
+        web_urlenc(input, enc, sizeof(enc));
+        snprintf(url, sizeof(url), "%s%s&format=html", WEB_SEARCH, enc);
+        web_load(wi, url, input, true);
+        return;
+    }
+    web_load(wi, url, url, true);
+}
+
+static void web_back(int wi)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    if (t->nhist == 0) { put_str(t->stat, sizeof(t->stat), "Nothing to go back to"); damage_content(w); return; }
+    char url[160];
+    put_str(url, sizeof(url), t->hist[--t->nhist]);
+    if (t->url[0]) web_push(t->fwd, &t->nfwd, t->url);
+    web_load(wi, url, url, false);
+}
+
+static void web_forward(int wi)
+{
+    webtab_t *t = web_tab(&g_win[wi]);
+    if (!t || t->nfwd == 0) return;
+    char url[160];
+    put_str(url, sizeof(url), t->fwd[--t->nfwd]);
+    if (t->url[0]) web_push(t->hist, &t->nhist, t->url);
+    web_load(wi, url, url, false);
+}
+
+static void web_reload(int wi)
+{
+    webtab_t *t = web_tab(&g_win[wi]);
+    if (!t || !t->url[0]) return;
+    char url[160];
+    put_str(url, sizeof(url), t->url);
+    web_load(wi, url, url, false);
+}
+
+static void web_tab_home(win_t *w, webtab_t *t)
+{
+    if (t->url[0]) { web_push(t->hist, &t->nhist, t->url); t->nfwd = 0; }
+    web_tab_clear(t);
+    t->url[0] = 0;
+    t->addr[0] = 0;
+    t->addrlen = 0;
+    t->stat[0] = 0;
+    t->start = true;
+    web_tab_set_title(w, t, "");
+    damage_content(w);
+}
+
+static int web_new_tab(int wi, bool activate)
+{
+    win_t *w = &g_win[wi];
+    if (w->ntabs >= WEB_MAXTABS) { flash("no more tabs: close one first"); return -1; }
+    int ti = -1;
+    for (int i = 0; i < WEB_MAXTABS; i++) if (!g_tabs[i].used) { ti = i; break; }
+    if (ti < 0) { flash("every tab is in use (other browser windows hold them)"); return -1; }
+    webtab_t *t = &g_tabs[ti];
+    memset(t, 0, sizeof(*t));
+    t->used = true;
+    web_tab_clear(t);
+    t->start = true;
+    put_str(t->title, sizeof(t->title), "New Tab");
+    w->tabs[w->ntabs++] = ti;
+    if (activate) { w->wtab = w->ntabs - 1; put_str(w->title, sizeof(w->title), t->title); damage_title(w); damage(0, 0, SW, PANEL_H); }
+    damage_content(w);
+    return ti;
+}
+
+static void web_select_tab(int wi, int idx)
+{
+    win_t *w = &g_win[wi];
+    if (idx < 0 || idx >= w->ntabs) return;
+    w->wtab = idx;
+    webtab_t *t = web_tab(w);
+    put_str(w->title, sizeof(w->title), t->title);
+    damage_title(w);
+    damage(0, 0, SW, PANEL_H);
+    damage_content(w);
+}
+
+static void web_close_tab(int wi, int idx)
+{
+    win_t *w = &g_win[wi];
+    if (idx < 0 || idx >= w->ntabs) return;
+    g_tabs[w->tabs[idx]].used = false;
+    memmove(&w->tabs[idx], &w->tabs[idx + 1], (size_t)(w->ntabs - idx - 1) * sizeof(w->tabs[0]));
+    w->ntabs--;
+    if (w->ntabs == 0) { close_window(wi); return; }
+    if (w->wtab >= w->ntabs) w->wtab = w->ntabs - 1;
+    else if (w->wtab > idx) w->wtab--;
+    web_select_tab(wi, w->wtab);
+}
+
+// Gives a closing browser window's tabs back.
+static void web_release(win_t *w)
+{
+    for (int i = 0; i < w->ntabs; i++) g_tabs[w->tabs[i]].used = false;
+    w->ntabs = 0;
+}
+
+static void web_scroll(int wi, int lines_n)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    t->scroll += lines_n;
+    if (t->scroll > t->nl - 1) t->scroll = t->nl - 1;
+    if (t->scroll < 0) t->scroll = 0;
+    damage_content(w);
+}
+
+// ---- browser chrome: tab strip, round buttons, pill-shaped address bar; the colours follow the RadiWM theme -----------------------
+
+typedef struct { uint32_t strip, bar, pill, tx, dim, hot, page, page_tx, link, link_hot, rule, sel, tile, tile_hot; } webcol_t;
+
+static webcol_t web_colors(void)
+{
+    webcol_t c;
+    c.strip = mix(TH.bg, TH.panel_bg, 35);
+    c.bar = TH.bg;
+    c.pill = TH.field;
+    c.tx = TH.fg;
+    c.dim = TH.dim;
+    c.hot = TH.line;
+    c.page = TH.field;
+    c.page_tx = TH.fg;
+    c.link = TH.accent;
+    c.link_hot = mix(TH.accent, TH.fg, 40);
+    c.rule = TH.line;
+    c.sel = TH.accent;
+    c.tile = mix(TH.field, TH.line, 45);
+    c.tile_hot = TH.line;
+    return c;
+}
+
+static int web_tab_w(const win_t *w) { rect_t c = content_rect(w); return imin(220, imax(80, (c.w - 60) / imax(1, w->ntabs))); }
+static rect_t web_tab_rect(const win_t *w, int i) { rect_t c = content_rect(w); int tw = web_tab_w(w); rect_t r = { c.x + 8 + i * (tw + 2), c.y + 5, tw, WEB_TABS - 5 }; return r; }
+static rect_t web_tabclose_rect(const win_t *w, int i) { rect_t t = web_tab_rect(w, i); rect_t r = { t.x + t.w - 24, t.y + (t.h - 18) / 2, 18, 18 }; return r; }
+static rect_t web_newtab_rect(const win_t *w) { rect_t t = web_tab_rect(w, w->ntabs - 1); rect_t r = { t.x + t.w + 6, t.y + (t.h - 26) / 2, 26, 26 }; return r; }
+static rect_t web_btn_rect(const win_t *w, int i) { rect_t c = content_rect(w); rect_t r = { c.x + 8 + i * 36, c.y + WEB_TABS + (WEB_NAV - 32) / 2, 32, 32 }; return r; }
+static rect_t web_addr_rect(const win_t *w) { rect_t c = content_rect(w); rect_t r = { c.x + 8 + 4 * 36 + 6, c.y + WEB_TABS + (WEB_NAV - 32) / 2, c.w - (8 + 4 * 36 + 6) - 10, 32 }; return r; }
+
+static rect_t web_tile_rect(const win_t *w, int i)
+{
+    rect_t c = content_rect(w);
+    int tw = 104, th = 92, gap = 18, per = imax(1, imin(NWEB_TILES, (c.w - 40) / (tw + gap)));
+    int rows = (NWEB_TILES + per - 1) / per, total_w = per * tw + (per - 1) * gap;
+    int x0 = c.x + (c.w - total_w) / 2, y0 = c.y + WEB_BAR + imax(40, (c.h - WEB_BAR - 140 - rows * (th + gap)) / 2) + 110;
+    rect_t r = { x0 + (i % per) * (tw + gap), y0 + (i / per) * (th + gap), tw, th };
+    return r;
+}
+
+static void web_icon_arrow(rect_t r, bool left, uint32_t col)
+{
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2, d = left ? -1 : 1;
+    line(cx - 6, cy, cx + 6, cy, 2, col);
+    line(cx + d * 6, cy, cx + d * 1, cy - 5, 2, col);
+    line(cx + d * 6, cy, cx + d * 1, cy + 5, 2, col);
+}
+
+static void web_icon_reload(rect_t r, uint32_t col, uint32_t bg)
+{
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    disc(cx, cy, 7, col);
+    disc(cx, cy, 5, bg);
+    fill_rect(cx, cy - 8, 8, 8, bg);                        // the gap of the ring
+    line(cx + 2, cy - 7, cx + 7, cy - 7, 2, col);
+    line(cx + 7, cy - 7, cx + 7, cy - 2, 2, col);
+}
+
+static void web_icon_home(rect_t r, uint32_t col)
+{
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    line(cx - 8, cy, cx, cy - 7, 2, col);
+    line(cx, cy - 7, cx + 8, cy, 2, col);
+    fill_rect(cx - 5, cy - 1, 10, 7, col);
+}
+
+static void web_icon_globe(int cx, int cy, int rad, uint32_t col, uint32_t bg)
+{
+    disc(cx, cy, rad, col);
+    disc(cx, cy, rad - 1, bg);
+    fill_rect(cx - rad, cy, 2 * rad + 1, 1, col);
+    fill_rect(cx, cy - rad, 1, 2 * rad + 1, col);
+    frame_rect(cx - rad / 2, cy - rad, rad + 1, 2 * rad + 1, col);
+}
+
+static void web_icon_lock(int x, int cy, uint32_t col, uint32_t bg)
+{
+    disc(x + 4, cy - 3, 4, col);                            // shackle: a ring, open at the bottom
+    disc(x + 4, cy - 3, 2, bg);
+    fill_rect(x + 1, cy - 2, 7, 3, bg);
+    fill_rect(x, cy - 1, 9, 7, col);                        // body
+}
+
+static void web_icon_search(int x, int cy, uint32_t col, uint32_t bg)
+{
+    disc(x + 4, cy - 1, 4, col);
+    disc(x + 4, cy - 1, 2, bg);
+    line(x + 7, cy + 2, x + 10, cy + 5, 2, col);
+}
+
+static void web_icon_cross(int cx, int cy, uint32_t col)
+{
+    line(cx - 4, cy - 4, cx + 4, cy + 4, 2, col);
+    line(cx - 4, cy + 4, cx + 4, cy - 4, 2, col);
+}
+
+static void render_web_start(win_t *w, webtab_t *t, const webcol_t *k)
+{
+    rect_t c = content_rect(w);
+    int cx = c.x + c.w / 2, ty = c.y + WEB_BAR + imax(40, (c.h - WEB_BAR - 140 - ((NWEB_TILES + 5) / 6) * 110) / 2);
+    static const char NAME[] = "RadiWM";
+    for (int i = 0; NAME[i]; i++) glyph_big(cx - 3 * 24 + i * 24, ty, (unsigned char)NAME[i], 3, i == 0 ? TH.accent : k->page_tx, TRANSPARENT);
+    text_center(c.x, c.w, ty + 34, "Type in the bar above to search the web or open a site", k->dim, k->page, 70);
+    int sw = imin(560, c.w - 80), sy = ty + 62;
+    round_rect(cx - sw / 2, sy, sw, 36, 18, k->rule);
+    round_rect(cx - sw / 2 + 1, sy + 1, sw - 2, 34, 17, k->pill);
+    web_icon_search(cx - sw / 2 + 14, sy + 18, k->dim, k->pill);
+    if (t->addrlen) text(cx - sw / 2 + 32, sy + 10, t->addr, k->page_tx, k->pill, (sw - 44) / CW);
+    else text(cx - sw / 2 + 32, sy + 10, "Search with Bing or enter address", k->dim, k->pill, (sw - 44) / CW);
+    for (int i = 0; i < NWEB_TILES; i++) {
+        rect_t r = web_tile_rect(w, i);
+        bool hot = g_hover_item_win >= 0 && &g_win[g_hover_item_win] == w && g_hover_item == WB_TILE + i;
+        uint32_t bg = hot ? k->tile_hot : k->tile;
+        round_rect(r.x, r.y, r.w, r.h, 8, bg);
+        disc(r.x + r.w / 2, r.y + 34, 20, WEB_TILES[i].col);
+        glyph_big(r.x + r.w / 2 - 8, r.y + 34 - 8, (unsigned char)WEB_TILES[i].label[0], 2, 0xffffff, TRANSPARENT);
+        text_center(r.x, r.w, r.y + r.h - 24, WEB_TILES[i].label, k->page_tx, bg, (r.w - 8) / CW);
+    }
+}
+
+static void render_web_image(win_t *w, webtab_t *t, const webcol_t *k)
+{
+    rect_t c = content_rect(w);
+    int ti = (int)(t - g_tabs);
+    int x0 = c.x + (c.w - t->img_w) / 2, y0 = c.y + WEB_BAR + 12 + imax(0, (c.h - WEB_BAR - 44 - t->img_h) / 2);
+    bool light = ((k->page >> 16) & 255) + ((k->page >> 8) & 255) + (k->page & 255) > 384;
+    for (int y = 0; y < t->img_h; y++) {
+        int sy = y0 + y;
+        if (sy < clip_y0 || sy >= clip_y1) continue;
+        const uint32_t *src = g_webimg[ti] + y * t->img_w;
+        uint32_t *dst = g_store + sy * SW;
+        for (int x = 0; x < t->img_w; x++) {
+            int sx = x0 + x;
+            if (sx < clip_x0 || sx >= clip_x1) continue;
+            uint32_t p = src[x], a = p >> 24;
+            if (a == 255) { dst[sx] = p & 0xffffff; continue; }
+            uint32_t back = (((sx >> 3) + (sy >> 3)) & 1) ? (light ? 0xd0d0d0 : 0x404040) : (light ? 0xffffff : 0x202020);   // see-through parts
+            if (a == 0) { dst[sx] = back; continue; }
+            uint32_t r = (((p >> 16) & 255) * a + ((back >> 16) & 255) * (255 - a)) / 255;
+            uint32_t g = (((p >> 8) & 255) * a + ((back >> 8) & 255) * (255 - a)) / 255;
+            uint32_t b = ((p & 255) * a + (back & 255) * (255 - a)) / 255;
+            dst[sx] = r << 16 | g << 8 | b;
+        }
+    }
+    frame_rect(x0 - 1, y0 - 1, t->img_w + 2, t->img_h + 2, k->rule);
+}
+
+static void render_web(win_t *w, bool focused)
+{
+    rect_t c = content_rect(w);
+    webcol_t k = web_colors();
+    webtab_t *t = web_tab(w);
+    bool hover_here = g_hover_item_win >= 0 && &g_win[g_hover_item_win] == w;
+    if (!t) { fill_rect(c.x, c.y, c.w, c.h, k.page); return; }
+
+    // tab strip
+    fill_rect(c.x, c.y, c.w, WEB_TABS, k.strip);
+    for (int i = 0; i < w->ntabs; i++) {
+        rect_t r = web_tab_rect(w, i);
+        webtab_t *ti = &g_tabs[w->tabs[i]];
+        bool active = i == w->wtab, hot = hover_here && (g_hover_item == WB_TAB + i || g_hover_item == WB_TABCLOSE + i);
+        uint32_t bg = active ? k.bar : (hot ? mix(k.strip, k.bar, 50) : k.strip);
+        if (active || hot) round_rect(r.x, r.y, r.w, r.h + 6, 6, bg);
+        if (active) fill_rect(r.x + 8, r.y, r.w - 16, 2, k.sel);
+        web_icon_globe(r.x + 14, r.y + r.h / 2, 5, active ? k.tx : k.dim, bg);
+        text(r.x + 26, r.y + (r.h - CH) / 2, ti->title, active ? k.tx : k.dim, bg, imax(1, (r.w - 56) / CW));
+        if (active || hot) {
+            rect_t x = web_tabclose_rect(w, i);
+            if (hover_here && g_hover_item == WB_TABCLOSE + i) disc(x.x + x.w / 2, x.y + x.h / 2, 9, k.hot);
+            web_icon_cross(x.x + x.w / 2, x.y + x.h / 2, active ? k.tx : k.dim);
+        }
+    }
+    {
+        rect_t n = web_newtab_rect(w);
+        if (hover_here && g_hover_item == WB_NEWTAB) disc(n.x + n.w / 2, n.y + n.h / 2, 12, k.hot);
+        fill_rect(n.x + n.w / 2 - 6, n.y + n.h / 2 - 1, 12, 2, k.dim);
+        fill_rect(n.x + n.w / 2 - 1, n.y + n.h / 2 - 6, 2, 12, k.dim);
+    }
+
+    // navigation bar
+    fill_rect(c.x, c.y + WEB_TABS, c.w, WEB_NAV, k.bar);
+    for (int i = 0; i < 4; i++) {
+        rect_t r = web_btn_rect(w, i);
+        bool on = i == 0 ? t->nhist > 0 : (i == 1 ? t->nfwd > 0 : (i == 2 ? t->url[0] != 0 : true));
+        bool hot = hover_here && g_hover_item == WB_BACK + i && on;
+        uint32_t bg = hot ? k.hot : k.bar, fg = on ? k.tx : mix(k.bar, k.tx, 35);
+        if (hot) disc(r.x + r.w / 2, r.y + r.h / 2, 15, bg);
+        if (i == 0) web_icon_arrow(r, true, fg);
+        else if (i == 1) web_icon_arrow(r, false, fg);
+        else if (i == 2) web_icon_reload(r, fg, bg);
+        else web_icon_home(r, fg);
+    }
+    rect_t a = web_addr_rect(w);
+    if (focused) round_rect(a.x - 1, a.y - 1, a.w + 2, a.h + 2, 9, k.sel);
+    round_rect(a.x, a.y, a.w, a.h, 8, k.pill);
+    int ty = a.y + (a.h - CH) / 2, tx0 = a.x + 32;
+    if (t->url[0] && strncmp(t->url, "https://", 8) == 0 && !focused) web_icon_lock(a.x + 12, a.y + a.h / 2, k.dim, k.pill);
+    else web_icon_search(a.x + 10, a.y + a.h / 2, k.dim, k.pill);
+    int room = (a.w - 44) / CW, off = t->addrlen > room ? t->addrlen - room : 0;
+    if (t->addrlen == 0 && !focused) text(tx0, ty, "Search with Bing or enter address", k.dim, k.pill, room);
+    else text(tx0, ty, t->addr + off, k.tx, k.pill, room);
+    if (focused) fill_rect(tx0 + (t->addrlen - off) * CW, a.y + 8, 2, a.h - 16, k.sel);
+    if (t->loading) fill_rect(c.x, c.y + WEB_BAR - 2, c.w / 3, 2, k.sel);
+    fill_rect(c.x, c.y + WEB_BAR - 1, c.w, 1, k.rule);
+
+    // page
+    fill_rect(c.x, c.y + WEB_BAR, c.w, c.h - WEB_BAR, k.page);
+    if (t->start) { render_web_start(w, t, &k); return; }
+    int hot_link = hover_here && g_hover_item >= 1 && g_hover_item <= 63 ? g_hover_item : 0;
+    if (t->img_w > 0) render_web_image(w, t, &k);
+    else {
+        int rows = web_rows(w), cols = (c.w - 2 * PADX - 40) / CW, start = web_first_row(w, t), y0 = c.y + WEB_BAR + 8, ox = c.x + PADX + 16;
+        for (int i = start; i < t->nl && i < start + rows; i++) {
+            const char *s = t->lines[i];
+            const uint8_t *at = t->lattr[i];
+            int y = y0 + (i - start) * CH;
+            for (int n = 0; s[n] && n < cols; n++) {
+                uint8_t v = at[n];
+                int ln = v & WA_LINK;
+                bool link = ln && !(v & WA_DIM);
+                uint32_t fg = link ? (ln == hot_link ? k.link_hot : k.link) : ((v & WA_DIM) ? k.dim : k.page_tx);
+                glyph(ox + n * CW, y, (unsigned char)s[n], fg, k.page);
+                if (v & WA_HEAD) glyph(ox + n * CW + 1, y, (unsigned char)s[n], fg, TRANSPARENT);
+                if (link && ln == hot_link) fill_rect(ox + n * CW, y + CH - 2, CW, 1, fg);
+            }
+        }
+        scrollbar(c.x + c.w - 8, c.y + WEB_BAR, c.h - WEB_BAR, t->nl, rows, start);
+    }
+
+    // a small status pill at the bottom left: the hovered link's address, else the last message
+    const char *st = hot_link ? t->link[hot_link - 1] : t->stat;
+    if (st[0]) {
+        int n = imin((int)strlen(st), (c.w - 40) / CW), pw = n * CW + 20;
+        round_rect(c.x, c.y + c.h - 22, pw, 22, 4, k.bar);
+        text(c.x + 10, c.y + c.h - 22 + 3, st, k.tx, k.bar, n);
+    }
+}
+
+static int web_item_at(const win_t *w, int mx, int my)
+{
+    webtab_t *t = web_tab(w);
+    if (!t) return -1;
+    for (int i = 0; i < w->ntabs; i++) {
+        if (rect_has(web_tabclose_rect(w, i), mx, my)) return WB_TABCLOSE + i;
+        if (rect_has(web_tab_rect(w, i), mx, my)) return WB_TAB + i;
+    }
+    if (rect_has(web_newtab_rect(w), mx, my)) return WB_NEWTAB;
+    for (int i = 0; i < 4; i++) if (rect_has(web_btn_rect(w, i), mx, my)) return WB_BACK + i;
+    if (t->start) {
+        for (int i = 0; i < NWEB_TILES; i++) if (rect_has(web_tile_rect(w, i), mx, my)) return WB_TILE + i;
+        return -1;
+    }
+    if (t->img_w > 0) return -1;
+    rect_t c = content_rect(w);
+    int y0 = c.y + WEB_BAR + 8, rows = web_rows(w);
+    if (my < y0 || my >= y0 + rows * CH) return -1;
+    int row = imax(0, t->nl - rows - t->scroll) + (my - y0) / CH, col = (mx - (c.x + PADX + 16)) / CW;
+    if (row >= t->nl || col < 0 || col >= (int)strlen(t->lines[row])) return -1;
+    int n = t->lattr[row][col] & WA_LINK;
+    return n >= 1 && n <= t->nlink ? n : -1;
+}
+
+static void web_key(int wi, uint8_t code, bool ext)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    int page = imax(1, web_rows(w) - 2);
+    if (ext) {
+        if (code == 0x49) { if (g_ctrl) web_select_tab(wi, (w->wtab + w->ntabs - 1) % w->ntabs); else web_scroll(wi, page); }
+        else if (code == 0x51) { if (g_ctrl) web_select_tab(wi, (w->wtab + 1) % w->ntabs); else web_scroll(wi, -page); }
+        else if (code == 0x48) web_scroll(wi, 1);
+        else if (code == 0x50) web_scroll(wi, -1);
+        else if (code == 0x47) { t->scroll = t->nl; damage_content(w); }
+        else if (code == 0x4F) { t->scroll = 0; damage_content(w); }
+        else if (code == 0x4B && g_alt) web_back(wi);
+        else if (code == 0x4D && g_alt) web_forward(wi);
+        return;
+    }
+    if (g_ctrl) {
+        if (code == 0x30) web_back(wi);                                                                   // B
+        else if (code == 0x13 || code == 0x3F) web_reload(wi);                                            // R, F5
+        else if (code == 0x23) web_tab_home(w, t);                                                        // H
+        else if (code == 0x14) web_new_tab(wi, true);                                                     // T
+        else if (code == 0x11) web_close_tab(wi, w->wtab);                                                 // W
+        else if (code == 0x0F) web_select_tab(wi, (w->wtab + (g_shift ? w->ntabs - 1 : 1)) % w->ntabs);   // Tab
+        else if (code >= 0x02 && code <= 0x09) web_select_tab(wi, imin(w->ntabs - 1, code - 2));         // 1..8
+        else if (code == 0x26 || code == 0x25) { t->addrlen = 0; t->addr[0] = 0; damage_content(w); }   // L, K
+        else if (code == 0x2F) {                                                                          // V
+            static char host[CLIPBOARD_HOST_MAX + 1];
+            int n = clipboard_from_host(host, sizeof(host));
+            for (int i = 0; i < n && t->addrlen + 1 < (int)sizeof(t->addr); i++)
+                if ((unsigned char)host[i] >= 0x20 && (unsigned char)host[i] < 0x7F) t->addr[t->addrlen++] = host[i];
+            t->addr[t->addrlen] = 0;
+            memset(host, 0, sizeof(host));
+            damage_content(w);
+        }
+        return;
+    }
+    if (code == 0x3F) { web_reload(wi); return; }                                                         // F5
+    if (code == 0x1C) { char typed[160]; put_str(typed, sizeof(typed), t->addr); web_go(wi, typed); return; }
+    if (code == 0x01) { t->addrlen = put_str(t->addr, sizeof(t->addr), t->url); damage_content(w); return; }
+    if (code == 0x0E) { if (t->addrlen > 0) t->addr[--t->addrlen] = 0; damage_content(w); return; }
+    if (code < sizeof(UNSHIFTED)) {
+        char ch = g_shift ? SHIFTED[code] : UNSHIFTED[code];
+        if (ch >= 32 && ch < 127 && t->addrlen + 1 < (int)sizeof(t->addr)) { t->addr[t->addrlen++] = ch; t->addr[t->addrlen] = 0; damage_content(w); }
+    }
+}
+
+static void web_click(int wi, int mx, int my)
+{
+    win_t *w = &g_win[wi];
+    webtab_t *t = web_tab(w);
+    if (!t) return;
+    int it = web_item_at(w, mx, my);
+    if (it == WB_BACK) web_back(wi);
+    else if (it == WB_FWD) web_forward(wi);
+    else if (it == WB_RELOAD) web_reload(wi);
+    else if (it == WB_HOME) web_tab_home(w, t);
+    else if (it == WB_NEWTAB) web_new_tab(wi, true);
+    else if (it >= WB_TILE && it < WB_TILE + NWEB_TILES) { char url[160]; put_str(url, sizeof(url), WEB_TILES[it - WB_TILE].url); web_load(wi, url, url, true); }
+    else if (it >= WB_TABCLOSE && it < WB_TABCLOSE + WEB_MAXTABS) web_close_tab(wi, it - WB_TABCLOSE);
+    else if (it >= WB_TAB && it < WB_TAB + WEB_MAXTABS) web_select_tab(wi, it - WB_TAB);
+    else if (it >= 1 && it <= t->nlink) web_follow(wi, it);
+}
+
+static int open_web(void)
+{
+    int i = new_window(W_WEB, "New Tab");
+    if (i < 0) return -1;
+    g_win[i].ntabs = 0;
+    if (web_new_tab(i, true) < 0) { close_window(i); return -1; }
     return i;
 }
 
@@ -3565,7 +7332,7 @@ static void open_path(const char *path)
 }
 
 static const char HELP_TEXT[] =
-    "RadiumDE - keys and mouse\n"
+    "RadiWM - keys and mouse\n"
     "\n"
     "  Alt+F1           Applications menu\n"
     "  Alt+F2           run a command\n"
@@ -3582,6 +7349,10 @@ static const char HELP_TEXT[] =
     "  Text Editor: Ctrl+S saves, F5 or Run executes .rsh / .hls files,\n"
     "  RSHIDT opens the file in the full-screen Rash IDE.\n"
     "  Calculator: type digits and + - * / = on the keyboard.\n"
+    "  Web: type an address or search words and press Enter; click a\n"
+    "  link or type its number. Alt+Left/Right back/forward, F5 reload,\n"
+    "  Ctrl+T new tab, Ctrl+W close tab, Ctrl+Tab next tab, Ctrl+H home.\n"
+    "  Pictures open in the tab; videos play full screen.\n"
     "\n"
     "  Drag a title bar to move a window, drag an edge or a corner to\n"
     "  resize it, double-click a title bar to maximise it.\n"
@@ -3597,8 +7368,9 @@ static const char HELP_TEXT[] =
 
 static void theme_finish(void)
 {
-    static const uint32_t TS[4][3] = { { 0, 0, 0 }, { 0x000000, 0x33ff33, 0x07140a }, { 0x120a00, 0xffb000, 0x1e1400 }, { 0xfafafa, 0x222222, 0xe4e4e4 } };
-    if (C.term_style > 0 && C.term_style < 4) { TH.term_bg = TS[C.term_style][0]; TH.term_fg = TS[C.term_style][1]; TH.term_input = TS[C.term_style][2]; }
+    static const uint32_t TS[8][3] = { { 0, 0, 0 }, { 0x000000, 0x33ff33, 0x07140a }, { 0x120a00, 0xffb000, 0x1e1400 }, { 0xfafafa, 0x222222, 0xe4e4e4 },
+                                       { 0x002b36, 0x93a1a1, 0x073642 }, { 0x282a36, 0xf8f8f2, 0x343746 }, { 0x2e3440, 0xd8dee9, 0x3b4252 }, { 0x282828, 0xebdbb2, 0x3c3836 } };
+    if (C.term_style > 0 && C.term_style < 8) { TH.term_bg = TS[C.term_style][0]; TH.term_fg = TS[C.term_style][1]; TH.term_input = TS[C.term_style][2]; }
 }
 
 static void cfg_error(int line_no, const char *msg)
@@ -3615,8 +7387,8 @@ static void cfg_error(int line_no, const char *msg)
 static void cfg_defaults(void)
 {
     memset(&C, 0, sizeof(C));
-    C.mouse_speed = 45; C.mouse_gain = 60; C.dblclick = 450; C.wallpaper = 3; C.wp_mode = 0; C.dock = true; C.icons = true; C.desk_files = true; C.clock24 = true; C.theme = 0;
-    C.shadows = true; C.snap = true; C.run_windowed = true; C.tray = true; C.dock_size = 48;
+    C.mouse_speed = 45; C.mouse_gain = 60; C.dblclick = 450; C.wallpaper = 1; C.wp_mode = 0; C.dock = true; C.icons = true; C.desk_files = true; C.clock24 = true; C.theme = 0;
+    C.shadows = false; C.snap = true; C.run_windowed = true; C.tray = true; C.dock_size = 48; C.term_welcome = true;
     TH = THEMES[0];
     g_nlaunch = 0;
     g_nauto = 0;
@@ -3710,11 +7482,22 @@ static void parse_config(char *buf)
         } else if (same_nocase(w[0], "dock_size")) {
             if (n >= 2 && parse_num(w[1], 32, 64, &v)) C.dock_size = v; else cfg_error(line_no, "dock_size 32-64");
         } else if (same_nocase(w[0], "terminal_colors")) {
-            if (n >= 2 && same_nocase(w[1], "theme")) C.term_style = 0;
-            else if (n >= 2 && same_nocase(w[1], "classic")) C.term_style = 1;
-            else if (n >= 2 && same_nocase(w[1], "amber")) C.term_style = 2;
-            else if (n >= 2 && same_nocase(w[1], "light")) C.term_style = 3;
-            else cfg_error(line_no, "terminal_colors theme, classic, amber or light");
+            int s = -1;
+            for (int i = 0; i < 8 && n >= 2; i++) if (same_nocase(w[1], TERM_STYLES[i])) s = i;
+            if (s >= 0) C.term_style = s; else cfg_error(line_no, "terminal_colors theme, classic, amber, light, solarized, dracula, nord, gruvbox");
+        } else if (same_nocase(w[0], "terminal_cursor")) {
+            if (n >= 2 && same_nocase(w[1], "block")) C.term_cursor = 0;
+            else if (n >= 2 && same_nocase(w[1], "underline")) C.term_cursor = 1;
+            else if (n >= 2 && same_nocase(w[1], "bar")) C.term_cursor = 2;
+            else cfg_error(line_no, "terminal_cursor block, underline or bar");
+        } else if (same_nocase(w[0], "terminal_prompt")) {
+            if (n >= 2 && same_nocase(w[1], "full")) C.term_prompt = 0;
+            else if (n >= 2 && same_nocase(w[1], "short")) C.term_prompt = 1;
+            else if (n >= 2 && same_nocase(w[1], "arrow")) C.term_prompt = 2;
+            else if (n >= 2 && same_nocase(w[1], "radium")) C.term_prompt = 3;
+            else cfg_error(line_no, "terminal_prompt full, short, arrow or radium");
+        } else if (same_nocase(w[0], "terminal_welcome")) {
+            if (n >= 2 && parse_bool(w[1], &b)) C.term_welcome = b; else cfg_error(line_no, "terminal_welcome yes or no");
         } else if (same_nocase(w[0], "desktop_files")) {
             if (n >= 2 && parse_bool(w[1], &b)) C.desk_files = b; else cfg_error(line_no, "desktop_files yes or no");
         } else if (same_nocase(w[0], "dock")) {
@@ -3734,7 +7517,7 @@ static void parse_config(char *buf)
                 g_nlaunch++;
             }
         } else if (same_nocase(w[0], "autostart")) {
-            static const char *const KINDS[] = { "term", "files", "monitor", "clock", "settings", "calc", "editor", "games", "services", "scripts", "tasks" };
+            static const char *const KINDS[] = { "term", "files", "monitor", "clock", "settings", "calc", "editor", "games", "services", "scripts", "tasks", "web", "paint", "mines", "timer", "chess" };
             if (n >= 2 && same_nocase(w[1], "clear")) { g_nauto = 0; continue; }
             if (g_nauto >= MAX_AUTO) { cfg_error(line_no, "too many autostart entries"); continue; }
             int kind = -1;
@@ -3745,7 +7528,7 @@ static void parse_config(char *buf)
                 for (int i = 2; i < n; i++) { if (i > 2 && k < 47) g_auto[g_nauto].arg[k++] = ' '; for (const char *p = w[i]; *p && k < 47; p++) g_auto[g_nauto].arg[k++] = *p; }
                 g_auto[g_nauto].arg[k] = 0;
             }
-            if (kind < 0) { cfg_error(line_no, "autostart open term|files|monitor|clock|settings|calc|editor|games|services|scripts|tasks or exec COMMAND"); continue; }
+            if (kind < 0) { cfg_error(line_no, "autostart open term|files|monitor|clock|settings|calc|editor|games|services|scripts|tasks|web|paint|mines|timer|chess or exec COMMAND"); continue; }
             g_auto[g_nauto++].kind = kind;
         } else cfg_error(line_no, "unknown statement");
     }
@@ -3795,7 +7578,7 @@ static void save_settings(void)
 {
     static char out[2048];
     int o = 0;
-    o += snprintf(out + o, sizeof(out) - (size_t)o, "# RadiumDE desktop configuration (written by Settings)\n");
+    o += snprintf(out + o, sizeof(out) - (size_t)o, "# RadiWM configuration (written by Settings)\n");
     o += snprintf(out + o, sizeof(out) - (size_t)o, "theme %s\n", THEMES[C.theme].name);
     if (C.wallpaper == 3 && C.wp_file[0]) o += snprintf(out + o, sizeof(out) - (size_t)o, "wallpaper_file \"%s\"\nwallpaper_mode %s\n", C.wp_file, C.wp_mode == 1 ? "fit" : (C.wp_mode == 2 ? "stretch" : (C.wp_mode == 3 ? "center" : "fill")));
     else o += snprintf(out + o, sizeof(out) - (size_t)o, "wallpaper %s\n", C.wallpaper == 3 ? "default" : (C.wallpaper == 1 ? "flat" : (C.wallpaper == 2 ? "reverse" : "gradient")));
@@ -3803,13 +7586,18 @@ static void save_settings(void)
     o += snprintf(out + o, sizeof(out) - (size_t)o, "dock %s\nicons %s\ndesktop_files %s\nclock24 %s\n", C.dock ? "yes" : "no", C.icons ? "yes" : "no", C.desk_files ? "yes" : "no", C.clock24 ? "yes" : "no");
     o += snprintf(out + o, sizeof(out) - (size_t)o, "window_shadows %s\nsnap %s\nopen_maximised %s\nrun_in_window %s\npanel_tray %s\ndock_size %d\nterminal_colors %s\n",
                   C.shadows ? "yes" : "no", C.snap ? "yes" : "no", C.open_max ? "yes" : "no", C.run_windowed ? "yes" : "no", C.tray ? "yes" : "no", C.dock_size,
-                  C.term_style == 1 ? "classic" : (C.term_style == 2 ? "amber" : (C.term_style == 3 ? "light" : "theme")));
-    for (int i = 0; i < g_nlaunch; i++) o += snprintf(out + o, sizeof(out) - (size_t)o, "launcher \"%s\" %s\n", g_launch[i].label, g_launch[i].cmd);
+                  TERM_STYLES[C.term_style]);
+    static const char *const CUR_N[3] = { "block", "underline", "bar" };
+    static const char *const PRM_N[4] = { "full", "short", "arrow", "radium" };
+    o += snprintf(out + o, sizeof(out) - (size_t)o, "terminal_cursor %s\nterminal_prompt %s\nterminal_welcome %s\n", CUR_N[C.term_cursor], PRM_N[C.term_prompt], C.term_welcome ? "yes" : "no");
+    if (o > (int)sizeof(out) - 1) o = (int)sizeof(out) - 1;    // snprintf keeps counting past the buffer end: clamp so the next call gets a sane size
+    // snprintf keeps counting past the buffer end: clamp o so the next call gets a sane size
+    for (int i = 0; i < g_nlaunch; i++) { o += snprintf(out + o, sizeof(out) - (size_t)o, "launcher \"%s\" %s\n", g_launch[i].label, g_launch[i].cmd); if (o > (int)sizeof(out) - 1) o = (int)sizeof(out) - 1; }
     o += snprintf(out + o, sizeof(out) - (size_t)o, "autostart clear\n");
     for (int i = 0; i < g_nauto; i++) {
-        static const char *const KINDS[] = { "term", "files", "monitor", "clock", "settings", "calc", "editor", "games", "services", "scripts", "tasks" };
-        if (g_auto[i].kind == 100) o += snprintf(out + o, sizeof(out) - (size_t)o, "autostart exec %s\n", g_auto[i].arg);
-        else o += snprintf(out + o, sizeof(out) - (size_t)o, "autostart open %s\n", KINDS[g_auto[i].kind]);
+        static const char *const KINDS[] = { "term", "files", "monitor", "clock", "settings", "calc", "editor", "games", "services", "scripts", "tasks", "web", "paint", "mines", "timer", "chess" };
+        if (g_auto[i].kind == 100) { o += snprintf(out + o, sizeof(out) - (size_t)o, "autostart exec %s\n", g_auto[i].arg); if (o > (int)sizeof(out) - 1) o = (int)sizeof(out) - 1; }
+        else { o += snprintf(out + o, sizeof(out) - (size_t)o, "autostart open %s\n", KINDS[g_auto[i].kind]); if (o > (int)sizeof(out) - 1) o = (int)sizeof(out) - 1; }
     }
     char path[96];
     if (!default_config_path(path, sizeof(path))) { flash("/disk is not available - settings not saved"); return; }
@@ -4032,10 +7820,12 @@ static void term_run(int wi)
     char cmd[100];
     put_str(cmd, sizeof(cmd), w->input);
     w->inlen = 0;
+    w->icur = 0;
     w->input[0] = 0;
-    char echo[110] = "$ ";
-    put_str(echo + 2, sizeof(echo) - 2, cmd);
-    term_puts(w, echo);
+    char pr[40];
+    term_prompt_str(pr, sizeof(pr));
+    if (w->col) term_newline(w);
+    term_echo(w, pr, cmd);
     term_newline(w);
     const char *c = cmd;
     while (*c == ' ') c++;
@@ -4872,7 +8662,7 @@ static void tm_win_refresh(win_t *w)
     int keep = w->lsel >= 0 && w->lsel < w->nli ? w->li[w->lsel].kind : -1;
     w->nli = 0;
     w->lsel = -1;
-    static const char *const TN[] = { "Terminal", "Files", "Monitor", "Clock", "Settings", "Viewer", "Calculator", "Editor", "Games", "Services", "Scripts", "Task Manager" };
+    static const char *const TN[] = { "Terminal", "Files", "Monitor", "Clock", "Settings", "Viewer", "Calculator", "Editor", "Games", "Services", "Scripts", "Task Manager", "Web", "Paint", "Minesweeper", "Timer", "Chess" };
     for (int i = 0; i < MAX_WIN && w->nli < 40; i++) {
         if (!g_win[i].used) continue;
         put_str(w->li[w->nli].name, sizeof(w->li[0].name), g_win[i].title);
@@ -5094,6 +8884,7 @@ static void scroll_window(int wi, int lines_n)
         damage_content(w);
         return;
     }
+    if (w->type == W_WEB) { web_scroll(wi, lines_n); return; }
     if (w->type != W_TERM && w->type != W_VIEW) return;
     w->scroll += lines_n;
     if (w->scroll > w->nl - 1) w->scroll = w->nl - 1;
@@ -5101,9 +8892,72 @@ static void scroll_window(int wi, int lines_n)
     damage_content(w);
 }
 
+static void term_ins(win_t *w, char ch)
+{
+    if (w->inlen >= (int)sizeof(w->input) - 1) return;
+    memmove(w->input + w->icur + 1, w->input + w->icur, (size_t)(w->inlen - w->icur + 1));
+    w->input[w->icur++] = ch;
+    w->inlen++;
+}
+
+static void term_del(win_t *w, int from, int to)          // removes input[from..to)
+{
+    if (from < 0) from = 0;
+    if (to > w->inlen) to = w->inlen;
+    if (to <= from) return;
+    memmove(w->input + from, w->input + to, (size_t)(w->inlen - to + 1));
+    w->inlen -= to - from;
+    if (w->icur > from) w->icur = from;
+}
+
+static void term_paste(win_t *w)
+{
+    static char host[CLIPBOARD_HOST_MAX + 1];
+    int n = clipboard_from_host(host, sizeof(host));
+    for (int i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)host[i];
+        if (ch == '\n') break;                                // one line only
+        if (ch >= 0x20 && ch < 0x7F) term_ins(w, (char)ch);
+    }
+    memset(host, 0, sizeof(host));
+}
+
+// Tab: completes the command name; a second Tab on an ambiguous prefix lists the candidates.
+static void term_complete(win_t *w)
+{
+    if (w->inlen == 0 || w->icur != w->inlen || strchr(w->input, ' ')) return;
+    const char *m[32];
+    int n = run_matches(w->input, m, 32);
+    if (n == 0) return;
+    int common = (int)strlen(m[0]);
+    for (int i = 1; i < n; i++) { int k = 0; while (k < common && m[i][k] == m[0][k]) k++; common = k; }
+    if (common > (int)sizeof(w->input) - 3) common = (int)sizeof(w->input) - 3;
+    if (common > w->inlen) {
+        memcpy(w->input, m[0], (size_t)common);
+        w->input[common] = 0;
+        w->inlen = common;
+    } else if (n > 1) {
+        char pr[40];
+        term_prompt_str(pr, sizeof(pr));
+        if (w->col) term_newline(w);
+        term_echo(w, pr, w->input);
+        term_newline(w);
+        int cols = tile_cols(w);
+        for (int i = 0; i < n; i++) {
+            if (w->col + (int)strlen(m[i]) + 2 >= cols) term_newline(w);
+            term_puts(w, m[i]);
+            term_puts(w, "  ");
+        }
+        term_newline(w);
+    }
+    if (n == 1 && w->inlen < (int)sizeof(w->input) - 1) { w->input[w->inlen++] = ' '; w->input[w->inlen] = 0; }
+    w->icur = w->inlen;
+}
+
 static void term_key(int wi, uint8_t code, bool ext)
 {
     win_t *w = &g_win[wi];
+    bool ed = w->type == W_TERM;
     if (ext) {
         if (code == 0x49 || code == 0x51) {
             int page = tile_rows(w) - 3;
@@ -5111,37 +8965,79 @@ static void term_key(int wi, uint8_t code, bool ext)
             scroll_window(wi, code == 0x49 ? page : -page);
             return;
         }
-        if (w->type == W_VIEW) {
+        if (!ed) {
             if (code == 0x48) scroll_window(wi, 1);
             else if (code == 0x50) scroll_window(wi, -1);
             return;
         }
-        if ((code == 0x48 || code == 0x50) && w->nhist) {
-            int lo = w->nhist > 8 ? w->nhist - 8 : 0;
-            if (code == 0x48 && w->hpos > lo) w->hpos--;
-            else if (code == 0x50 && w->hpos < w->nhist) w->hpos++;
-            if (w->hpos == w->nhist) w->input[0] = 0;
-            else put_str(w->input, sizeof(w->input), w->hist[w->hpos & 7]);
-            w->inlen = (int)strlen(w->input);
-            damage_content(w);
+        switch (code) {
+        case 0x48: case 0x50:
+            if (w->nhist) {
+                int lo = w->nhist > 8 ? w->nhist - 8 : 0;
+                if (code == 0x48 && w->hpos > lo) w->hpos--;
+                else if (code == 0x50 && w->hpos < w->nhist) w->hpos++;
+                if (w->hpos == w->nhist) w->input[0] = 0;
+                else put_str(w->input, sizeof(w->input), w->hist[w->hpos & 7]);
+                w->inlen = (int)strlen(w->input);
+                w->icur = w->inlen;
+            }
+            break;
+        case 0x4B: if (w->icur > 0) w->icur--; break;
+        case 0x4D: if (w->icur < w->inlen) w->icur++; break;
+        case 0x47: w->icur = 0; break;
+        case 0x4F: w->icur = w->inlen; break;
+        case 0x53: term_del(w, w->icur, w->icur + 1); break;
+        default: return;
         }
+        w->scroll = 0;
+        damage_content(w);
         return;
     }
     if (g_ctrl) {
-        if (code == 0x26) { term_clear_lines(w); damage_content(w); }
-        else if (code == 0x2E || code == 0x16) { w->inlen = 0; w->input[0] = 0; damage_content(w); }
+        if (code == 0x26) { term_clear_lines(w); damage_content(w); return; }          // Ctrl+L
+        if (!ed) return;
+        switch (code) {
+        case 0x2E:                                                                       // Ctrl+C: abandon the line
+            if (w->inlen > 0) {
+                char pr[40];
+                term_prompt_str(pr, sizeof(pr));
+                if (w->col) term_newline(w);
+                term_echo(w, pr, w->input);
+                term_puts(w, "^C");
+                term_newline(w);
+                w->inlen = w->icur = 0;
+                w->input[0] = 0;
+            }
+            break;
+        case 0x16: term_del(w, 0, w->icur); break;                                       // Ctrl+U
+        case 0x25: term_del(w, w->icur, w->inlen); break;                                // Ctrl+K
+        case 0x11: {                                                                     // Ctrl+W
+            int k = w->icur;
+            while (k > 0 && w->input[k - 1] == ' ') k--;
+            while (k > 0 && w->input[k - 1] != ' ') k--;
+            term_del(w, k, w->icur);
+            break;
+        }
+        case 0x1E: w->icur = 0; break;                                                   // Ctrl+A
+        case 0x12: w->icur = w->inlen; break;                                            // Ctrl+E
+        case 0x2F: term_paste(w); break;                                                 // Ctrl+V
+        default: return;
+        }
+        w->scroll = 0;
+        damage_content(w);
         return;
     }
-    if (w->type != W_TERM) return;
+    if (!ed) return;
     if (code == 0x1C) { term_run(wi); return; }
+    if (code == 0x0F) { term_complete(w); w->scroll = 0; damage_content(w); return; }
     if (code == 0x0E) {
-        if (w->inlen > 0) w->input[--w->inlen] = 0;
+        if (w->icur > 0) term_del(w, w->icur - 1, w->icur);
     } else if (code < sizeof(UNSHIFTED)) {
         char ch = g_shift ? SHIFTED[code] : UNSHIFTED[code];
-        if (ch < 32 || ch > 126 || w->inlen >= (int)sizeof(w->input) - 1) return;
-        w->input[w->inlen++] = ch;
-        w->input[w->inlen] = 0;
+        if (ch < 32 || ch > 126) return;
+        term_ins(w, ch);
     } else return;
+    w->scroll = 0;
     damage_content(w);
 }
 
@@ -5153,6 +9049,7 @@ static void open_exec(const char *cmd)
     if (i < 0) return;
     put_str(g_win[i].input, sizeof(g_win[i].input), cmd);
     g_win[i].inlen = (int)strlen(g_win[i].input);
+    g_win[i].icur = g_win[i].inlen;
     term_run(i);
 }
 
@@ -5176,6 +9073,7 @@ static void open_prefilled(const char *cmd)
     if (i < 0) return;
     put_str(g_win[i].input, sizeof(g_win[i].input), cmd);
     g_win[i].inlen = (int)strlen(g_win[i].input);
+    g_win[i].icur = g_win[i].inlen;
     damage_content(&g_win[i]);
 }
 
@@ -5199,12 +9097,14 @@ static void menu_apps(int x, int y)
     menu_clear();
     menu_add("Terminal", ACT_OPEN, APP_TERM, IC_TERM);
     menu_add("Files", ACT_OPEN, APP_FILES, IC_FILES);
+    menu_add("Web Browser", ACT_OPEN, APP_WEB, IC_WEB);
     menu_add("Text Editor", ACT_OPEN, APP_EDIT, IC_EDIT);
     menu_add("Calculator", ACT_OPEN, APP_CALC, IC_CALC);
     menu_sep();
     menu_add("Games", ACT_SUBMENU, 1, IC_GAME);
     menu_add("Development", ACT_SUBMENU, 2, IC_SCRIPT);
     menu_add("System", ACT_SUBMENU, 3, IC_SET);
+    menu_add("Accessories", ACT_SUBMENU, 4, IC_APP);
     for (int i = 0; i < g_nlaunch; i++) menu_add(g_launch[i].label, ACT_CUSTOM, i, IC_APP);
     menu_sep();
     menu_add("Run Command...", ACT_RUNBOX, 0, IC_RUN);
@@ -5228,6 +9128,8 @@ static void menu_submenu(int which)
         games_build();
         for (int i = 0; i < g_ngames; i++) menu_add(g_games[i].name, ACT_GAME, i, IC_GAME);
         if (g_ngames == 0) menu_add("(no games installed)", ACT_NONE, 0, -1);
+        menu_add("Minesweeper", ACT_OPEN, APP_MINES, IC_MINES);
+        menu_add("Chess", ACT_OPEN, APP_CHESS, IC_CHESS);
         menu_sep();
         menu_add("All games...", ACT_OPEN, APP_GAMES, IC_GAME);
     } else if (which == 2) {
@@ -5241,6 +9143,12 @@ static void menu_submenu(int which)
         menu_add("System Monitor", ACT_OPEN, APP_MON, IC_MON);
         menu_add("Clock", ACT_OPEN, APP_CLOCK, IC_CLOCK);
         menu_add("Settings", ACT_OPEN, APP_SET, IC_SET);
+    } else if (which == 4) {
+        menu_add("Paint", ACT_OPEN, APP_PAINT, IC_PAINT);
+        menu_add("Timer", ACT_OPEN, APP_TIMER, IC_TIMER);
+        menu_add("Calculator", ACT_OPEN, APP_CALC, IC_CALC);
+        menu_add("Clock", ACT_OPEN, APP_CLOCK, IC_CLOCK);
+        menu_add("Text Editor", ACT_OPEN, APP_EDIT, IC_EDIT);
     } else { menu_apps(x, y); damage_rect(old); return; }
     menu_show(x, y);
     damage_rect(old);
@@ -5303,6 +9211,16 @@ static void menu_icon(int i, int x, int y)
     if (g_dic[i].kind == 2 && nl > 4 && same_nocase(g_dic[i].name + nl - 4, ".png")) menu_add("Set as Wallpaper", ACT_ICON_WALL, i, -1);
     else if (g_dic[i].kind == 2 && g_dic[i].icon != IC_GAME) menu_add("Edit", ACT_ICON_EDIT, i, IC_EDIT);
     if (icon_deletable(i)) { menu_sep(); menu_add("Delete", ACT_ICON_DELETE, i, -1); }
+    menu_show(x, y);
+}
+
+static void menu_term(int wi, int x, int y)
+{
+    menu_clear();
+    menu_add("Paste", ACT_TERM_PASTE, wi, -1);
+    menu_add("Clear", ACT_TERM_CLEAR, wi, -1);
+    menu_sep();
+    menu_add("Terminal Settings", ACT_TERM_SET, 0, IC_SET);
     menu_show(x, y);
 }
 
@@ -5392,6 +9310,9 @@ static void do_action(int act, int arg)
             damage_icons();
         }
         break;
+    case ACT_TERM_PASTE: if (arg >= 0 && arg < MAX_WIN && g_win[arg].used && g_win[arg].type == W_TERM && !g_win[arg].running) { term_paste(&g_win[arg]); g_win[arg].scroll = 0; damage_content(&g_win[arg]); } break;
+    case ACT_TERM_CLEAR: if (arg >= 0 && arg < MAX_WIN && g_win[arg].used && g_win[arg].type == W_TERM && !g_win[arg].running) { term_clear_lines(&g_win[arg]); damage_content(&g_win[arg]); } break;
+    case ACT_TERM_SET: { int i = open_app(APP_SET); if (i >= 0) g_win[i].tab = 4; } break;
     default: break;
     }
 }
@@ -5500,9 +9421,14 @@ static void handle_key(uint8_t code, bool ext, bool make)
     if (w->type == W_TERM || w->type == W_VIEW) term_key(g_focus, code, ext);
     else if (w->type == W_FILES) files_key(g_focus, code, ext);
     else if (w->type == W_TASKS) tasks_key(g_focus, code, ext);
+    else if (w->type == W_WEB) web_key(g_focus, code, ext);
     else if (w->type == W_CALC) calc_key(g_focus, code, ext);
     else if (w->type == W_EDIT) edit_key(g_focus, code, ext);
     else if (w->type == W_SERV || w->type == W_SCRIPTS || w->type == W_GAMES) list_key(g_focus, code, ext);
+    else if (w->type == W_PAINT) paint_key(g_focus, code, ext);
+    else if (w->type == W_MINES) mines_key(g_focus, code, ext);
+    else if (w->type == W_TIMER) timer_key(g_focus, code, ext);
+    else if (w->type == W_CHESS) chess_key(g_focus, code, ext);
 }
 
 static void poll_input_bytes(void);
@@ -5580,7 +9506,7 @@ static void mouse_shutdown(void)
 
 // ---- pointer interaction --------------------------------------------------------------------------------------------------------
 
-enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_SLIDER, DRAG_ICON };
+enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_SLIDER, DRAG_ICON, DRAG_PAINT };
 enum { E_L = 1, E_R = 2, E_T = 4, E_B = 8 };
 static struct { int kind, win, gx, gy, edges; rect_t start; } g_drag;
 static uint32_t g_last_click_ms;
@@ -5623,12 +9549,13 @@ static int item_at(int wi, int mx, int my)
     case W_EDIT: for (int i = 0; i < 3; i++) if (rect_has(ed_button(w, i), mx, my)) return i; break;
     case W_GAMES: for (int i = 0; i < g_ngames; i++) if (rect_has(game_tile(w, i), mx, my)) return i; break;
     case W_SERV: for (int i = 0; i < 4; i++) if (rect_has(serv_button(w, i), mx, my)) return 1000 + i; break;
+    case W_WEB: return web_item_at(w, mx, my);
     case W_SCRIPTS: for (int i = 0; i < 4; i++) if (rect_has(script_button(w, i), mx, my)) return 1000 + i; break;
     case W_SET: {
         for (int i = 0; i < NSETTABS; i++) if (rect_has(set_tab_rect(w, i), mx, my)) return 2000 + i;
         if (rect_has(set_save_rect(w), mx, my)) return 2100;
-        ctl_t ctl[32];
-        int n = settings_layout(w, ctl, 32);
+        ctl_t ctl[48];
+        int n = settings_layout(w, ctl, 48);
         for (int i = 0; i < n; i++)
             if (ctl[i].kind == CTL_BUTTON && mx >= ctl[i].x && mx < ctl[i].x + ctl[i].w && my >= ctl[i].y && my < ctl[i].y + ctl[i].h) return 3000 + ctl[i].id;
         break;
@@ -5727,6 +9654,7 @@ static void icon_drag_end(void)
 static void apply_drag(void)
 {
     if (g_drag.kind == DRAG_ICON) { icon_drag_move(); return; }
+    if (g_drag.kind == DRAG_PAINT) { paint_drag(g_drag.win, g_mx, g_my); return; }
     win_t *w = &g_win[g_drag.win];
     if (g_drag.kind == DRAG_SLIDER) { settings_slider_set(g_drag_slider_id, g_mx, g_drag_slider_x); damage_content(w); return; }
     damage_win(w);
@@ -5867,7 +9795,12 @@ static void left_press(void)
     else if (w->type == W_EDIT) edit_click(wi, g_mx, g_my);
     else if (w->type == W_GAMES) games_click(wi, g_mx, g_my);
     else if (w->type == W_SERV) serv_click(wi, g_mx, g_my);
+    else if (w->type == W_WEB) web_click(wi, g_mx, g_my);
     else if (w->type == W_SCRIPTS) scripts_click(wi, g_mx, g_my, dbl);
+    else if (w->type == W_PAINT) { if (paint_click(wi, g_mx, g_my)) { g_drag.kind = DRAG_PAINT; g_drag.win = wi; } }
+    else if (w->type == W_MINES) mines_click(wi, g_mx, g_my);
+    else if (w->type == W_TIMER) timer_click(wi, g_mx, g_my);
+    else if (w->type == W_CHESS) chess_click(wi, g_mx, g_my);
 }
 
 static void left_release(void)
@@ -5903,6 +9836,8 @@ static void right_press(void)
         focus_and_raise(wi);
         if (g_my < g_win[wi].y + BORD + TITLE_H) menu_window(wi, g_mx, g_my);
         else if (g_win[wi].type == W_FILES) files_rclick(wi, g_mx, g_my);
+        else if (g_win[wi].type == W_TERM && !g_win[wi].running) menu_term(wi, g_mx, g_my);
+        else if (g_win[wi].type == W_MINES) mines_rclick(wi, g_mx, g_my);
         return;
     }
     if (C.dock) { rect_t b = dock_bounds(); if (rect_has(b, g_mx, g_my)) return; }
@@ -6286,6 +10221,73 @@ static void desktop_selftest(void)
     tm_win_refresh(&g_win[ti]);
     st_check(g_win[ti].nli == 2, "window list shows the two windows");
 
+    int bi = open_web();
+    win_t *bwin = &g_win[bi];
+    webtab_t *bw = web_tab(bwin);
+    st_check(bw != NULL && bw->start, "web: a new window opens with a start tab");
+    static const char page[] = "<html><head><title>T &amp; U</title><meta name=x></head><body><h1>Hi</h1><p>one <a href=\"/x?a=1&amp;b=2\">two</a> three</p>"
+                               "<div style=\"display:none\">secret <b>text</b></div><script>x</script><img src=\"p.png\" alt=\"logo\"><video src=\"v.mp4\"></video></body></html>";
+    web_show(bwin, bw, "https://h.test/d/p.html", page, (int)sizeof(page) - 1, true, false);
+    st_check(bw->nlink == 3 && strcmp(bw->link[0], "https://h.test/x?a=1&b=2") == 0, "web: a link is resolved against the page address");
+    st_check(bw->nl >= 3 && strcmp(bw->lines[0], "Hi") == 0 && strncmp(bw->lines[2], "one two[1] three", 16) == 0, "web: page text, scripts and hidden parts left out");
+    st_check((bw->lattr[2][4] & WA_LINK) == 1 && (bw->lattr[0][0] & WA_HEAD) != 0, "web: link number and heading are remembered");
+    st_check(bw->lkind[1] == 1 && strcmp(bw->link[1], "https://h.test/d/p.png") == 0 && bw->lkind[2] == 2, "web: pictures and videos become typed links");
+    st_check(strcmp(bw->title, "T & U") == 0 && strcmp(bwin->title, "T & U") == 0, "web: the tab and window take the page title");
+    bool hidden_ok = true;
+    for (int i = 0; i < bw->nl; i++) if (strstr(bw->lines[i], "secret")) hidden_ok = false;
+    st_check(hidden_ok, "web: display:none content is not shown");
+    int t2 = web_new_tab(bi, true);
+    st_check(t2 >= 0 && bwin->ntabs == 2 && bwin->wtab == 1 && web_tab(bwin)->start, "web: a second tab opens and is selected");
+    web_close_tab(bi, 1);
+    st_check(bwin->ntabs == 1 && web_tab(bwin) == bw && !g_tabs[t2].used, "web: closing a tab gives it back");
+    char wu[160];
+    web_resolve("https://a.b/c/d.html", "../e.html", wu, sizeof(wu));
+    st_check(strcmp(wu, "https://a.b/e.html") == 0, "web: dot segments are removed from a relative address");
+    web_resolve("https://a.b/c", "mailto:x@y.z", wu, sizeof(wu));
+    st_check(wu[0] == 0, "web: mailto links are not followed");
+    static const uint8_t bmp[] = { 'B','M', 70,0,0,0, 0,0,0,0, 54,0,0,0, 40,0,0,0, 2,0,0,0, 2,0,0,0, 1,0, 24,0, 0,0,0,0, 16,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+                                   255,0,0, 0,255,0, 0,0, 0,0,255, 255,255,255, 0,0 };
+    uint32_t px[4], iw = 0, ih = 0;
+    int kind = rust_image_decode_fit(bmp, sizeof(bmp), 10, 10, px, 4, &iw, &ih);
+    st_check(kind == 4 && iw == 2 && ih == 2 && px[0] == 0xffff0000 && px[1] == 0xffffffff && px[2] == 0xff0000ff && px[3] == 0xff00ff00, "web: a BMP decodes to the right pixels (rows are stored bottom-up)");
+    close_window(bi);
+    st_check(!g_tabs[bwin->tabs[0]].used || bwin->ntabs == 0, "web: closing the window gives its tabs back");
+
+    g_ch.human = 0;
+    g_ch.mode = 0;
+    ch_new();
+    st_check(ch_perft(&g_ch.pos, 1, 0) == 20 && ch_perft(&g_ch.pos, 2, 0) == 400 && ch_perft(&g_ch.pos, 3, 0) == 8902, "chess: move generation matches perft 20/400/8902");
+    {   // back-rank mate in one: Ra8#
+        int sc, dd;
+        memset(&g_ch.pos, 0, sizeof(g_ch.pos));
+        g_ch.pos.b[62] = PC_K; g_ch.pos.b[56] = PC_R;
+        g_ch.pos.b[6] = -PC_K; g_ch.pos.b[13] = g_ch.pos.b[14] = g_ch.pos.b[15] = -PC_P;
+        g_ch.pos.ep = -1;
+        g_ch_hist[0] = ch_hash(&g_ch.pos);
+        g_ch_nh = 1;
+        st_check(ch_think(&g_ch.pos, 4, 500, 0, false, &sc, &dd, false) == CM(56, 0, 0) && sc > CH_MATE - 100, "chess: the engine finds mate in one");
+    }
+    {   // every line of the opening table must be a legal game
+        int bad = 0;
+        g_ch.human = 0;
+        for (int oi = 0; oi < NOPEN; oi++) {
+            bool ok = true;
+            ch_new();
+            for (int k = 0, L = opn_len(&OPENINGS[oi]); k < L && ok; k++) {
+                cmove_t m;
+                if (opn_tok_move(&OPENINGS[oi], k, &m)) ch_apply(m);
+                else { ok = false; OUT_ERR("  bad opening line: %s (ply %d)\n", OPENINGS[oi].name, k + 1); }
+            }
+            if (!ok) bad++;
+        }
+        st_check(bad == 0, "chess: every opening line is a legal game");
+    }
+    ch_new();
+    ch_apply(CM(52, 36, 0));                                                   // 1.e4
+    ch_apply(CM(12, 28, 0));                                                   // 1...e5
+    st_check(strcmp(g_ch_san[0], "e4") == 0 && strcmp(g_ch_san[1], "e5") == 0, "chess: SAN of the first two moves");
+    st_check(g_ch.opn_cur >= 0 && strcmp(OPENINGS[g_ch.opn_cur].name, "King's Pawn Game") == 0, "chess: the opening is recognised");
+    ch_new();
     const uint32_t blob = (uint32_t)(wallpaper_default_png_end - wallpaper_default_png);
     if (blob > 0) {
         C.wallpaper = 3; C.wp_file[0] = 0; g_wp_key[0] = 0;
@@ -6399,12 +10401,13 @@ static void desktop_main(bool boot)
     damage_all();
 
     g_last_sec = now_ms();
-    uint32_t last_draw = 0;
+    uint32_t last_draw = 0, last_apps = 0;
     fbcon_set_poll_hook(vt_pump);
     while (!g_quit) {
         poll_input_bytes();
         uint32_t now = now_ms();
         if (now - g_last_sec >= 1000) { g_last_sec += 1000; tick_second(); }
+        if (now - last_apps >= 100) { last_apps = now; chess_tick(); apps_tick(); }
         if (now - last_draw >= 16 && has_pending()) { draw_frame(); last_draw = now_ms(); }
         else __asm__ volatile("pause");
     }
