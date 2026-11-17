@@ -4,6 +4,7 @@
 #include "../errors/error.h"
 #include "../io/io.h"
 #include "../keyboard/keyboard.h"
+#include "../kernel/fault_guard.h"
 extern void rust_schedule(void);
 // ----- GDT / TSS -----
 
@@ -118,11 +119,23 @@ int setup_interrupts() {
     
     return 1;
 }
+// Foreground programs run as scheduler tasks inside the timer interrupt, with
+// IRQs off. One that turns them back on (so time advances while it runs) holds
+// the scheduler, so the nested ticks only count and never re-enter a task.
+static volatile int g_sched_hold;
+
+void sched_hold_push(void) { g_sched_hold++; }
+void sched_hold_pop(void) { if (g_sched_hold > 0) g_sched_hold--; }
+
 void handle_interrupt(TrapFrame regs) {
     if (regs.interrupt > 255) {
         system_error("Invalid interrupt vector", "0x005");
         return;
     }
+
+    // CPU exceptions raised by a guarded program (the browser) resume it at
+    // its recovery point instead of panicking.
+    if (regs.interrupt < 32 && fg_on_exception(&regs)) return;
 
     if (regs.interrupt < 32) {
         uint32_t cr2;
@@ -137,13 +150,22 @@ void handle_interrupt(TrapFrame regs) {
     // Visual indicator at top of screen
     *(VGA_MEMORY + 79) = 0xF100 | 'T';
 
+
     if (regs.interrupt >= 32 && regs.interrupt <= 47) {
+        fg_irq_enter();
         // Timer interrupt (IRQ 0)
         if (regs.interrupt == 32) {
             extern void rust_schedule(void);
             extern bool rust_fetch_active(void);
             extern volatile uint32_t ticks;
             ticks++;
+            // A guarded program stuck past its watchdog is resumed at its
+            // recovery point; this tick skips scheduling.
+            if (fg_on_timer(&regs)) {
+                outb(0x20, 0x20);
+                fg_irq_exit();
+                return;
+            }
             extern bool ctrlc_running(void);
             extern void ctrlc_tick(void);
             extern void rust_guard_tick(void);
@@ -151,13 +173,15 @@ void handle_interrupt(TrapFrame regs) {
                 outb(0x20, 0x20);
                 rust_guard_tick();
                 ctrlc_tick();
+                fg_irq_exit();
                 return;
             }
             extern void fbcon_tick(void);
             fbcon_tick();
             // Fetch waits for network I/O with IRQs enabled, without nesting shell tasks.
             outb(0x20, 0x20);
-            if (!rust_fetch_active()) rust_schedule(); else rust_guard_tick();
+            if (!rust_fetch_active() && !g_sched_hold) rust_schedule(); else rust_guard_tick();
+            fg_irq_exit();
             return;
         }
         
@@ -166,6 +190,7 @@ void handle_interrupt(TrapFrame regs) {
             outb(0xA0, 0x20);
         }
         outb(0x20, 0x20);
+        fg_irq_exit();
     }
 }
 

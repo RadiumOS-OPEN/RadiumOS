@@ -180,6 +180,10 @@ int setup_pit(uint32_t frequency);
 
 // Interrupt handling
 void handle_interrupt(TrapFrame regs);
+// Keep timer ticks from running scheduler tasks (nests). For a foreground
+// program that re-enables interrupts while it owns the CPU.
+void sched_hold_push(void);
+void sched_hold_pop(void);
 
 // Task management functions
 int setup_tasks();
