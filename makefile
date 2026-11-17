@@ -24,6 +24,19 @@ endif
 # Flags
 NASMFLAGS = -f elf32
 CFLAGS = -c -target i686-none-elf -ffreestanding -mno-sse -O2 -fno-strict-aliasing -fwrapv -fstack-protector-strong -Wall -Wextra -Werror=implicit-function-declaration -MMD -MP
+# QuickJS (vendored in src/quickjs, with its compat libc and musl libm): built
+# optimised, against its own libc headers, without warnings for vendor code.
+QJS_CFLAGS = -O2 -D__radiumos__ '-DCONFIG_VERSION="2026-06-04"' -isystem src/quickjs/compat/include -w
+src/quickjs/%.o: CFLAGS += $(QJS_CFLAGS)
+# The rbrowse painter touches every pixel of a 640x360 frame on each repaint;
+# the image decoder and scaler touch every pixel of every image.
+src/rbrowse/paint.o: CFLAGS += -O2
+src/rbrowse/image.o: CFLAGS += -O2
+# stb_image (vendored in src/stb, see its README.md): optimised, against the
+# QuickJS compat libc headers, without warnings for vendor code; -fwrapv
+# because its integer IDCT can overflow on corrupt JPEG data.
+src/stb/%.o: CFLAGS += -O2 -fwrapv -isystem src/quickjs/compat/include -w
+
 LDFLAGS = -T linker.ld -static -nostdlib --fatal-warnings
 
 # Directories
@@ -221,6 +234,11 @@ src/commands/desktop.o: CFLAGS += -O2
 # Doom (GPL, from ozkl/doomgeneric): its own C library headers (src/dglibc), optimized, warnings off
 src/doom/%.o: CFLAGS += -I src/dglibc -w -O2 -DNORMALUNIX -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200
 
+# The browser DOM's JS half, embedded as a C string.
+src/quickjs/dom_prelude.c: src/quickjs/dom_prelude.js tools/rbrowse/js2c.py
+	python3 tools/rbrowse/js2c.py $< $@ rjs_dom_prelude
+
+# Build Rust library with Cargo
 ifeq ($(USE_RUST),yes)
 $(RUST_LIB): $(RUST_SOURCES) i686-radiumos.json .cargo/config.toml
 	@echo "Building Rust library with Cargo..."

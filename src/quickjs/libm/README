@@ -1,0 +1,10 @@
+This directory is a port of the generic C implementations from musl libc 1.2.5
+(src/math/*.c, src/internal/libm.h; MIT license, see COPYRIGHT) for QuickJS.
+Changes: every public function is built as qjs_<name> (compat/include/math.h
+#defines the standard names to qjs_*), internal helpers (__sin, __rem_pio2,
+__exp_data, ...) get a qjs_ prefix via libm.h, and sqrt is x87 fsqrt instead of
+musl's soft sqrt. Reason: the kernel has its own sin/pow/sqrt, so no libm
+symbol may be unprefixed.  libm.h pins FLT_EVAL_METHOD to 1 (53-bit mantissa):
+the kernel sets the x87 control word to 0x027F at boot, and musl's i386
+"extended precision" tricks (EPS == LDBL_EPSILON) break under that setting.
+Local fix: acosh returns NaN for all x < 1 (musl could return a finite value).
