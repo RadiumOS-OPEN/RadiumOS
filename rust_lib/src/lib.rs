@@ -38,6 +38,7 @@ mod fetch;
 mod heap;
 mod helios;
 mod imgdec;
+mod picture;
 mod sniff;
 
 use core::sync::atomic::{AtomicU32, Ordering};

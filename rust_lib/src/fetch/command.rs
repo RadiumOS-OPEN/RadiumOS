@@ -571,3 +571,98 @@ pub unsafe extern "C" fn rust_http_request(
         }
     }
 }
+
+/// The most a page fetched for the desktop browser may be.
+const PAGE_LIMIT: usize = 24 * 1024 * 1024;
+
+/// Copies `text` into a NUL-terminated C buffer of `cap` bytes, truncating if needed.
+unsafe fn put_c(out: *mut u8, cap: u32, text: &[u8]) {
+    if out.is_null() || cap == 0 {
+        return;
+    }
+    let n = core::cmp::min(text.len(), cap as usize - 1);
+    core::ptr::copy_nonoverlapping(text.as_ptr(), out, n);
+    *out.add(n) = 0;
+}
+
+/// The media type of a response ("text/html" from "Content-Type: text/html; charset=utf-8"), lower case.
+fn content_type(headers: &[u8]) -> Vec<u8> {
+    for line in headers.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
+        if !line[..colon].eq_ignore_ascii_case(b"content-type") {
+            continue;
+        }
+        let value = &line[colon + 1..];
+        let value = value.split(|&b| b == b';').next().unwrap_or(value);
+        return value.trim_ascii().to_ascii_lowercase();
+    }
+    Vec::new()
+}
+
+/// One GET for the desktop's web browser: redirects followed (at most five) and up to 24 MB read. Copies at most
+/// `out_cap` bytes of the body into `out` and returns the body's full length; *status gets the HTTP status,
+/// `final_url` the address the body was read from and `content_type` its media type (both NUL-terminated, cut to
+/// fit). -1 on a transport or protocol error (rust_http_error says why).
+#[no_mangle]
+pub unsafe extern "C" fn rust_http_get_page(
+    url: *const u8,
+    out: *mut u8,
+    out_cap: u32,
+    status: *mut i32,
+    final_url: *mut u8,
+    final_cap: u32,
+    content_type_out: *mut u8,
+    content_type_cap: u32,
+) -> i32 {
+    if !status.is_null() {
+        *status = 0;
+    }
+    put_c(final_url, final_cap, b"");
+    put_c(content_type_out, content_type_cap, b"");
+    if url.is_null() || (out.is_null() && out_cap > 0) {
+        return -1;
+    }
+    if BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        remember_error("another network request is running");
+        return -1;
+    }
+    let flags: u32;
+    core::arch::asm!("pushfd", "pop {}", out(reg) flags);
+    let _guard = CommandGuard(flags);
+    core::arch::asm!("sti");
+    crate::FETCH_NETWORK_SILENT.store(true, Ordering::Relaxed);
+
+    let result = (|| -> Result<(super::Response, Url), Error> {
+        let text = argument(url)?;
+        let mut options = Options::parse(&["--location", text])?;
+        options.max_size = PAGE_LIMIT;
+        let mut url = options.url.take().ok_or(Error::Message("missing URL"))?;
+        let mut config = None;
+        let response = request_following_redirects(&mut url, false, None, PAGE_LIMIT, &options, &mut config)?;
+        Ok((response, url))
+    })();
+
+    match result {
+        Ok((response, url)) => {
+            let n = core::cmp::min(response.body.len(), out_cap as usize);
+            if n > 0 {
+                core::ptr::copy_nonoverlapping(response.body.as_ptr(), out, n);
+            }
+            if !status.is_null() {
+                *status = response.status as i32;
+            }
+            let address = format!("{}://{}{}", url.scheme(), url.authority(), url.path);
+            put_c(final_url, final_cap, address.as_bytes());
+            put_c(content_type_out, content_type_cap, &content_type(&response.headers));
+            core::cmp::min(response.body.len(), i32::MAX as usize) as i32
+        }
+        Err(error) => {
+            remember_error(&format!("{error}"));
+            -1
+        }
+    }
+}
