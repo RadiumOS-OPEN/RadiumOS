@@ -28,6 +28,14 @@
 extern uint8_t vga_font_8x8[256][8];
 extern int rbrowse_http_get(const uint8_t *url, uint8_t *out, int cap);
 extern int rbrowse_http_get_same_origin(const uint8_t *url, uint8_t *out, int cap);
+/* rust_lib/src/fetch/command.rs: GET (body_len < 0) or POST with the session
+   cookie jar; final_url gets the URL the redirects ended on. */
+extern int rbrowse_http(const uint8_t *url, const uint8_t *body, int body_len,
+                        const uint8_t *content_type, int same_origin,
+                        uint8_t *out, int cap, uint8_t *final_url, int final_cap);
+extern int rbrowse_cookie_get(const uint8_t *url, uint8_t *out, int cap);
+extern int rbrowse_cookie_set(const uint8_t *url, const uint8_t *text);
+extern void rbrowse_cookie_clear(void);
 extern bool rust_fetch_active(void);
 extern void rust_fetch_abort(void);
 extern int rust_tcp_force_reset(void);
@@ -632,6 +640,16 @@ static void load_styles(const char *base);
 static void run_page_scripts(const char *canonical);
 static void images_new_page(void);
 static void follow(const char *href, int push, int user);
+/* The POST body of the navigation take_nav() just took (a method=post form),
+   -1 for a GET. follow() consumes it. */
+static char g_post_body[RB_NAV_BODY_MAX + 1];
+static int g_post_len = -1;
+static int take_nav(char *out, int cap) {
+    if (!rb_take_nav(out, cap)) return 0;
+    g_post_len = rb_nav_body(g_post_body, (int)sizeof(g_post_body));
+    if (g_post_len >= (int)sizeof(g_post_body)) g_post_len = -1;   /* cannot happen: the engine caps it */
+    return 1;
+}
 static int g_js_errors;   /* uncaught JS errors on this page (see js_console) */
 static char g_js_err_status[80];      /* the status line of the latest one */
 static int g_js_pending;              /* script changes waiting for a relayout */
@@ -730,6 +748,24 @@ static int js_fetch(const char *url, char *out, int cap, int same_origin) {
     return n;
 }
 
+/* fetch()/XHR POST: the reply is read by the page, so same-origin. */
+static int js_post(const char *url, const char *body, int len, const char *ctype, char *out, int cap) {
+    fg_watchdog_pause();
+    int n = rbrowse_http((const uint8_t *)url, (const uint8_t *)body, len, (const uint8_t *)ctype, 1,
+                         (uint8_t *)out, cap, 0, 0);
+    fg_watchdog_resume();
+    return n < 0 ? -1 : n;
+}
+
+/* document.cookie: the session jar the HTTP requests use. */
+static int js_cookie_get(const char *url, char *out, int cap) {
+    return rbrowse_cookie_get((const uint8_t *)url, (uint8_t *)out, cap);
+}
+static int js_cookie_set(const char *url, const char *text) {
+    return rbrowse_cookie_set((const uint8_t *)url, (const uint8_t *)text);
+}
+static const RjsNet g_js_net = {js_cookie_get, js_cookie_set, js_post};
+
 static int script_is_classic(int node) {
     char type[64];
     if (!rb_dom_has_attr(node, "type", 4)) return 1;
@@ -762,6 +798,7 @@ static void run_page_scripts(const char *canonical) {
     g_js_errors = 0;
     g_js_line_n = 0;
     rjs_set_output(js_console);
+    rjs_dom_set_net(&g_js_net);
     if (rjs_start() != RJS_OK || rjs_dom_install(canonical, js_fetch) != 0) {
         set_status("JS: engine failed to start");
         return;
@@ -810,7 +847,7 @@ static void js_turn(void) {
         g_dirty = 1;
     }
     char nav[384];
-    if (rb_take_nav(nav, (int)sizeof(nav))) follow(nav, 1, 0);
+    if (take_nav(nav, (int)sizeof(nav))) follow(nav, 1, 0);
 }
 
 /* Message text is network/user-influenced (URLs, socket errors); '<' and '&'
@@ -1156,7 +1193,19 @@ static void img_turn(void) {
     }
 }
 
-static int load_canonical(const char *canonical) {
+/* Same URL apart from the fragment. */
+static int same_doc(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] != '#' && a[i] == b[i]) i++;
+    return (a[i] == 0 || a[i] == '#') && (b[i] == 0 || b[i] == '#');
+}
+
+/* Loads canonical: post_len >= 0 POSTs g_post_body[0..post_len) to it. A
+   redirect chain's end is written into final (the page is opened under that
+   URL, so relative links and document.cookie use it); final is "" when the
+   page stayed where it was asked for. */
+static int load_canonical(const char *canonical, int post_len, char *final, int final_cap) {
+    final[0] = 0;
     /* Internal pages. about:crash and about:hang exercise the fault guard. */
     if (starts(canonical, "about:")) {
         if (strcmp(canonical, "about:blank") == 0) {
@@ -1172,7 +1221,10 @@ static int load_canonical(const char *canonical) {
         set_status("Loading...");
         paint();
         fg_watchdog_pause();
-        int n = rbrowse_http_get((const uint8_t *)canonical, (uint8_t *)g_fetch, (int)sizeof(g_fetch));
+        char end[384];
+        int n = rbrowse_http((const uint8_t *)canonical,
+                             post_len >= 0 ? (const uint8_t *)g_post_body : 0, post_len, 0, 0,
+                             (uint8_t *)g_fetch, (int)sizeof(g_fetch), (uint8_t *)end, (int)sizeof(end));
         fg_watchdog_resume();
         if (n < 0) {
             const char *detail = g_fetch[0]
@@ -1181,7 +1233,19 @@ static int load_canonical(const char *canonical) {
             show_message(canonical, "Load failed", detail);
             return -1;
         }
-        open_fetched(canonical, n);
+        /* The redirect target, keeping the asked-for fragment when the
+           server's URL has none (and nothing at all when it did not move). */
+        if (end[0] && !same_doc(end, canonical)) {
+            int w = 0;
+            append_str(final, final_cap, &w, end);
+            const char *frag = 0;
+            for (const char *p = canonical; *p; p++) if (*p == '#') { frag = p; break; }
+            int has = 0;
+            for (const char *p = end; *p; p++) if (*p == '#') has = 1;
+            if (frag && !has) append_str(final, final_cap, &w, frag);
+            if (w + 1 >= final_cap) final[0] = 0;
+        }
+        open_fetched(final[0] ? final : canonical, n);
         return 0;
     }
     int size = avfs_get_filesize(canonical);
@@ -1203,12 +1267,21 @@ static int load_canonical(const char *canonical) {
    0 when it came from page markup or a script. */
 static void follow(const char *href, int push, int user) {
     char resolved[384];
+    /* A POST form's body travels with this navigation only (never with
+       history: Back and Forward GET the URL the POST ended on). */
+    int post = g_post_len;
+    g_post_len = -1;
     if (!href) return;
     while (*href == ' ' || *href == '\t') href++;
     if (!href[0]) return;
     const char *base = g_current[0] ? g_current : "/";
     int base_remote = starts(base, "http://") || starts(base, "https://");
-    if (starts(href, "http://") || starts(href, "https://") || starts(href, "about:")) {
+    if (post >= 0 && href[0] == '#') {
+        /* A form without an action posts to its own document. */
+        int i = 0;
+        while (base[i] && base[i] != '#' && i + 1 < (int)sizeof(resolved)) { resolved[i] = base[i]; i++; }
+        resolved[i] = 0;
+    } else if (starts(href, "http://") || starts(href, "https://") || starts(href, "about:")) {
         copy_str(resolved, (int)sizeof(resolved), href);
     } else if (!push && href[0] == '/') {
         /* History (push == 0) stores already-resolved canonicals. Re-resolving
@@ -1233,15 +1306,33 @@ static void follow(const char *href, int push, int user) {
         set_status("blocked: remote page cannot open local files");
         return;
     }
+    if (post >= 0 && !starts(resolved, "http://") && !starts(resolved, "https://")) {
+        set_status("blocked: a form can only POST to http(s)");
+        return;
+    }
     if (push) hist_push(resolved);
     char cur[384];
     copy_str(cur, (int)sizeof(cur), resolved);
     for (int hop = 0; hop < 4; hop++) {
-        load_canonical(cur);
+        char final[384];
+        load_canonical(cur, post, final, (int)sizeof(final));
+        /* History holds where the page ended up, so a reload or Back after a
+           POST + redirect GETs the result page instead of posting again. */
+        if (final[0]) {
+            copy_str(cur, (int)sizeof(cur), final);
+            if (g_hist_n > 0) copy_str(g_hist[g_hist_i], 384, cur);
+        }
         char next[384];
         char step[384];
-        if (!rb_take_nav(next, (int)sizeof(next))) break;
-        if (!rb_resolve(cur, next, step, (int)sizeof(step))) break;
+        if (!take_nav(next, (int)sizeof(next))) break;
+        post = g_post_len;
+        g_post_len = -1;
+        if (post >= 0 && next[0] == '#') copy_str(step, (int)sizeof(step), cur);
+        else if (!rb_resolve(cur, next, step, (int)sizeof(step))) break;
+        if (post >= 0 && !starts(step, "http://") && !starts(step, "https://")) {
+            set_status("blocked: a form can only POST to http(s)");
+            break;
+        }
         /* Scripts on a loaded page can also request local files — same block. */
         if ((starts(cur, "http://") || starts(cur, "https://")) &&
             !starts(step, "http://") && !starts(step, "https://")) {
@@ -1361,12 +1452,6 @@ static void go_url(void) {
     follow(target, 1, 1);
 }
 
-/* POST forms are refuted by the engine (rb_activate returns a no-op for their
-   controls); say so instead of leaving Enter/click silent. */
-static void note_post_form(int node, int r) {
-    if (r == 0 && rb_form_post(node)) set_status("unsupported: form method POST");
-}
-
 static void activate_focus(void) {
     if (g_url_focus) {
         go_url();
@@ -1375,10 +1460,9 @@ static void activate_focus(void) {
     int node = focus_node();
     if (node <= 0) return;
     int r = rb_activate(node);
-    if (r == 0) note_post_form(node, r);
     if (r == 2) {
         char href[384];
-        if (rb_take_nav(href, (int)sizeof(href))) follow(href, 1, 0);
+        if (take_nav(href, (int)sizeof(href))) follow(href, 1, 0);
         return;
     }
     if (r == 1) {
@@ -1506,13 +1590,12 @@ static void click_at(int x, int y) {
         r = 0;       /* a click only focuses a text field; Enter submits it */
     } else {
         r = rb_dispatch_ex(node, RB_EV_CLICK, 0, dx, dy, 0, g_btn, 0);
-        if (r == 0) note_post_form(node, r);
     }
     /* A CLICK listener or default action may have moved the active element;
        keep the cursor slot derived from it. */
     if (r == 2) {
         char href[384];
-        if (rb_take_nav(href, (int)sizeof(href))) follow(href, 1, 0);
+        if (take_nav(href, (int)sizeof(href))) follow(href, 1, 0);
         return;
     }
     if (r == 1) rb_relayout();
@@ -1918,6 +2001,8 @@ void rbrowse(int argc, char *argv[]) {
         print("  640x360 truecolor browser (Bochs/QEMU VBE), 320x200 VGA otherwise. Esc quits.\n");
         print("  --vga forces the 320x200 mode 13h fallback.\n");
         print("  Tab / Shift+Tab move focus. Enter or Space activates.\n");
+        print("  Forms submit with GET or POST. Cookies live for this session only:\n");
+        print("  the jar starts empty and is cleared when rbrowse exits.\n");
         print("  Examples: rbrowse  |  rbrowse /home/user/hello.html  |  rbrowse http://example.com/\n");
         return;
     }
@@ -1982,6 +2067,8 @@ void rbrowse(int argc, char *argv[]) {
     g_hist_n = 0;
     g_hist_i = 0;
     g_current[0] = 0;
+    g_post_len = -1;
+    rbrowse_cookie_clear();   /* one jar per session */
     g_crash_n = 0;
     set_status(g_mouse_ok ? "Tab focus  Enter open  Esc quit" : "Keyboard only  Tab focus  Esc quit");
     volatile int gave_up = 0;
@@ -2079,6 +2166,8 @@ void rbrowse(int argc, char *argv[]) {
         print(why);
         print("\n");
     }
+    rbrowse_cookie_clear();
+    rjs_dom_set_net(0);
     print("rbrowse closed.\n");
     if (!(saved_flags & 0x200)) __asm__ volatile("cli");
     sched_hold_pop();
