@@ -11,8 +11,9 @@
 //
 // Only state the guarded program owns can be trusted afterwards; it must
 // reset its own globals (the browser re-opens its engine from scratch).
-// Paging is off, so stray pointer writes do not fault: the guard catches
-// #DE/#UD/#GP/#SS and friends, and hangs via the timer, not wild stores.
+// All 4 GiB of virtual space is mapped (boot.asm, NULL included), so stray
+// pointer writes do not fault: the guard catches #DE/#UD/#GP/#SS and
+// friends, and hangs via the timer, not wild stores.
 
 #ifndef FAULT_GUARD_H
 #define FAULT_GUARD_H

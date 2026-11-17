@@ -11,6 +11,7 @@
 #include "canvas.h"
 #include "../vga/vga_gfx.h"
 #include "../vga/bga.h"
+#include "../vga/fbcon.h"
 #include "../terminal/terminal.h"
 #include "../Avfs/Avfs.h"
 #include "../io/io.h"
@@ -25,6 +26,9 @@
 
 extern uint8_t vga_font_8x8[256][8];
 extern int rbrowse_http_get(const uint8_t *url, uint8_t *out, int cap);
+extern bool rust_fetch_active(void);
+extern void rust_fetch_abort(void);
+extern int rust_tcp_force_reset(void);
 extern void watchdog_hud_force_redraw(void);
 
 /* The back buffer every frame is painted into (rb_ui.w x rb_ui.h used). */
@@ -290,8 +294,8 @@ static void paint(void) {
 
 /* ---- start-up warning ----------------------------------------------------
    Shown for RB_BANNER_MS every time the browser opens. The engine runs in
-   ring 0 with paging off: a bad page can still corrupt kernel memory, and the
-   fault guard only catches what the CPU itself reports. */
+   ring 0 with every address mapped: a bad page can still corrupt kernel
+   memory, and the fault guard only catches what the CPU itself reports. */
 #define RB_BANNER_MS 2500
 
 static void banner_triangle(int cx, int top, int h, uint32_t c) {
@@ -1807,6 +1811,14 @@ static int recover_from_crash(void) {
     if (g_crash_n > 0 && now - g_crash_ms < RB_CRASH_WINDOW_MS) g_crash_n++;
     else g_crash_n = 1;
     g_crash_ms = now;
+    /* A fault inside a transfer skipped the HTTP client's own cleanup: its
+       busy flag would stay set and every later load would answer "another
+       fetch is running" (the shell does the same after Ctrl+C). Before the
+       give-up test, so a browser that closes does not leave it set either. */
+    if (rust_fetch_active()) {
+        rust_fetch_abort();
+        rust_tcp_force_reset();
+    }
     if (g_crash_n > RB_CRASH_BURST) return 0;
     rb_crash_reset();
     rjs_abandon();
@@ -1837,6 +1849,14 @@ void rbrowse(int argc, char *argv[]) {
         print("  --vga forces the 320x200 mode 13h fallback.\n");
         print("  Tab / Shift+Tab move focus. Enter or Space activates.\n");
         print("  Examples: rbrowse  |  rbrowse /home/user/hello.html  |  rbrowse http://example.com/\n");
+        return;
+    }
+    /* In a desktop window the display belongs to the window manager (programs
+       draw through fbcon_blit, and it reads the PS/2 port): switching the
+       video mode and polling the controller from here would wreck it. */
+    if (fbcon_get_redirect()) {
+        print("rbrowse: cannot run in a desktop window (it takes over the screen and the mouse).\n");
+        print("  Leave the desktop and start it from the console.\n");
         return;
     }
     int force_vga = 0;
