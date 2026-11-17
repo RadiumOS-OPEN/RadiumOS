@@ -1,4 +1,34 @@
 #include "io.h"
+#include "../vga/fbcon.h"
+#include "kbdtap.h"
+
+static inline uint32_t irq_save(void)
+{
+    uint32_t f;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(f) : : "memory");
+    return f;
+}
+
+static inline void irq_restore(uint32_t f)
+{
+    if (f & 0x200) __asm__ volatile("sti" : : : "memory");
+}
+
+// Ports 0x60/0x64 are read through the Ctrl+C tap (kbdtap.c): its FIFO first, then the hardware.
+static uint8_t kbd_port_in(uint16_t port)
+{
+    uint32_t f = irq_save();
+    uint8_t v;
+    if (kbdtap_wm_active()) kbdtap_drain();
+    if (port == 0x60) {
+        if (!kbdtap_pop(&v)) __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port));
+    } else {
+        __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port));
+        v = kbdtap_fix_status(v);
+    }
+    irq_restore(f);
+    return v;
+}
 
 // PCI Configuration Space Access
 #define PCI_CONFIG_ADDRESS  0xCF8
@@ -16,6 +46,8 @@ void outb(uint16_t port, uint8_t value) {
 // Function to read a byte from a specified I/O port
 uint8_t inb(uint16_t port) {
     uint8_t ret;
+    if (port == 0x64) fbcon_poll();   // programs that poll the keyboard also get their text drawn
+    if (port == 0x60 || port == 0x64) return kbd_port_in(port);
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
@@ -47,6 +79,8 @@ uint32_t inl(uint16_t port) {
 // Function to read a byte from a specified I/O port 
 uint8_t port_byte_in(uint16_t port) {
     uint8_t result;
+    if (port == 0x64) fbcon_poll();
+    if (port == 0x60 || port == 0x64) return kbd_port_in(port);
     asm volatile ("inb %1, %0" : "=a"(result) : "Nd"(port));
     return result;
 }

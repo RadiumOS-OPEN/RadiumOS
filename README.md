@@ -4,14 +4,21 @@ Bare-metal operating system for i686 architecture, written in Rust and C.
 
 ## Features
 
-- **Kernel**: Preemptive multitasking scheduler with watchdog
-- **Graphics**: VBE 800×600 framebuffer + VGA text mode (80×25)
-- **Networking**: RTL8139 NIC with custom TCP/IP stack, DNS, HTTPS proxy
-- **Filesystem**: AVFS (Actual Virtual FileSystem) RAM disk
-- **Scripting**: RSH v2.3 (RadiumOS Shell Language)
-- **Hardware**: Keyboard Driver (most keybinds working !)
-- **Security**: AES-128 CBC encryption/decryption
-- **Tools**: Radium Geiger hex viewer
+- **Kernel**: Preemptive multitasking scheduler with watchdog, stack guards, Ctrl+C handling, TSC-based timers and boot profiling
+- **Graphics**: VBE framebuffer console (up to 1280×720) with a scaler, animated overlays, boot page and wallpaper support, plus legacy VGA text mode and Mode 13h
+- **Vulkan**: Software Vulkan implementation (`rust_lib/src/vulkan`) with a SPIR-V interpreter and rasteriser; `vulkaninfo` / `vkdemo` commands
+- **Desktop**: RadiumDE, a small Xfce-style desktop environment (`desktop`)
+- **Networking**: RTL8139 NIC with custom TCP/IP stack, UDP sockets, DNS, HTTPS proxy and WebSocket support
+- **Filesystem**: AVFS RAM disk, FAT32 `/disk` volume, a fetch/disk store, `fsck`, `diskpart` and `mv`/`find`/`tree`/`stat`/`du`/`diff` and other core utilities
+- **Users & security**: Multi-user accounts with login, `sudo`, passphrase file encryption (`crypt`), AES-128 CBC, a kernel guard (`guard`), `secaudit`, Ed25519-signed updates and a `selftest` regression command
+- **Services**: `rsd`, a small systemd-style service manager using `NAME.svc` unit files
+- **Updates**: `update` command for installing signed update packages without rebuilding (`make update-package`, `make serve-update`)
+- **Scripting**: RSH v2.3 (RadiumOS Shell Language) with shell variables and text filters
+- **Helios**: Compiled systems language targeting the RXE v6 format (see [helios.md](helios.md))
+- **Media & decoding**: PNG and generic image decoding, MP4 / H.264 / AAC support, emoji rendering
+- **Apps & games**: Static ELF app runner (C++ on musl), Doom (doomgeneric, with Helios mods), AssaultCube port, Discord client and a text-based YouTube Music client
+- **Hardware**: Keyboard driver (most keybinds working!), clipboard support
+- **Tools**: Radium Geiger hex viewer; helper scripts in `tools/`
 
 ## Building
 
@@ -51,8 +58,8 @@ Rust toolchain — required for the Rust component (`rust_lib/`):
   rustup component add rust-src --toolchain nightly
   ```
 
-- Rust crate dependencies (currently just `linked_list_allocator`, pinned in
-  `rust_lib/Cargo.lock`) are fetched automatically by Cargo on first build —
+- Rust crate dependencies (pinned in `rust_lib/Cargo.lock`, with local
+  crates under `rust_lib/vendor/`) are fetched automatically by Cargo on first build —
   no manual step needed.
 
 ```bash
@@ -105,13 +112,21 @@ Run `make help` for the full list. Highlights:
 - `make verify-symbols` — fail the build if any undefined symbols remain in the kernel binary
 - `make check-symbol SYM=funcname` — check whether a specific function is compiled and linked in
 - `make info` — list discovered C sources and current Rust-support status
+- `make full` — build everything, install updates and games, then boot QEMU
+- `make test` — headless QEMU regression tests (`ONLY=selftest|accounts|binary`)
+- `make debug` — boot QEMU paused with a GDB server on `:1234`
+- `make update-package` / `make append-update` / `make rollback-update` — build, bump or roll back the signed update package
+- `make games` — install AssaultCube and a Doom WAD (`make doom-wad WAD=file`) into the fetch store
 - `make check-rust` / `make init-rust` — verify or set up the nightly Rust toolchain
 
 ## Project Structure
 
 - `src/` — Kernel and core OS code (C)
-- `rust_lib/` — Rust standard library components (With Rust SRC)
+- `rust_lib/` — Rust standard library components (With Rust SRC) and vendored crates
 - `packages/` — RSH scripts and modules
+- `tools/` — Build, signing, disk-install and asset-generation scripts
+- `update/` — Update package payload
+- `port/` — Ported applications (AssaultCube, musl runtime)
 - `makefile` — Build system
 - `linker.ld` — Linker configuration for i686
 

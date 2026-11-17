@@ -1,0 +1,103 @@
+// mod: Railgun: press F, pierces everything in line
+include "/disk/mods/doom.hls";
+
+const DAMAGE: int = 400;
+const RECHARGE_MS: int = 1200;
+const FLASH_MS: int = 180;
+const GUN_X: int = 236;
+const GUN_Y: int = 114;
+
+fn rect(x: int, y: int, w: int, h: int, c: int) {
+    let scr = mod_screen();
+    for j in 0..h {
+        for i in 0..w {
+            wr(scr + ((y + j) * 320 + x + i) * 4, c);
+        }
+    }
+}
+
+// a 2 pixel wide line, drawn with 64 steps
+fn beam(x0: int, y0: int, x1: int, y1: int, c: int) {
+    for i in 0..65 {
+        let x = x0 + (x1 - x0) * i / 64;
+        let y = y0 + (y1 - y0) * i / 64;
+        rect(x, y, 2, 2, c);
+    }
+}
+
+// the gun model; recoil moves it down, charge (0..100) fills the coils and the bar
+fn draw_gun(recoil: int, charge: int, flash: int) {
+    let x = GUN_X;
+    let y = GUN_Y + recoil;
+    rect(x + 14, y - 24, 16, 5, 0x2B2F35);
+    rect(x + 16, y - 20, 12, 30, 0x4A4F57);
+    rect(x + 18, y - 20, 3, 30, 0x8C939E);
+    rect(x + 24, y - 20, 2, 30, 0x32363D);
+    for k in 0..3 {
+        let mut col = 0x14304A;
+        if charge >= (k + 1) * 33 { col = 0x40E0FF; }
+        rect(x + 14, y - 14 + k * 8, 16, 3, col);
+    }
+    rect(x, y + 10, 46, 24, 0x363A41);
+    rect(x, y + 10, 46, 3, 0x5B616B);
+    rect(x + 4, y + 16, 20, 10, 0x1F2227);
+    rect(x + 6, y + 18, 3, 3, 0x40FF60);
+    rect(x + 12, y + 18, 3, 3, 0xFF4040);
+    rect(x + 30, y + 34, 12, 12, 0x2B2F35);
+    rect(x + 6, y + 28, 34, 3, 0x101216);
+    let mut bar = 0xFFB000;
+    if charge >= 100 { bar = 0x40FFFF; }
+    rect(x + 6, y + 28, charge * 34 / 100, 3, bar);
+    if flash == 1 {
+        rect(x + 10, y - 36, 24, 10, 0xFFFFFF);
+        rect(x + 15, y - 40, 14, 6, 0x80F0FF);
+    }
+}
+
+// state: [0] time of the last shot, [4] F was down last frame
+fn main() {
+    let s = mod_state();
+    if mod_frame() < 0 {
+        out_set(OUT_WANT_TARGET, 0);
+        out_set(OUT_DMG, 0);
+    } else {
+        if in_level() == 1 {
+            let now = now_ms();
+            let since = now - rd(s);
+            let mut charge = since * 100 / RECHARGE_MS;
+            if since > 100000 { charge = 100; }
+            if charge > 100 { charge = 100; }
+            out_set(OUT_WANT_TARGET, 2);
+            let down = key_down(4);
+            if down == 1 && rd(s + 4) == 0 && charge >= 100 && alive() == 1 {
+                let count = api(A_VIS_COUNT);
+                let list = stoi(argv(5)) + A_VIS * 4;
+                let mut n = 0;
+                for i in 0..count {
+                    let mut lat = rd(list + i * 12 + 4);
+                    if lat < 0 { lat = 0 - lat; }
+                    let ahead = rd(list + i * 12 + 8);
+                    if lat < 40 && ahead > 0 && n < 8 {
+                        out_set(OUT_KILL0 + n, rd(list + i * 12));
+                        n += 1;
+                    }
+                }
+                out_set(OUT_DMG, DAMAGE);
+                wr(s, now);
+                charge = 0;
+            }
+            wr(s + 4, down);
+            let since2 = now_ms() - rd(s);
+            let mut recoil = 0;
+            let mut flash = 0;
+            if since2 < FLASH_MS { recoil = 6 - since2 / 30; flash = 1; }
+            if flash == 1 {
+                let cx = api(A_VIEWX) + api(A_VIEWW) / 2;
+                let cy = api(A_VIEWY) + api(A_VIEWH) / 2;
+                beam(GUN_X + 21, GUN_Y - 30, cx, cy, 0x80F0FF);
+                beam(GUN_X + 22, GUN_Y - 29, cx + 1, cy + 1, 0xFFFFFF);
+            }
+            draw_gun(recoil, charge, flash);
+        }
+    }
+}

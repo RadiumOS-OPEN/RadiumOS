@@ -1,5 +1,6 @@
 // netstack.c - Network Stack Implementation (Fixed)
 #include "netstack.h"
+#include "udpsock.h"
 #include "../rtl8139/rtl8139.h"
 #include "nic.h"
 #include "net.h"
@@ -8,10 +9,16 @@
 #include "../timers/timer.h"
 #include "../utility/utility.h"
 
-// Debug flag - set to 0 to disable verbose output
-#define NET_DEBUG 1
+// Verbose output; apps that use sockets (AssaultCube) turn it off while they run
+int g_net_quiet = 0;
+#define NET_DEBUG (!g_net_quiet)
 
 // Global network configuration
+static uint32_t next_hop(uint32_t ip);
+extern int rust_rtl8139_send(const uint8_t* packet, uint32_t size);
+extern int rust_rtl8139_poll_frame(uint8_t* out, uint32_t cap);
+extern bool rust_rtl8139_check_init(void);
+
 network_config_t net_config = {0};
 arp_cache_entry_t arp_cache[ARP_CACHE_SIZE] = {0};
 
@@ -111,7 +118,7 @@ void netstack_process_pending(void) {
         
         // Try to send again
         uint8_t dest_mac[6];
-        if (arp_lookup(pending_packets[i].dest_ip, dest_mac)) {
+        if (arp_lookup(next_hop(pending_packets[i].dest_ip), dest_mac)) {
             // Got MAC, send packet
             ipv4_header_t ip_header;
             ip_header.version_ihl = 0x45;
@@ -195,11 +202,13 @@ void ethernet_send(uint8_t* dest_mac, uint16_t ethertype, uint8_t* payload, uint
     if (length > 1500) length = 1500;
     memcpy(frame.payload, payload, length);
     
-    // Send via RTL8139 using new driver
-    sendRTL8139(selectedNIC, &frame, 14 + length);
-    
-    // Update statistics
-    nic_update_tx_stats(selectedNIC, 14 + length);
+    if (selectedNIC) {
+        // Send via RTL8139 using new driver
+        sendRTL8139(selectedNIC, &frame, 14 + length);
+        nic_update_tx_stats(selectedNIC, 14 + length);
+    } else {
+        rust_rtl8139_send((const uint8_t*)&frame, 14 + length);   // the Rust driver is the one that owns the card
+    }
 }
 
 void ethernet_process(uint8_t* frame, uint16_t length) {
@@ -438,6 +447,13 @@ uint16_t ipv4_checksum(uint16_t* data, int length) {
     return ~sum;
 }
 
+// Next hop for an IP: the destination itself on our subnet, otherwise the gateway.
+static uint32_t next_hop(uint32_t ip) {
+    uint32_t mask = net_config.subnet_mask ? net_config.subnet_mask : 0xFFFFFF00u;
+    if ((ip & mask) == (net_config.ip_address & mask) || ip == 0xFFFFFFFFu || !net_config.gateway) return ip;
+    return net_config.gateway;
+}
+
 void ipv4_send(uint32_t dest_ip, uint8_t protocol, uint8_t* payload, uint16_t length) {
     if (NET_DEBUG) {
         char buffer[32];
@@ -474,12 +490,13 @@ void ipv4_send(uint32_t dest_ip, uint8_t protocol, uint8_t* payload, uint16_t le
     
     // Look up MAC address
     uint8_t dest_mac[6];
-    if (arp_lookup(dest_ip, dest_mac)) {
+    uint32_t hop = next_hop(dest_ip);
+    if (arp_lookup(hop, dest_mac)) {
         ethernet_send(dest_mac, ETHERTYPE_IPV4, packet, 20 + length);
     } else {
         // Queue packet and send ARP request
         netstack_queue_packet(dest_ip, protocol, payload, length);
-        arp_send_request(dest_ip);
+        arp_send_request(hop);
     }
 }
 
@@ -652,24 +669,28 @@ void udp_send(uint32_t dest_ip, uint16_t src_port, uint16_t dest_port, uint8_t* 
 }
 
 void udp_process(ipv4_header_t* ip_header, udp_header_t* udp, uint16_t length) {
+    (void)length;
     uint16_t src_port = ntohs(udp->src_port);
     uint16_t dest_port = ntohs(udp->dest_port);
     uint32_t src_ip = ntohl(ip_header->src_ip);
-    uint16_t data_len = ntohs(udp->length) - 8;
-    
-    char buffer[32];
-    print("UDP from ");
-    ip_to_string(src_ip, buffer);
-    print(buffer);
-    print(":");
-    print_decimal(src_port);
-    print(" -> port ");
-    print_decimal(dest_port);
-    print(" (");
-    print_decimal(data_len);
-    print(" bytes)\n");
-    
-    // Application can register UDP handlers here
+    int data_len = (int)ntohs(udp->length) - 8;
+    if (data_len < 0) return;
+
+    if (udpsock_deliver(dest_port, src_ip, src_port, ((uint8_t*)udp) + 8, (uint16_t)data_len)) return;
+
+    if (NET_DEBUG) {
+        char buffer[32];
+        print("UDP from ");
+        ip_to_string(src_ip, buffer);
+        print(buffer);
+        print(":");
+        print_decimal(src_port);
+        print(" -> port ");
+        print_decimal(dest_port);
+        print(" (");
+        print_decimal(data_len);
+        print(" bytes)\n");
+    }
 }
 
 // ===== UTILITY FUNCTIONS =====
@@ -737,5 +758,31 @@ void netstack_receive_process(void) {
     
     while ((length = net_queue_get(selectedNIC, rx_buffer, sizeof(rx_buffer))) > 0) {
         netstack_process_packet(rx_buffer, length);
+    }
+}
+
+// ===== Frame I/O for callers that wait for packets (DNS, UDP sockets) =====
+
+bool netstack_nic_ready(void) {
+    return selectedNIC != NULL || rust_rtl8139_check_init();
+}
+
+// Next received frame from whichever driver owns the card; 0 if none.
+int netstack_poll_frame(uint8_t* buf, uint16_t cap) {
+    if (selectedNIC) {
+        receiveRTL8139(selectedNIC);
+        return net_queue_get(selectedNIC, buf, cap);
+    }
+    int n = rust_rtl8139_poll_frame(buf, cap);
+    return n > 0 ? n : 0;
+}
+
+// Receives what is waiting and hands it to the stack (ARP, UDP sockets, ...).
+void netstack_pump(void) {
+    static uint8_t frame[2048];
+    for (int i = 0; i < 32; i++) {
+        int n = netstack_poll_frame(frame, sizeof(frame));
+        if (n <= 0) break;
+        netstack_process_packet(frame, (uint16_t)n);
     }
 }

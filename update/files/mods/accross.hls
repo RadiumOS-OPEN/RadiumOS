@@ -1,0 +1,18 @@
+// acmod: Crosshair in the middle of the view
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if in_game() == 1 {
+            let cx = api(A_SCRW) / 2;
+            let cy = api(A_SCRH) / 2;
+            for i in 3..9 {
+                ag_px(cx - i, cy, 0x40FF40);
+                ag_px(cx + i, cy, 0x40FF40);
+                ag_px(cx, cy - i, 0x40FF40);
+                ag_px(cx, cy + i, 0x40FF40);
+            }
+            ag_px(cx, cy, 0xFF3030);
+        }
+    }
+}
