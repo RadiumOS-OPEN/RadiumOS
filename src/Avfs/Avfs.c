@@ -1793,8 +1793,8 @@ int avfs_get_entry_info(const char* path, DirectoryEntry* entry_out) {
     int index = avfs_find_entry(normalized);
     if (index == -1) return -1;
     avfs_file_entry_t* file = &avfs.files[index];
-    strncpy(entry_out->name, file->name, AVFS_FILENAME_MAX - 1);
-    entry_out->name[AVFS_FILENAME_MAX - 1] = '\0';
+    strncpy(entry_out->name, file->name, sizeof(entry_out->name) - 1);
+    entry_out->name[sizeof(entry_out->name) - 1] = '\0';
     entry_out->size         = file->size;
     entry_out->is_directory = (file->type == AVFS_TYPE_DIR) ? 1 : 0;
     entry_out->index        = index;
