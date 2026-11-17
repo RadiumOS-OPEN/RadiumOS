@@ -243,6 +243,21 @@ int main(void) {
         EXPECT("document.getElementById('o').textContent", "3");
     }
 
+    /* inline handlers in markup added after the page loaded: from an event
+       handler (innerHTML), a timer (insertAdjacentHTML), and setAttribute */
+    page("<body><div id=d></div><button id=go onclick=\"render()\">go</button><p id=sa>p</p><script>var hits = 0;"
+         "function render() { document.getElementById('d').innerHTML = '<button id=late onclick=\"hits++\">late</button>'; }"
+         "setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<button id=tm onclick=\"hits += 10\">t</button>');"
+         "  document.getElementById('sa').setAttribute('onclick', 'hits += 100'); }, 10);</script></body>");
+    rb_dispatch(rb_find_id("go"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("late"), RB_EV_CLICK);
+    EXPECT("hits", "1");
+    tick(20);
+    rb_dispatch(rb_find_id("tm"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("sa"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("late"), RB_EV_CLICK);       /* bound once, not once per rebind */
+    EXPECT("hits", "112");
+
     /* scripts inserted by scripts */
     EXPECT("var ev = []; var sc = document.createElement('script'); sc.src = 'http://cdn.example.net/lib.js';"
            "sc.onload = () => ev.push('load'); document.head.appendChild(sc);"

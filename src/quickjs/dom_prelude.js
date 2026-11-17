@@ -19,6 +19,9 @@ const cache = new Map();          // handle -> {gen, obj}
 const listeners = new Map();      // handle -> Map(type -> [{fn, capture, once}])
 const nativeHooked = new Set();   // "handle:type:capture" registered with the engine
 const fragments = new WeakSet();  // DocumentFragment wrappers (detached containers)
+/* Markup or an on* attribute was added since inline handlers were last bound
+   (bindInlineHandlers, at the end of the file). */
+let inlineStale = false;
 
 function wrap(h) {
   if (!h) return null;
@@ -218,6 +221,7 @@ global.__rb_fire = function (type, target, current, capture) {
     ev.eventPhase = target === 1 ? 2 : 3;
     invoke(global, ev, false);
   }
+  if (inlineStale) bindInlineHandlers();
 };
 
 function jsDispatch(target, ev) {
@@ -368,6 +372,7 @@ class Node extends EventTarget {
     }
     const ok = ref ? rb.insert(this.__h, handle(child), handle(ref)) : rb.append(this.__h, handle(child));
     if (!ok) throw new DOMException('The node cannot be inserted here', 'HierarchyRequestError');
+    if (child.nodeType === 1) inlineStale = true;
     if (child.nodeType === 1 && child.isConnected) startInsertedScripts(child);
     return child;
   }
@@ -668,7 +673,11 @@ class Element extends Node {
   get namespaceURI() { return 'http://www.w3.org/1999/xhtml'; }
 
   getAttribute(n) { return rb.getAttr(this.__h, String(n).toLowerCase()); }
-  setAttribute(n, v) { rb.setAttr(this.__h, String(n).toLowerCase(), String(v)); }
+  setAttribute(n, v) {
+    n = String(n).toLowerCase();
+    rb.setAttr(this.__h, n, String(v));
+    if (n.startsWith('on')) inlineStale = true;
+  }
   removeAttribute(n) { rb.removeAttr(this.__h, String(n).toLowerCase()); }
   hasAttribute(n) { return rb.hasAttr(this.__h, String(n).toLowerCase()); }
   toggleAttribute(n, force) {
@@ -703,12 +712,14 @@ class Element extends Node {
   set innerHTML(v) {
     detachChildren(this.__h);
     rb.setHtml(this.__h, v == null ? '' : String(v));
+    inlineStale = true;
   }
   get outerHTML() { return rb.html(this.__h, 1); }
   set outerHTML(v) {
     if (!rb.parent(this.__h)) return;
     rb.adjHtml(this.__h, 0, String(v));
     rb.detach(this.__h);
+    inlineStale = true;
   }
   get innerText() { return this.textContent; }
   set innerText(v) { this.textContent = v; }
@@ -717,6 +728,7 @@ class Element extends Node {
     const i = ['beforebegin', 'afterbegin', 'beforeend', 'afterend'].indexOf(String(where).toLowerCase());
     if (i < 0) throw new DOMException('Bad position', 'SyntaxError');
     rb.adjHtml(this.__h, i, String(html));
+    inlineStale = true;
   }
   insertAdjacentElement(where, el) {
     switch (String(where).toLowerCase()) {
@@ -1912,6 +1924,7 @@ class Document extends Node {
     const html = parts.join('');
     if (currentScript) rb.adjHtml(currentScript, 3, html);
     else if (this.body) rb.adjHtml(this.body.__h, 2, html);
+    inlineStale = true;
   }
   writeln(...parts) { this.write(...parts, '\n'); }
   open() { return this; }
@@ -2142,6 +2155,7 @@ global.__rb_tick = function (now) {
     try { t.fn.apply(global, t.args); } catch (e) { reportError(e); }
   }
   scheduleNext();
+  if (inlineStale) bindInlineHandlers();
 };
 
 /* ---------------- network ---------------- */
@@ -2434,17 +2448,22 @@ global.dispatchEvent = ev => {
 /* ---------------- host hooks ---------------- */
 
 /* Inline handler attributes (onclick="...") become listeners. Done after
-   each script so handlers created by markup in later scripts work too. */
+   each script so handlers created by markup in later scripts work too, and
+   again at the end of a timer or event turn that added markup (inlineStale):
+   a list rendered with innerHTML carries its buttons' onclick. */
 const HANDLER_ATTRS = ['click', 'change', 'input', 'submit', 'keydown', 'keyup', 'keypress',
   'mousedown', 'mouseup', 'mouseover', 'mouseout', 'focus', 'blur', 'load', 'error'];
+const HANDLER_SEL = HANDLER_ATTRS.map(t => '[on' + t + ']').join(',');
 const handlerDone = new Set();
 function bindInlineHandlers() {
-  for (const t of HANDLER_ATTRS) {
-    for (const h of rb.query(1, '[on' + t + ']')) {
+  inlineStale = false;
+  for (const h of rb.query(1, HANDLER_SEL)) {
+    for (const t of HANDLER_ATTRS) {
+      const code = rb.getAttr(h, 'on' + t);
+      if (code === null) continue;
       const key = h + ':' + rb.gen(h) + ':' + t;
       if (handlerDone.has(key)) continue;
       handlerDone.add(key);
-      const code = rb.getAttr(h, 'on' + t);
       let fn;
       try { fn = new Function('event', code); } catch (e) { reportError(e); continue; }
       const el = wrap(h);
@@ -2471,6 +2490,7 @@ global.__rb_begin_script = function (h) {
 global.__rb_img_event = function (h, ok) {
   const el = wrap(h);
   if (el) jsDispatch(el, new Event(ok ? 'load' : 'error'));
+  if (inlineStale) bindInlineHandlers();
 };
 
 global.__rb_loaded = function () {
