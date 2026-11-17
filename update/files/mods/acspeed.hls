@@ -1,0 +1,6 @@
+// acmod: Speed: run twice as fast
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 { out_set(OUT_SPEED, 100); } else { out_set(OUT_SPEED, 200); }
+}

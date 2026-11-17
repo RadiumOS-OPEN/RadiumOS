@@ -98,6 +98,9 @@ void netstack_init(uint32_t ip, uint32_t subnet, uint32_t gateway);
 void netstack_set_mac(uint8_t* mac);
 void netstack_process_packet(uint8_t* data, uint16_t length);
 void netstack_process_pending(void);
+bool netstack_nic_ready(void);
+int netstack_poll_frame(uint8_t* buf, uint16_t cap);   // next received frame, 0 if none
+void netstack_pump(void);                              // receive and process what is waiting
 void netstack_queue_packet(uint32_t dest_ip, uint8_t protocol, uint8_t* data, uint16_t length);
 
 // Ethernet layer

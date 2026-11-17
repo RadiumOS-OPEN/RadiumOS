@@ -1,0 +1,6 @@
+// acmod: Fly: move forward to fly where you look
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 { out_set(OUT_FLY, 0); } else { out_set(OUT_FLY, 1); }
+}

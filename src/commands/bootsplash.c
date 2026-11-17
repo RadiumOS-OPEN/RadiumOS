@@ -3,12 +3,16 @@
 #include "../vga/vga.h"
 #include "../utility/utility.h"
 #include "../timers/timer.h"
+#include "../timers/tsc.h"
+#include "../io/io.h"
 
 // How long the splash stays on screen before boot continues (ms).
-#define BOOTSPLASH_HOLD_MS 8500
+#define BOOTSPLASH_HOLD_MS 1200
 
 extern size_t terminal_row;
 extern size_t terminal_column;
+extern size_t terminal_width;
+extern size_t terminal_height;
 
 // Centered radiation-trefoil logo. Each row is centered independently
 // against VGA_WIDTH, so it doesn't need to be a perfect rectangle.
@@ -31,13 +35,13 @@ static const char *const RADIUM_LOGO[] = {
 
 #define RADIUM_LOGO_LINES (sizeof(RADIUM_LOGO) / sizeof(RADIUM_LOGO[0]))
 
-#define BOOTSPLASH_PUBLISHER "(c) 2026 AT Products LLC"
+#define BOOTSPLASH_PUBLISHER "N/A"
 #define BOOTSPLASH_COPYRIGHT "(c) 2026 scp_2801 / RadiumOS Project. All rights reserved."
 
 // Print a single line horizontally centered on the current row.
 static void print_centered(const char *line) {
     size_t len = strlen(line);
-    size_t pad = (len < VGA_WIDTH) ? (VGA_WIDTH - len) / 2 : 0;
+    size_t pad = (len < terminal_width) ? (terminal_width - len) / 2 : 0;
     for (size_t i = 0; i < pad; i++) {
         terminal_putchar(' ');
     }
@@ -65,16 +69,19 @@ void show_boot_splash(void) {
     // where the logo/wordmark left the cursor. Publisher line sits
     // directly above the project/author line.
     terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-    terminal_row = VGA_HEIGHT - 2;
+    terminal_row = terminal_height - 2;
     terminal_column = 0;
     print(BOOTSPLASH_PUBLISHER);
-    terminal_row = VGA_HEIGHT - 1;
+    terminal_row = terminal_height - 1;
     terminal_column = 0;
     print(BOOTSPLASH_COPYRIGHT);
 
     terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
 
-    sleep_ms(BOOTSPLASH_HOLD_MS);
+    // Timed on the calibrated TSC (the PIT timer is not running yet); any key skips the wait.
+    if (tsc_wait_key_ms(BOOTSPLASH_HOLD_MS)) {
+        while (inb(0x64) & 0x01) inb(0x60);
+    }
 }
 
 void bootsplash_command(int argc, char *argv[]) {

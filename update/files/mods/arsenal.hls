@@ -1,0 +1,17 @@
+// mod: All weapons, keys and ammo each level
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            let s = mod_state();
+            // once when switched on, then during the first moments of every level
+            if rd(s) == 0 || level_time() < 10 {
+                for w in 0..8 { give_weapon(w); }
+                for k in 0..6 { give_key(k); }
+                for a in 0..4 { set_ammo(a, max_ammo(a)); }
+                wr(s, 1);
+            }
+        }
+    }
+}

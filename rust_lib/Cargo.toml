@@ -8,7 +8,7 @@ crate-type = ["staticlib"]
 
 [profile.release]
 panic = "abort"
-lto = true
+lto = "thin"
 opt-level = 2
 
 [dependencies]
@@ -17,7 +17,13 @@ linked_list_allocator = "0.10.6"
 rustls = { version = "0.23.44", default-features = false, features = ["custom-provider"] }
 webpki-roots = { version = "1.0.9", default-features = false }
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+libm = "0.2"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }
 rsa = { version = "0.9.8", default-features = false, features = ["sha2"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["oid"] }
+rusty_h264-decoder = { path = "vendor/rusty_h264-decoder", default-features = false, features = ["libm"] }
+rusty_h264-common = { version = "0.16.0", default-features = false }
+portable-atomic = { version = "1.15.0", features = ["critical-section"] }
+critical-section = { version = "1.2.0", features = ["restore-state-bool"] }
+rusty_aac = { path = "vendor/rusty_aac", default-features = false }
