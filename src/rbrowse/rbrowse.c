@@ -1233,17 +1233,27 @@ static int load_canonical(const char *canonical, int post_len, char *final, int 
             show_message(canonical, "Load failed", detail);
             return -1;
         }
+        /* The page must open under the URL it came from: its scripts get
+           that origin's cookies. A redirect target that does not fit here
+           (rbrowse_http leaves end empty) fails the load instead of passing
+           another site's page off as the one asked for. */
+        int end_n = 0;
+        while (end[end_n]) end_n++;
+        if (end_n == 0 || end_n >= final_cap) {
+            show_message(canonical, "Load failed", "The page redirected to an address too long for rbrowse.");
+            return -1;
+        }
         /* The redirect target, keeping the asked-for fragment when the
-           server's URL has none (and nothing at all when it did not move). */
-        if (end[0] && !same_doc(end, canonical)) {
+           server's URL has none and it fits (nothing when it did not move). */
+        if (!same_doc(end, canonical)) {
             int w = 0;
             append_str(final, final_cap, &w, end);
             const char *frag = 0;
             for (const char *p = canonical; *p; p++) if (*p == '#') { frag = p; break; }
-            int has = 0;
+            int has = 0, frag_n = 0;
             for (const char *p = end; *p; p++) if (*p == '#') has = 1;
-            if (frag && !has) append_str(final, final_cap, &w, frag);
-            if (w + 1 >= final_cap) final[0] = 0;
+            if (frag) while (frag[frag_n]) frag_n++;
+            if (frag && !has && w + frag_n < final_cap) append_str(final, final_cap, &w, frag);
         }
         open_fetched(final[0] ? final : canonical, n);
         return 0;
