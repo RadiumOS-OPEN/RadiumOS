@@ -878,11 +878,840 @@ function Image(w, h) {
 }
 Image.prototype = HTMLImageElement.prototype;
 
+/* ---------------- <canvas> ----------------
+   The 2D context keeps its state here; paths are flat Float64Array command
+   lists (MOVE x y, LINE x y, QUAD, CUBIC, CLOSE; arcs become cubics) that
+   the natives in rjs_canvas.c flatten, stroke and rasterize into the
+   canvas's pixels (canvas.c). The context's current path is recorded in
+   device space (each point through the transform of the moment, as the
+   spec says); a Path2D is in user space and goes through the transform of
+   the fill/stroke. Simplifications: clip() keeps the bounding box of the
+   clip path, text is the 8x8 system font scaled to the font size (advance
+   = half the size), patterns, shadows and filters do not paint, and
+   composite operations other than source-over, copy, destination-out and
+   lighter draw as source-over. */
+const PATH_MOVE = 0, PATH_LINE = 1, PATH_QUAD = 2, PATH_CUBIC = 3, PATH_CLOSE = 4;
+const TAU = 2 * Math.PI;
+const IDENTITY = [1, 0, 0, 1, 0, 0];
+const COMPOSITE = {'source-over': 0, 'copy': 1, 'destination-out': 2, 'lighter': 3};
+const COMPOSITE_NAMES = new Set(['source-over', 'source-in', 'source-out', 'source-atop', 'destination-over',
+  'destination-in', 'destination-out', 'destination-atop', 'lighter', 'copy', 'xor', 'multiply', 'screen',
+  'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference',
+  'exclusion', 'hue', 'saturation', 'color', 'luminosity']);
+const CAPS = ['butt', 'round', 'square'], JOINS = ['miter', 'round', 'bevel'];
+
+function finite(...a) { for (const v of a) if (!Number.isFinite(v)) return false; return true; }
+
+class PathData {
+  constructor(m) {
+    this.d = new Float64Array(64);
+    this.n = 0;
+    this.m = m || null;      // transform applied while recording (the context's current path)
+    this.started = false;    // there is a current point
+    this.lx = 0; this.ly = 0; // current point, as recorded
+    this.sx = 0; this.sy = 0; // start of the current subpath, as recorded
+  }
+  __room(k) {
+    if (this.n + k <= this.d.length) return;
+    let len = this.d.length * 2;
+    while (len < this.n + k) len *= 2;
+    const nd = new Float64Array(len);
+    nd.set(this.d.subarray(0, this.n));
+    this.d = nd;
+  }
+  __pt(x, y) {
+    const m = this.m;
+    if (m) { const X = m[0] * x + m[2] * y + m[4]; y = m[1] * x + m[3] * y + m[5]; x = X; }
+    this.d[this.n++] = x; this.d[this.n++] = y;
+    this.lx = x; this.ly = y;
+  }
+  clear() { this.n = 0; this.started = false; }
+  move(x, y) {
+    this.__room(3); this.d[this.n++] = PATH_MOVE; this.__pt(x, y);
+    this.started = true; this.sx = this.lx; this.sy = this.ly;
+  }
+  line(x, y) {
+    if (!this.started) { this.move(x, y); return; }
+    this.__room(3); this.d[this.n++] = PATH_LINE; this.__pt(x, y);
+  }
+  quad(ax, ay, x, y) {
+    if (!this.started) this.move(ax, ay);
+    this.__room(5); this.d[this.n++] = PATH_QUAD; this.__pt(ax, ay); this.__pt(x, y);
+  }
+  cubic(ax, ay, bx, by, x, y) {
+    if (!this.started) this.move(ax, ay);
+    this.__room(7); this.d[this.n++] = PATH_CUBIC; this.__pt(ax, ay); this.__pt(bx, by); this.__pt(x, y);
+  }
+  close() {
+    if (!this.started) return;
+    this.__room(1); this.d[this.n++] = PATH_CLOSE;
+    this.lx = this.sx; this.ly = this.sy;
+  }
+  /* The current point in user space: as recorded for a Path2D; for the
+     context's path, the device point through the inverse of the current
+     transform (the spec's rule for arcTo). */
+  current(inv) {
+    if (!this.m || !inv) return [this.lx, this.ly];
+    return [inv[0] * this.lx + inv[2] * this.ly + inv[4], inv[1] * this.lx + inv[3] * this.ly + inv[5]];
+  }
+  ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+    let sweep = a1 - a0;
+    if (!ccw) {
+      if (sweep >= TAU) sweep = TAU;
+      else { sweep %= TAU; if (sweep < 0) sweep += TAU; }
+    } else {
+      if (-sweep >= TAU) sweep = -TAU;
+      else { sweep %= TAU; if (sweep > 0) sweep -= TAU; }
+    }
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const at = (ux, uy) => [x + rx * cr * ux - ry * sr * uy, y + rx * sr * ux + ry * cr * uy];
+    const p0 = at(Math.cos(a0), Math.sin(a0));
+    if (this.started) this.line(p0[0], p0[1]); else this.move(p0[0], p0[1]);
+    if (sweep === 0) return;
+    const segs = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2) - 1e-9));
+    const step = sweep / segs, k = 4 / 3 * Math.tan(step / 4);
+    let a = a0;
+    for (let i = 0; i < segs; i++) {
+      const b = a + step;
+      const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
+      const c1 = at(ca - k * sa, sa + k * ca), c2 = at(cb + k * sb, sb - k * cb), e = at(cb, sb);
+      this.cubic(c1[0], c1[1], c2[0], c2[1], e[0], e[1]);
+      a = b;
+    }
+  }
+}
+
+/* Path-building methods shared by Path2D and the context. __p() returns the
+   PathData; __inv() the inverse transform for the current point (null: user
+   space). */
+const PathMethods = {
+  moveTo(x, y) { x = +x; y = +y; if (finite(x, y)) this.__p().move(x, y); },
+  lineTo(x, y) { x = +x; y = +y; if (finite(x, y)) this.__p().line(x, y); },
+  quadraticCurveTo(ax, ay, x, y) { if (finite(+ax, +ay, +x, +y)) this.__p().quad(+ax, +ay, +x, +y); },
+  bezierCurveTo(ax, ay, bx, by, x, y) {
+    if (finite(+ax, +ay, +bx, +by, +x, +y)) this.__p().cubic(+ax, +ay, +bx, +by, +x, +y);
+  },
+  closePath() { this.__p().close(); },
+  rect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!finite(x, y, w, h)) return;
+    const p = this.__p();
+    p.move(x, y); p.line(x + w, y); p.line(x + w, y + h); p.line(x, y + h); p.close();
+    p.move(x, y);
+  },
+  roundRect(x, y, w, h, radii) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!finite(x, y, w, h)) return;
+    let r = radii === undefined ? [0] : (Array.isArray(radii) ? radii : [radii]);
+    if (r.length < 1 || r.length > 4) throw new RangeError('roundRect: 1 to 4 radii');
+    r = r.map(v => { const n = typeof v === 'object' && v ? +v.x : +v; if (n < 0) throw new RangeError('roundRect: negative radius'); return n || 0; });
+    let tl, tr, br, bl;
+    if (r.length === 1) tl = tr = br = bl = r[0];
+    else if (r.length === 2) { tl = br = r[0]; tr = bl = r[1]; }
+    else if (r.length === 3) { tl = r[0]; tr = bl = r[1]; br = r[2]; }
+    else [tl, tr, br, bl] = r;
+    if (w < 0) { x += w; w = -w; [tl, tr, br, bl] = [tr, tl, bl, br]; }
+    if (h < 0) { y += h; h = -h; [tl, tr, br, bl] = [bl, br, tr, tl]; }
+    const f = Math.min(1, w / (tl + tr || 1), w / (bl + br || 1), h / (tl + bl || 1), h / (tr + br || 1));
+    tl *= f; tr *= f; br *= f; bl *= f;
+    const p = this.__p();
+    p.move(x + tl, y);
+    p.line(x + w - tr, y);
+    if (tr) p.ellipse(x + w - tr, y + tr, tr, tr, 0, -Math.PI / 2, 0, false);
+    p.line(x + w, y + h - br);
+    if (br) p.ellipse(x + w - br, y + h - br, br, br, 0, 0, Math.PI / 2, false);
+    p.line(x + bl, y + h);
+    if (bl) p.ellipse(x + bl, y + h - bl, bl, bl, 0, Math.PI / 2, Math.PI, false);
+    p.line(x, y + tl);
+    if (tl) p.ellipse(x + tl, y + tl, tl, tl, 0, Math.PI, Math.PI * 1.5, false);
+    p.close();
+    p.move(x, y);
+  },
+  arc(x, y, r, a0, a1, ccw) {
+    x = +x; y = +y; r = +r; a0 = +a0; a1 = +a1;
+    if (!finite(x, y, r, a0, a1)) return;
+    if (r < 0) throw new DOMException('The radius provided (' + r + ') is negative.', 'IndexSizeError');
+    this.__p().ellipse(x, y, r, r, 0, a0, a1, !!ccw);
+  },
+  ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+    x = +x; y = +y; rx = +rx; ry = +ry; rot = +rot; a0 = +a0; a1 = +a1;
+    if (!finite(x, y, rx, ry, rot, a0, a1)) return;
+    if (rx < 0 || ry < 0) throw new DOMException('The radius provided is negative.', 'IndexSizeError');
+    this.__p().ellipse(x, y, rx, ry, rot, a0, a1, !!ccw);
+  },
+  arcTo(x1, y1, x2, y2, r) {
+    x1 = +x1; y1 = +y1; x2 = +x2; y2 = +y2; r = +r;
+    if (!finite(x1, y1, x2, y2, r)) return;
+    if (r < 0) throw new DOMException('The radius provided (' + r + ') is negative.', 'IndexSizeError');
+    const p = this.__p();
+    if (!p.started) { p.move(x1, y1); return; }
+    const [x0, y0] = p.current(this.__inv());
+    const ax = x0 - x1, ay = y0 - y1, bx = x2 - x1, by = y2 - y1;
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+    const cross = ax * by - ay * bx;
+    if ((x0 === x1 && y0 === y1) || (x1 === x2 && y1 === y2) || r === 0 || la === 0 || lb === 0 ||
+        Math.abs(cross) < 1e-9 * la * lb) { p.line(x1, y1); return; }
+    const cos = (ax * bx + ay * by) / (la * lb);
+    const half = Math.acos(Math.max(-1, Math.min(1, cos))) / 2;
+    const dist = r / Math.tan(half);
+    const t0x = x1 + ax / la * dist, t0y = y1 + ay / la * dist;
+    const t1x = x1 + bx / lb * dist, t1y = y1 + by / lb * dist;
+    /* centre: from the corner along the bisector */
+    const mx = ax / la + bx / lb, my = ay / la + by / lb, ml = Math.hypot(mx, my);
+    const cd = r / Math.sin(half);
+    const cx = x1 + mx / ml * cd, cy = y1 + my / ml * cd;
+    const s = Math.atan2(t0y - cy, t0x - cx), e = Math.atan2(t1y - cy, t1x - cx);
+    p.line(t0x, t0y);
+    p.ellipse(cx, cy, r, r, 0, s, e, cross > 0);
+  },
+};
+
+class Path2D {
+  constructor(src) {
+    this.__d = new PathData(null);
+    if (src instanceof Path2D) {
+      this.__d.__room(src.__d.n);
+      this.__d.d.set(src.__d.d.subarray(0, src.__d.n));
+      this.__d.n = src.__d.n;
+      for (const k of ['started', 'lx', 'ly', 'sx', 'sy']) this.__d[k] = src.__d[k];
+    } else if (typeof src === 'string') {
+      parseSvgPath(this, src);
+    }
+  }
+  __p() { return this.__d; }
+  __inv() { return null; }
+  addPath(path, m) {
+    if (!(path instanceof Path2D)) throw new TypeError('addPath: not a Path2D');
+    const t = m ? [m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0] : IDENTITY;
+    const src = path.__d, d = this.__d;
+    let i = 0;
+    while (i < src.n) {
+      const op = src.d[i];
+      const k = op === PATH_CLOSE ? 0 : op === PATH_QUAD ? 4 : op === PATH_CUBIC ? 6 : 2;
+      d.__room(1 + k);
+      d.d[d.n++] = op;
+      for (let j = 0; j < k; j += 2) {
+        const x = src.d[i + 1 + j], y = src.d[i + 2 + j];
+        d.d[d.n++] = t[0] * x + t[2] * y + t[4];
+        d.d[d.n++] = t[1] * x + t[3] * y + t[5];
+      }
+      i += 1 + k;
+    }
+    if (src.started) {
+      d.started = true;
+      d.lx = t[0] * src.lx + t[2] * src.ly + t[4]; d.ly = t[1] * src.lx + t[3] * src.ly + t[5];
+      d.sx = t[0] * src.sx + t[2] * src.sy + t[4]; d.sy = t[1] * src.sx + t[3] * src.sy + t[5];
+    }
+  }
+}
+Object.assign(Path2D.prototype, PathMethods);
+
+/* SVG path data (new Path2D('M0 0 L10 10 ...')): M L H V C S Q T A Z,
+   absolute and relative. Keeps what parsed before the first error, as the
+   spec says. */
+function parseSvgPath(path, str) {
+  const toks = String(str).match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g) || [];
+  const p = path.__d;
+  let i = 0, cmd = '', prev = '', x = 0, y = 0, sx = 0, sy = 0, c2x = 0, c2y = 0, qx = 0, qy = 0;
+  const isCmd = t => /[A-Za-z]/.test(t);
+  const num = () => { if (i >= toks.length || isCmd(toks[i])) throw 0; return parseFloat(toks[i++]); };
+  const flag = () => { const v = num(); if (v !== 0 && v !== 1) throw 0; return v === 1; };
+  try {
+    while (i < toks.length) {
+      if (isCmd(toks[i])) cmd = toks[i++];
+      else if (!cmd || cmd === 'Z' || cmd === 'z') break;
+      if (!prev && cmd !== 'M' && cmd !== 'm') break;
+      const rel = cmd >= 'a', C = cmd.toUpperCase(), ox = rel ? x : 0, oy = rel ? y : 0;
+      switch (C) {
+        case 'Z': p.close(); x = sx; y = sy; break;
+        case 'M': x = ox + num(); y = oy + num(); p.move(x, y); sx = x; sy = y; cmd = rel ? 'l' : 'L'; break;
+        case 'L': x = ox + num(); y = oy + num(); p.line(x, y); break;
+        case 'H': x = ox + num(); p.line(x, y); break;
+        case 'V': y = oy + num(); p.line(x, y); break;
+        case 'C': {
+          const a = ox + num(), b = oy + num();
+          c2x = ox + num(); c2y = oy + num(); x = ox + num(); y = oy + num();
+          p.cubic(a, b, c2x, c2y, x, y);
+          break;
+        }
+        case 'S': {
+          const smooth = prev === 'C' || prev === 'S';
+          const a = smooth ? 2 * x - c2x : x, b = smooth ? 2 * y - c2y : y;
+          c2x = ox + num(); c2y = oy + num(); x = ox + num(); y = oy + num();
+          p.cubic(a, b, c2x, c2y, x, y);
+          break;
+        }
+        case 'Q': qx = ox + num(); qy = oy + num(); x = ox + num(); y = oy + num(); p.quad(qx, qy, x, y); break;
+        case 'T':
+          if (prev === 'Q' || prev === 'T') { qx = 2 * x - qx; qy = 2 * y - qy; } else { qx = x; qy = y; }
+          x = ox + num(); y = oy + num();
+          p.quad(qx, qy, x, y);
+          break;
+        case 'A': {
+          const rx = Math.abs(num()), ry = Math.abs(num()), rot = num() * Math.PI / 180;
+          const large = flag(), sweep = flag(), ex = ox + num(), ey = oy + num();
+          svgArc(p, x, y, rx, ry, rot, large, sweep, ex, ey);
+          x = ex; y = ey;
+          break;
+        }
+        default: throw 0;
+      }
+      prev = C;
+    }
+  } catch (e) { /* malformed: keep what parsed */ }
+}
+
+function svgArc(p, x0, y0, rx, ry, phi, large, sweep, x, y) {
+  if (x0 === x && y0 === y) return;
+  if (!rx || !ry) { p.line(x, y); return; }
+  const c = Math.cos(phi), s = Math.sin(phi);
+  const dx = (x0 - x) / 2, dy = (y0 - y) / 2;
+  const x1 = c * dx + s * dy, y1 = -s * dx + c * dy;
+  const lam = (x1 * x1) / (rx * rx) + (y1 * y1) / (ry * ry);
+  if (lam > 1) { rx *= Math.sqrt(lam); ry *= Math.sqrt(lam); }
+  const num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1;
+  const den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
+  let k = Math.sqrt(Math.max(0, num / den));
+  if (large === sweep) k = -k;
+  const cxp = k * rx * y1 / ry, cyp = -k * ry * x1 / rx;
+  const cx = c * cxp - s * cyp + (x0 + x) / 2, cy = s * cxp + c * cyp + (y0 + y) / 2;
+  const ang = (ux, uy) => Math.atan2(uy, ux);
+  const a0 = ang((x1 - cxp) / rx, (y1 - cyp) / ry);
+  let da = ang((-x1 - cxp) / rx, (-y1 - cyp) / ry) - a0;
+  if (sweep && da < 0) da += TAU;
+  if (!sweep && da > 0) da -= TAU;
+  p.ellipse(cx, cy, rx, ry, phi, a0, a0 + da, !sweep);
+}
+
+class CanvasGradient {
+  constructor(kind, args) { this.__k = kind; this.__a = args; this.__stops = []; this.__f = null; }
+  addColorStop(offset, color) {
+    offset = +offset;
+    if (!(offset >= 0 && offset <= 1)) throw new DOMException('The provided offset (' + offset + ') is outside the range (0.0, 1.0).', 'IndexSizeError');
+    const c = rb.cvColor(String(color));
+    if (c === null) throw new DOMException('The value provided (\'' + color + '\') could not be parsed as a color.', 'SyntaxError');
+    /* stable: equal offsets keep their order */
+    let i = this.__stops.length;
+    while (i > 0 && this.__stops[i - 1][0] > offset) i--;
+    this.__stops.splice(i, 0, [offset, c]);
+    this.__f = null;
+  }
+  __send(m) {
+    const st = this.__stops;
+    if (!st.length || this.__k === 3) { rb.cvPaintNone(); return; }
+    if (!this.__f) {
+      const f = new Float64Array(st.length * 2);
+      st.forEach((s, i) => { f[2 * i] = s[0]; f[2 * i + 1] = s[1]; });
+      this.__f = f;
+    }
+    if (st.length === 1) { rb.cvPaint(st[0][1]); return; }
+    const a = this.__a;
+    rb.cvGradient(this.__k, a[0], a[1], a[2], a[3], a[4], a[5], this.__f, m[0], m[1], m[2], m[3], m[4], m[5]);
+  }
+}
+class CanvasPattern { setTransform() {} }
+
+class ImageData {
+  constructor(a, b, c) {
+    if (a instanceof Uint8ClampedArray) {
+      const w = b >>> 0, h = c === undefined ? a.length / 4 / w : c >>> 0;
+      if (!w || a.length % 4 || a.length !== w * h * 4) throw new DOMException('The input data length is not a multiple of (4 * width).', 'IndexSizeError');
+      this.data = a; this.width = w; this.height = h;
+    } else {
+      const w = a >>> 0, h = b >>> 0;
+      if (!w || !h) throw new DOMException('The source width is 0.', 'IndexSizeError');
+      if (w * h > 16777216) throw new RangeError('ImageData too large');
+      this.data = new Uint8ClampedArray(w * h * 4); this.width = w; this.height = h;
+    }
+    this.colorSpace = 'srgb';
+  }
+}
+
+class DOMMatrix {
+  constructor(init) {
+    let m = IDENTITY;
+    if (Array.isArray(init) && init.length === 6) m = init.map(Number);
+    this.a = m[0]; this.b = m[1]; this.c = m[2]; this.d = m[3]; this.e = m[4]; this.f = m[5];
+  }
+  get m11() { return this.a; } get m12() { return this.b; } get m21() { return this.c; }
+  get m22() { return this.d; } get m41() { return this.e; } get m42() { return this.f; }
+  get is2D() { return true; }
+  get isIdentity() { return this.a === 1 && !this.b && !this.c && this.d === 1 && !this.e && !this.f; }
+  __m() { return [this.a, this.b, this.c, this.d, this.e, this.f]; }
+  multiply(o) { return new DOMMatrix(matMul(this.__m(), [o.a, o.b, o.c, o.d, o.e, o.f])); }
+  translate(x, y) { return this.multiply({a: 1, b: 0, c: 0, d: 1, e: +x || 0, f: +y || 0}); }
+  scale(sx, sy) { if (sy === undefined) sy = sx; return this.multiply({a: +sx, b: 0, c: 0, d: +sy, e: 0, f: 0}); }
+  rotate(deg) { const r = (+deg || 0) * Math.PI / 180, c = Math.cos(r), s = Math.sin(r); return this.multiply({a: c, b: s, c: -s, d: c, e: 0, f: 0}); }
+  inverse() { const i = matInv(this.__m()); return new DOMMatrix(i || [NaN, NaN, NaN, NaN, NaN, NaN]); }
+  transformPoint(p) { p = p || {}; const x = +p.x || 0, y = +p.y || 0; return {x: this.a * x + this.c * y + this.e, y: this.b * x + this.d * y + this.f, z: 0, w: 1}; }
+  toString() { return 'matrix(' + this.__m().join(', ') + ')'; }
+}
+
+function matMul(m, n) {
+  return [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+          m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+          m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+}
+function matInv(m) {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (!det || !Number.isFinite(det)) return null;
+  return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det,
+          (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
+}
+
+function colorString(c) {
+  const a = Math.floor(c / 16777216), r = (c >>> 16) & 255, g = (c >>> 8) & 255, b = c & 255;
+  if (a === 255) return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+  let as = String(Math.round(a / 255 * 1000) / 1000);
+  if (a === 0) as = '0';
+  return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + as + ')';
+}
+
+function fontSize(f) {
+  const m = /(?:^|\s)(\d*\.?\d+)(px|pt|em|rem|%)(?:\s*\/\s*\S+)?\s+\S/.exec(f);
+  if (!m) return 0;
+  const v = parseFloat(m[1]);
+  return m[2] === 'px' ? v : m[2] === 'pt' ? v * 4 / 3 : m[2] === '%' ? v * 16 / 100 : v * 16;
+}
+
+function defaultState() {
+  return {
+    m: IDENTITY.slice(), fill: 0xFF000000, stroke: 0xFF000000, lw: 1, cap: 0, join: 0, miter: 10,
+    dash: [], dashF: null, dashOff: 0, alpha: 1, op: 'source-over', clip: null,
+    font: '10px sans-serif', size: 10, align: 'start', baseline: 'alphabetic', direction: 'inherit',
+    smooth: true, smoothQ: 'low', shadowBlur: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadowX: 0, shadowY: 0,
+    filter: 'none', letterSpacing: '0px', wordSpacing: '0px', textRendering: 'auto', fontKerning: 'auto',
+  };
+}
+
+function copyState(s) { const c = Object.assign({}, s); c.m = s.m.slice(); c.dash = s.dash.slice(); return c; }
+
+function codePoints(t) { let n = 0; for (const ch of t) n++; return n; }
+
+class CanvasRenderingContext2D {
+  constructor(canvas, slot) {
+    this.__c = canvas;
+    this.__slot = slot;
+    this.__s = defaultState();
+    this.__stack = [];
+    this.__path = new PathData(this.__s.m);
+  }
+  get canvas() { return this.__c; }
+  __p() { return this.__path; }
+  __inv() { return matInv(this.__s.m); }
+  __reset() {
+    this.__s = defaultState();
+    this.__stack = [];
+    this.__path = new PathData(this.__s.m);
+  }
+  __setM(m) {
+    this.__s.m = m;
+    this.__path.m = m;
+  }
+  /* send paint + compositing to the natives before a draw */
+  __prep(style) {
+    const s = this.__s;
+    if (typeof style === 'number') rb.cvPaint(style);
+    else if (style instanceof CanvasGradient) style.__send(s.m);
+    else rb.cvPaintNone();
+    const c = s.clip;
+    rb.cvComp(Math.round(s.alpha * 255), COMPOSITE[s.op] ?? 0, s.smooth ? 1 : 0,
+              c ? c[0] : -1, c ? c[1] : -1, c ? c[2] : -1, c ? c[3] : -1);
+  }
+  __dashF() {
+    const s = this.__s;
+    if (!s.dash.length) return null;
+    if (!s.dashF) s.dashF = new Float64Array(s.dash);
+    return s.dashF;
+  }
+
+  /* state */
+  save() { this.__stack.push(copyState(this.__s)); }
+  restore() {
+    if (!this.__stack.length) return;
+    this.__s = this.__stack.pop();
+    this.__path.m = this.__s.m;
+  }
+  reset() {
+    this.__c.__clear();
+    this.__reset();
+  }
+  isContextLost() { return false; }
+  getContextAttributes() { return {alpha: true, colorSpace: 'srgb', desynchronized: false, willReadFrequently: false}; }
+
+  /* transform */
+  scale(x, y) { x = +x; y = +y; if (finite(x, y)) this.__setM(matMul(this.__s.m, [x, 0, 0, y, 0, 0])); }
+  rotate(a) { a = +a; if (finite(a)) { const c = Math.cos(a), s = Math.sin(a); this.__setM(matMul(this.__s.m, [c, s, -s, c, 0, 0])); } }
+  translate(x, y) { x = +x; y = +y; if (finite(x, y)) this.__setM(matMul(this.__s.m, [1, 0, 0, 1, x, y])); }
+  transform(a, b, c, d, e, f) {
+    const m = [+a, +b, +c, +d, +e, +f];
+    if (finite(...m)) this.__setM(matMul(this.__s.m, m));
+  }
+  setTransform(a, b, c, d, e, f) {
+    if (a === undefined) { this.__setM(IDENTITY.slice()); return; }
+    const m = typeof a === 'object' ? [a.a ?? a.m11 ?? 1, a.b ?? a.m12 ?? 0, a.c ?? a.m21 ?? 0, a.d ?? a.m22 ?? 1, a.e ?? a.m41 ?? 0, a.f ?? a.m42 ?? 0].map(Number)
+                                    : [+a, +b, +c, +d, +e, +f];
+    if (finite(...m)) this.__setM(m);
+  }
+  resetTransform() { this.__setM(IDENTITY.slice()); }
+  getTransform() { return new DOMMatrix(this.__s.m.slice()); }
+
+  /* styles */
+  get fillStyle() { const f = this.__s.fill; return typeof f === 'number' ? colorString(f) : f; }
+  set fillStyle(v) { const c = this.__style(v); if (c !== undefined) this.__s.fill = c; }
+  get strokeStyle() { const f = this.__s.stroke; return typeof f === 'number' ? colorString(f) : f; }
+  set strokeStyle(v) { const c = this.__style(v); if (c !== undefined) this.__s.stroke = c; }
+  __style(v) {
+    if (v instanceof CanvasGradient || v instanceof CanvasPattern) return v;
+    if (typeof v !== 'string' && !(v instanceof String)) return undefined;
+    const c = rb.cvColor(String(v));
+    return c === null ? undefined : c;
+  }
+  get globalAlpha() { return this.__s.alpha; }
+  set globalAlpha(v) { v = +v; if (v >= 0 && v <= 1) this.__s.alpha = v; }
+  get globalCompositeOperation() { return this.__s.op; }
+  set globalCompositeOperation(v) { v = String(v); if (COMPOSITE_NAMES.has(v)) this.__s.op = v; }
+  get lineWidth() { return this.__s.lw; }
+  set lineWidth(v) { v = +v; if (v > 0 && Number.isFinite(v)) this.__s.lw = v; }
+  get lineCap() { return CAPS[this.__s.cap]; }
+  set lineCap(v) { const i = CAPS.indexOf(String(v)); if (i >= 0) this.__s.cap = i; }
+  get lineJoin() { return JOINS[this.__s.join]; }
+  set lineJoin(v) { const i = JOINS.indexOf(String(v)); if (i >= 0) this.__s.join = i; }
+  get miterLimit() { return this.__s.miter; }
+  set miterLimit(v) { v = +v; if (v > 0 && Number.isFinite(v)) this.__s.miter = v; }
+  get lineDashOffset() { return this.__s.dashOff; }
+  set lineDashOffset(v) { v = +v; if (Number.isFinite(v)) this.__s.dashOff = v; }
+  setLineDash(a) {
+    const v = Array.from(a || [], Number);
+    if (v.some(x => !(x >= 0) || !Number.isFinite(x))) return;
+    this.__s.dash = v.length % 2 ? v.concat(v) : v;
+    this.__s.dashF = null;
+  }
+  getLineDash() { return this.__s.dash.slice(); }
+  get imageSmoothingEnabled() { return this.__s.smooth; }
+  set imageSmoothingEnabled(v) { this.__s.smooth = !!v; }
+  get imageSmoothingQuality() { return this.__s.smoothQ; }
+  set imageSmoothingQuality(v) { if (['low', 'medium', 'high'].includes(v)) this.__s.smoothQ = v; }
+  get shadowBlur() { return this.__s.shadowBlur; }
+  set shadowBlur(v) { v = +v; if (v >= 0 && Number.isFinite(v)) this.__s.shadowBlur = v; }
+  get shadowColor() { return this.__s.shadowColor; }
+  set shadowColor(v) { const c = rb.cvColor(String(v)); if (c !== null) this.__s.shadowColor = colorString(c); }
+  get shadowOffsetX() { return this.__s.shadowX; }
+  set shadowOffsetX(v) { v = +v; if (Number.isFinite(v)) this.__s.shadowX = v; }
+  get shadowOffsetY() { return this.__s.shadowY; }
+  set shadowOffsetY(v) { v = +v; if (Number.isFinite(v)) this.__s.shadowY = v; }
+  get filter() { return this.__s.filter; }
+  set filter(v) { this.__s.filter = String(v); }
+  get font() { return this.__s.font; }
+  set font(v) { v = String(v); const n = fontSize(v); if (n > 0) { this.__s.font = v; this.__s.size = n; } }
+  get textAlign() { return this.__s.align; }
+  set textAlign(v) { if (['start', 'end', 'left', 'right', 'center'].includes(v)) this.__s.align = v; }
+  get textBaseline() { return this.__s.baseline; }
+  set textBaseline(v) { if (['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'].includes(v)) this.__s.baseline = v; }
+  get direction() { return this.__s.direction; }
+  set direction(v) { if (['ltr', 'rtl', 'inherit'].includes(v)) this.__s.direction = v; }
+  get letterSpacing() { return this.__s.letterSpacing; }
+  set letterSpacing(v) { this.__s.letterSpacing = String(v); }
+  get wordSpacing() { return this.__s.wordSpacing; }
+  set wordSpacing(v) { this.__s.wordSpacing = String(v); }
+  get fontKerning() { return this.__s.fontKerning; }
+  set fontKerning(v) { this.__s.fontKerning = String(v); }
+  get textRendering() { return this.__s.textRendering; }
+  set textRendering(v) { this.__s.textRendering = String(v); }
+
+  createLinearGradient(x0, y0, x1, y1) {
+    const a = [+x0, +y0, 0, +x1, +y1, 0];
+    if (!finite(...a)) throw new TypeError('createLinearGradient: non-finite argument');
+    return new CanvasGradient(1, a);
+  }
+  createRadialGradient(x0, y0, r0, x1, y1, r1) {
+    const a = [+x0, +y0, +r0, +x1, +y1, +r1];
+    if (!finite(...a)) throw new TypeError('createRadialGradient: non-finite argument');
+    if (r0 < 0 || r1 < 0) throw new DOMException('The radius provided is negative.', 'IndexSizeError');
+    return new CanvasGradient(2, a);
+  }
+  createConicGradient(a, x, y) { return new CanvasGradient(3, [+x, +y, +a, 0, 0, 0]); }
+  createPattern(img, rep) {
+    if (img == null) throw new TypeError('createPattern: no image');
+    return new CanvasPattern();
+  }
+
+  /* paths */
+  beginPath() { this.__path.clear(); }
+  __pathArgs(a, b) {
+    /* (fillRule) | (path, fillRule) -> [PathData, matrix, rule] */
+    if (a instanceof Path2D) return [a.__d, this.__s.m, b === 'evenodd' ? 1 : 0];
+    return [this.__path, IDENTITY, a === 'evenodd' ? 1 : 0];
+  }
+  fill(a, b) {
+    const [p, m, eo] = this.__pathArgs(a, b);
+    if (!this.__c.__ready() || !p.n) return;
+    this.__prep(this.__s.fill);
+    rb.cvFill(this.__slot, p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], eo);
+  }
+  stroke(a) {
+    const [p, m] = this.__pathArgs(a);
+    if (!this.__c.__ready() || !p.n) return;
+    const s = this.__s;
+    this.__prep(s.stroke);
+    /* the current path is in device space already: its line width still
+       scales with the transform of the stroke */
+    const lm = p === this.__path ? s.m : m;
+    const sc = Math.sqrt(Math.abs(lm[0] * lm[3] - lm[1] * lm[2]));
+    if (p === this.__path) {
+      rb.cvStroke(this.__slot, p.d, p.n, 1, 0, 0, 1, 0, 0, s.lw * sc, s.cap, s.join, s.miter,
+                  this.__dashF() && new Float64Array(s.dash.map(v => v * sc)), s.dashOff * sc);
+    } else {
+      rb.cvStroke(this.__slot, p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], s.lw, s.cap, s.join, s.miter,
+                  this.__dashF(), s.dashOff);
+    }
+  }
+  clip(a, b) {
+    const [p, m] = this.__pathArgs(a, b);
+    const r = p.n ? rb.cvBounds(p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5]) : null;
+    let c = r ? [Math.max(0, Math.floor(r[0])), Math.max(0, Math.floor(r[1])), Math.ceil(r[2]), Math.ceil(r[3])] : [0, 0, 0, 0];
+    const o = this.__s.clip;
+    if (o) c = [Math.max(c[0], o[0]), Math.max(c[1], o[1]), Math.min(c[2], o[2]), Math.min(c[3], o[3])];
+    if (c[2] < c[0]) c[2] = c[0];
+    if (c[3] < c[1]) c[3] = c[1];
+    this.__s.clip = c;
+  }
+  isPointInPath(a, b, c, d) {
+    let p, m, x, y, rule;
+    if (a instanceof Path2D) { p = a.__d; m = this.__s.m; x = +b; y = +c; rule = d; }
+    else { p = this.__path; m = IDENTITY; x = +a; y = +b; rule = c; }
+    if (!p.n || !finite(x, y)) return false;
+    return rb.cvInside(p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], x, y, rule === 'evenodd' ? 1 : 0);
+  }
+  isPointInStroke(a, b, c) {
+    let p, m, x, y;
+    if (a instanceof Path2D) { p = a.__d; m = this.__s.m; x = +b; y = +c; }
+    else { p = this.__path; m = IDENTITY; x = +a; y = +b; }
+    if (!p.n || !finite(x, y)) return false;
+    const s = this.__s;
+    const sc = p === this.__path ? Math.sqrt(Math.abs(s.m[0] * s.m[3] - s.m[1] * s.m[2])) : 1;
+    return rb.cvInStroke(p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], s.lw * sc, s.cap, s.join, s.miter,
+                         null, 0, x, y);
+  }
+
+  /* rectangles: a reusable path, in user space under the transform */
+  __rectPath(x, y, w, h) {
+    const p = this.__rp || (this.__rp = new PathData(null));
+    p.clear();
+    p.move(x, y); p.line(x + w, y); p.line(x + w, y + h); p.line(x, y + h); p.close();
+    return p;
+  }
+  fillRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!finite(x, y, w, h) || !w || !h || !this.__c.__ready()) return;
+    const m = this.__s.m, p = this.__rectPath(x, y, w, h);
+    this.__prep(this.__s.fill);
+    rb.cvFill(this.__slot, p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], 0);
+  }
+  strokeRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!finite(x, y, w, h) || !this.__c.__ready()) return;
+    const s = this.__s, m = s.m, p = this.__rectPath(x, y, w, h);
+    this.__prep(s.stroke);
+    rb.cvStroke(this.__slot, p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], s.lw, s.cap, s.join, s.miter,
+                this.__dashF(), s.dashOff);
+  }
+  clearRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!finite(x, y, w, h) || !w || !h || !this.__c.__ready()) return;
+    const s = this.__s, m = s.m, p = this.__rectPath(x, y, w, h), c = s.clip;
+    rb.cvPaint(0);
+    rb.cvComp(255, 4, 1, c ? c[0] : -1, c ? c[1] : -1, c ? c[2] : -1, c ? c[3] : -1);
+    rb.cvFill(this.__slot, p.d, p.n, m[0], m[1], m[2], m[3], m[4], m[5], 0);
+  }
+
+  /* text: the 8x8 font, glyph cells size/2 wide and size tall */
+  measureText(t) {
+    t = String(t);
+    const size = this.__s.size, w = codePoints(t) * size / 2;
+    const asc = this.__ascent(), lead = this.__leadX(w);
+    return {
+      width: w, actualBoundingBoxLeft: -lead, actualBoundingBoxRight: w + lead,
+      actualBoundingBoxAscent: asc, actualBoundingBoxDescent: size - asc,
+      fontBoundingBoxAscent: size * 0.75, fontBoundingBoxDescent: size * 0.25,
+      emHeightAscent: size * 0.75, emHeightDescent: size * 0.25,
+      hangingBaseline: size * 0.65, alphabeticBaseline: 0, ideographicBaseline: -size * 0.25,
+    };
+  }
+  /* how far the baseline sits below the top of the cell */
+  __ascent() {
+    const s = this.__s.size;
+    switch (this.__s.baseline) {
+      case 'top': return 0;
+      case 'hanging': return s * 0.1;
+      case 'middle': return s * 0.5;
+      case 'ideographic': case 'bottom': return s;
+      default: return s * 0.75;
+    }
+  }
+  __leadX(w) {
+    const a = this.__s.align;
+    const rtl = this.__s.direction === 'rtl';
+    if (a === 'center') return -w / 2;
+    if (a === 'right' || (a === 'end' && !rtl) || (a === 'start' && rtl)) return -w;
+    return 0;
+  }
+  __text(t, x, y, maxW, style) {
+    t = String(t); x = +x; y = +y;
+    if (!finite(x, y) || !this.__c.__ready() || !t) return;
+    const s = this.__s, size = s.size;
+    let w = codePoints(t) * size / 2, m = s.m;
+    const lead = this.__leadX(w);
+    let ox = x + lead;
+    if (maxW !== undefined) {
+      maxW = +maxW;
+      if (!(maxW > 0)) return;
+      if (w > maxW) {
+        /* squeeze horizontally about the anchor */
+        const k = maxW / w;
+        m = matMul(m, [k, 0, 0, 1, x * (1 - k), 0]);
+      }
+    }
+    this.__prep(style);
+    rb.cvText(this.__slot, t, ox, y - this.__ascent(), size, m[0], m[1], m[2], m[3], m[4], m[5]);
+  }
+  fillText(t, x, y, maxW) { this.__text(t, x, y, maxW, this.__s.fill); }
+  strokeText(t, x, y, maxW) { this.__text(t, x, y, maxW, this.__s.stroke); }
+
+  /* images */
+  drawImage(img, ...a) {
+    if (!this.__c.__ready()) return;
+    let kind, src;
+    if (img instanceof HTMLImageElement) { kind = 0; src = img.__h; }
+    else if (img instanceof HTMLCanvasElement) {
+      const c = img.__ctx;
+      if (!c || c.__slot < 0) return;
+      kind = 1; src = c.__slot;
+    } else if (img && img.__bitmap) { kind = img.__bitmap[0]; src = img.__bitmap[1]; }
+    else throw new TypeError('drawImage: unsupported image source');
+    const sz = rb.cvImageSize(kind, src);
+    if (!sz) return;                      /* not loaded, broken: nothing to draw */
+    let sx = 0, sy = 0, sw = sz[0], sh = sz[1], dx, dy, dw, dh;
+    if (a.length === 2) { [dx, dy] = a; dw = sw; dh = sh; }
+    else if (a.length === 4) { [dx, dy, dw, dh] = a; }
+    else if (a.length === 8) { [sx, sy, sw, sh, dx, dy, dw, dh] = a; }
+    else throw new TypeError('drawImage: wrong number of arguments');
+    const v = [sx, sy, sw, sh, dx, dy, dw, dh].map(Number);
+    if (!finite(...v)) return;
+    const m = this.__s.m;
+    this.__prep(0xFF000000);
+    rb.cvImage(this.__slot, kind, src, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], m[0], m[1], m[2], m[3], m[4], m[5]);
+  }
+
+  /* pixels: device space, no transform, no compositing */
+  createImageData(a, b) {
+    if (a instanceof ImageData) return new ImageData(a.width, a.height);
+    return new ImageData(Math.abs(a | 0), Math.abs(b | 0));
+  }
+  getImageData(x, y, w, h) {
+    x = Math.floor(+x); y = Math.floor(+y); w = Math.trunc(+w); h = Math.trunc(+h);
+    if (!w || !h) throw new DOMException('The source width is 0.', 'IndexSizeError');
+    if (w < 0) { x += w; w = -w; }
+    if (h < 0) { y += h; h = -h; }
+    const img = new ImageData(w, h);
+    if (this.__c.__ready()) rb.cvGet(this.__slot, x, y, w, h, img.data);
+    return img;
+  }
+  putImageData(img, dx, dy, x0, y0, w, h) {
+    if (!(img instanceof ImageData)) throw new TypeError('putImageData: not an ImageData');
+    if (!this.__c.__ready()) return;
+    dx = Math.floor(+dx) || 0; dy = Math.floor(+dy) || 0;
+    if (x0 === undefined) { x0 = 0; y0 = 0; w = img.width; h = img.height; }
+    x0 = Math.floor(+x0) || 0; y0 = Math.floor(+y0) || 0; w = Math.floor(+w) || 0; h = Math.floor(+h) || 0;
+    if (w < 0) { x0 += w; w = -w; }
+    if (h < 0) { y0 += h; h = -h; }
+    rb.cvPut(this.__slot, img.data, img.width, img.height, dx, dy, x0, y0, x0 + w, y0 + h);
+  }
+  drawFocusIfNeeded() {}
+  scrollPathIntoView() {}
+}
+Object.assign(CanvasRenderingContext2D.prototype, PathMethods);
+
+class HTMLCanvasElement extends HTMLElement {
+  get width() { return rb.cvAttrSize(this.__h)[0]; }
+  set width(v) { this.setAttribute('width', String(v >>> 0)); }
+  get height() { return rb.cvAttrSize(this.__h)[1]; }
+  set height(v) { this.setAttribute('height', String(v >>> 0)); }
+  setAttribute(n, v) {
+    HTMLElement.prototype.setAttribute.call(this, n, v);
+    n = String(n).toLowerCase();
+    if (n === 'width' || n === 'height') this.__clear(true);
+  }
+  removeAttribute(n) {
+    HTMLElement.prototype.removeAttribute.call(this, n);
+    n = String(n).toLowerCase();
+    if (n === 'width' || n === 'height') this.__clear(true);
+  }
+  /* (re)size the pixels to the attributes, transparent black; setting the
+     size also resets the context's state */
+  __clear(resetState) {
+    const c = this.__ctx;
+    if (!c) return;
+    if (c.__slot < 0) c.__slot = rb.cvOpen(this.__h);
+    const s = rb.cvAttrSize(this.__h);
+    if (c.__slot >= 0) rb.cvResize(c.__slot, s[0], s[1]);
+    if (resetState) c.__reset();
+  }
+  /* the context can draw: its slot is still this element's (a page change
+     or table pressure may have recycled it) */
+  __ready() {
+    const c = this.__ctx;
+    if (!c) return false;
+    const slot = rb.cvOpen(this.__h);
+    if (slot !== c.__slot) {
+      c.__slot = slot;
+      if (slot >= 0) { const s = rb.cvAttrSize(this.__h); rb.cvResize(slot, s[0], s[1]); }
+    }
+    return slot >= 0;
+  }
+  getContext(type) {
+    if (String(type) !== '2d') return null;
+    if (!this.__ctx) {
+      this.__ctx = new CanvasRenderingContext2D(this, -1);
+      this.__clear(false);
+    }
+    return this.__ctx;
+  }
+  toDataURL() {
+    const c = this.getContext('2d');
+    if (!c.__c.__ready()) return 'data:,';
+    return rb.cvPng(c.__slot) || 'data:,';
+  }
+  toBlob(cb) { setTimeout(() => cb(null), 0); }
+  captureStream() { throw new DOMException('captureStream is not supported', 'NotSupportedError'); }
+  transferControlToOffscreen() { throw new DOMException('OffscreenCanvas is not supported', 'NotSupportedError'); }
+}
+
+/* createImageBitmap(img|canvas): a handle drawImage accepts */
+function createImageBitmap(src) {
+  return new Promise((res, rej) => {
+    const go = () => {
+      let b;
+      if (src instanceof HTMLImageElement) b = [0, src.__h];
+      else if (src instanceof HTMLCanvasElement && src.__ctx) b = [1, src.__ctx.__slot];
+      else { rej(new DOMException('createImageBitmap: unsupported source', 'InvalidStateError')); return; }
+      const sz = rb.cvImageSize(b[0], b[1]);
+      if (!sz) { rej(new DOMException('The source image could not be decoded.', 'InvalidStateError')); return; }
+      res({__bitmap: b, width: sz[0], height: sz[1], close() {}});
+    };
+    if (src instanceof HTMLImageElement && !src.complete) src.decode().then(go, rej); else go();
+  });
+}
+
+Object.assign(global, {HTMLCanvasElement, CanvasRenderingContext2D, Path2D, CanvasGradient, CanvasPattern,
+  ImageData, DOMMatrix, createImageBitmap});
+
 /* Custom elements: a defined class becomes the prototype of new wrappers
    for that tag (constructor/connectedCallback are not run). */
 const customProtos = new Map();
 function elementProto(tag) {
-  return customProtos.get(tag) || (tag === 'img' ? HTMLImageElement.prototype : HTMLElement.prototype);
+  return customProtos.get(tag) || (tag === 'img' ? HTMLImageElement.prototype
+    : tag === 'canvas' ? HTMLCanvasElement.prototype : HTMLElement.prototype);
 }
 global.customElements = {
   define(name, cls) { customProtos.set(String(name).toLowerCase(), cls.prototype); },

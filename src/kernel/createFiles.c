@@ -5278,6 +5278,7 @@ done("Updated hello world with CSS & New Tags", "hello.html");
         "<p><a href=\"/home/user/rbrowse-next.html\">Next page</a></p>"
         "<p><a href=\"/home/user/jsdemo.html\">JavaScript demo</a></p>"
         "<p><a href=\"/home/user/images.html\">Image demo</a></p>"
+        "<p><a href=\"/home/user/canvas.html\">Canvas demo</a></p>"
         "<p><button onclick=\"document.getElementById('status').textContent='Clicked';\">Click</button></p>"
         "<p><input value=\"edit me\"></p>"
         "<script>document.getElementById('status').textContent='Ready';</script>"
@@ -6040,6 +6041,68 @@ done("Updated hello world with CSS & New Tags", "hello.html");
     avfs_create_file("/home/user/images.html", strlen(images_html));
     avfs_write_file("/home/user/images.html", images_html, strlen(images_html), 0);
     done("Created image demo", "images.html");
+
+    /* Exercises <canvas>: paths, gradients, transforms, text, drawImage,
+       requestAnimationFrame and mouse input. */
+    const char *canvas_html =
+        "<!DOCTYPE html><html><head><title>Canvas demo</title><style>\n"
+        "body{background-color:#120C06;color:#DDCCBB;}\n"
+        "h1{color:#FF4400;}\n"
+        "a{color:#FF7722;}\n"
+        "canvas{border:1px solid #FF7722;}\n"
+        "</style></head><body>\n"
+        "<h1>Canvas</h1>\n"
+        "<p><canvas id=\"anim\" width=\"300\" height=\"150\"></canvas> <canvas id=\"pad\" width=\"200\" height=\"150\"></canvas></p>\n"
+        "<p id=\"info\">Click the right canvas to draw. <a href=\"/home/user/rbrowse.html\">Home</a></p>\n"
+        "<script>\n"
+        "var c = document.getElementById('anim'), x = c.getContext('2d');\n"
+        "var sun = new Image(); sun.src = 'img/sun.png';\n"
+        "var bx = 40, by = 40, vx = 2.5, vy = 1.7, frames = 0, t0 = performance.now();\n"
+        "function star(ctx, r1, r2, n) {\n"
+        "  ctx.beginPath();\n"
+        "  for (var i = 0; i < n * 2; i++) {\n"
+        "    var r = i % 2 ? r2 : r1, a = i * Math.PI / n;\n"
+        "    ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);\n"
+        "  }\n"
+        "  ctx.closePath();\n"
+        "}\n"
+        "function frame(t) {\n"
+        "  var bg = x.createLinearGradient(0, 0, 0, 150);\n"
+        "  bg.addColorStop(0, '#102040'); bg.addColorStop(1, '#402010');\n"
+        "  x.fillStyle = bg; x.fillRect(0, 0, 300, 150);\n"
+        "  if (sun.complete && sun.naturalWidth) x.drawImage(sun, 230, 10, 60, 40);\n"
+        "  x.save(); x.translate(75, 75); x.rotate(t / 1000);\n"
+        "  var g = x.createRadialGradient(0, 0, 5, 0, 0, 50);\n"
+        "  g.addColorStop(0, '#ffff80'); g.addColorStop(1, '#ff4400');\n"
+        "  x.fillStyle = g; star(x, 50, 22, 5); x.fill();\n"
+        "  x.lineWidth = 3; x.lineJoin = 'round'; x.strokeStyle = '#fff'; x.stroke();\n"
+        "  x.restore();\n"
+        "  bx += vx; by += vy;\n"
+        "  if (bx < 12 || bx > 288) vx = -vx;\n"
+        "  if (by < 12 || by > 138) vy = -vy;\n"
+        "  x.beginPath(); x.arc(bx, by, 12, 0, Math.PI * 2);\n"
+        "  x.fillStyle = 'rgba(0, 200, 255, 0.8)'; x.fill();\n"
+        "  frames++;\n"
+        "  var fps = Math.round(frames * 1000 / Math.max(1, t - t0));\n"
+        "  x.font = '16px monospace'; x.fillStyle = '#fff'; x.textBaseline = 'bottom';\n"
+        "  x.fillText(fps + ' fps', 160, 145);\n"
+        "  requestAnimationFrame(frame);\n"
+        "}\n"
+        "requestAnimationFrame(frame);\n"
+        "var p = document.getElementById('pad'), q = p.getContext('2d');\n"
+        "q.fillStyle = '#fff'; q.fillRect(0, 0, 200, 150);\n"
+        "q.setLineDash([6, 4]); q.strokeStyle = '#888'; q.strokeRect(5, 5, 190, 140); q.setLineDash([]);\n"
+        "var hue = 0;\n"
+        "p.addEventListener('click', function (e) {\n"
+        "  var r = p.getBoundingClientRect();\n"
+        "  var px = (e.clientX - r.left) * p.width / r.width, py = (e.clientY - r.top) * p.height / r.height;\n"
+        "  q.fillStyle = 'hsl(' + hue + ', 90%, 50%)'; hue = (hue + 40) % 360;\n"
+        "  q.beginPath(); q.arc(px, py, 8, 0, Math.PI * 2); q.fill();\n"
+        "});\n"
+        "</script></body></html>\n";
+    avfs_create_file("/home/user/canvas.html", strlen(canvas_html));
+    avfs_write_file("/home/user/canvas.html", canvas_html, strlen(canvas_html), 0);
+    done("Created canvas demo", "canvas.html");
     install_helios_apps(g_disk_current);
     if (!g_disk_current) avfs_save_file(DISK_STAMP_FILE, BUILD_STAMP, (uint32_t)strlen(BUILD_STAMP), true);
     avfs_chdir("/home/user");

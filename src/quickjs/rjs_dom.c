@@ -11,6 +11,7 @@
 extern volatile uint32_t ticks;
 extern const char rjs_dom_prelude[];
 extern const int rjs_dom_prelude_len;
+void rjs_canvas_install(JSContext *ctx, JSValueConst rb);   /* rjs_canvas.c */
 
 #define SCRATCH 65536
 #define TIMER_BUDGET_MS 3000
@@ -687,6 +688,7 @@ int rjs_dom_install(const char *url, RjsFetch fetch) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue rb = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, rb, g_natives, (int)(sizeof(g_natives) / sizeof(g_natives[0])));
+    rjs_canvas_install(ctx, rb);
     JS_SetPropertyStr(ctx, global, "__rb", rb);
     JS_FreeValue(ctx, global);
     rjs_enter(SCRIPT_BUDGET_MS);

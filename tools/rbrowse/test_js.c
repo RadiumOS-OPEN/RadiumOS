@@ -1,11 +1,12 @@
 /* Host checks for the browser's JavaScript DOM: QuickJS + rjs + rjs_dom +
    dom_prelude driving the real engine, natively (no kernel).
 
-     Q=src/quickjs
-     clang -g -O1 -fsanitize=address,undefined -DRBROWSE_HOST '-DCONFIG_VERSION="host"' \
+     T=/tmp; Q=src/quickjs   # $T/font.c: made as in test_paint.c
+     clang -g -O1 -fsanitize=address,undefined -fwrapv -DRBROWSE_HOST '-DCONFIG_VERSION="host"' \
          -I src/rbrowse -I $Q -w tools/rbrowse/test_js.c src/rbrowse/engine.c \
          $Q/quickjs.c $Q/libregexp.c $Q/libunicode.c $Q/cutils.c $Q/dtoa.c \
-         $Q/rjs.c $Q/rjs_dom.c $Q/dom_prelude.c -lm -o /tmp/rbtest_js && /tmp/rbtest_js
+         $Q/rjs.c $Q/rjs_dom.c $Q/rjs_canvas.c $Q/dom_prelude.c \
+         src/rbrowse/canvas.c src/rbrowse/image.c src/stb/stb_image.c $T/font.c -lm -o /tmp/rbtest_js && /tmp/rbtest_js
 
    (Regenerate dom_prelude.c first if dom_prelude.js changed:
     python3 tools/rbrowse/js2c.py src/quickjs/dom_prelude.js src/quickjs/dom_prelude.c rjs_dom_prelude)

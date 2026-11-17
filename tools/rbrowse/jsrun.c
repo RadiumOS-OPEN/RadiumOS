@@ -3,10 +3,11 @@
    seconds) and prints the console plus the visible text, so a site's
    scripts can be debugged without booting the OS. Network goes through curl.
 
-     Q=src/quickjs
+     T=/tmp; Q=src/quickjs   # $T/font.c: made as in test_paint.c
      clang -g -O1 -DRBROWSE_HOST '-DCONFIG_VERSION="host"' -I src/rbrowse -I $Q -w \
          tools/rbrowse/jsrun.c src/rbrowse/engine.c $Q/quickjs.c $Q/libregexp.c \
-         $Q/libunicode.c $Q/cutils.c $Q/dtoa.c $Q/rjs.c $Q/rjs_dom.c $Q/dom_prelude.c \
+         $Q/libunicode.c $Q/cutils.c $Q/dtoa.c $Q/rjs.c $Q/rjs_dom.c $Q/rjs_canvas.c $Q/dom_prelude.c \
+         src/rbrowse/canvas.c src/rbrowse/image.c src/stb/stb_image.c $T/font.c \
          -lm -o /tmp/jsrun
      /tmp/jsrun https://example.com/ [seconds] [nojs]
 */

@@ -8,6 +8,7 @@
 #include "engine.h"
 #include "paint.h"
 #include "image.h"
+#include "canvas.h"
 #include "../vga/vga_gfx.h"
 #include "../vga/bga.h"
 #include "../terminal/terminal.h"
@@ -880,6 +881,7 @@ static int g_img_busy;                /* the status line shows image progress */
 
 static void images_new_page(void) {
     rb_image_reset();
+    rb_canvas_reset();
     g_img_scan = 1;
     g_img_relayout = 0;
     g_img_fetched = 0;
@@ -1808,6 +1810,7 @@ static int recover_from_crash(void) {
     if (g_crash_n > RB_CRASH_BURST) return 0;
     rb_crash_reset();
     rjs_abandon();
+    rb_canvas_reset();
     drain_ps2();
     g_left = 0;
     g_btn = g_btn_was = 0;
@@ -1855,6 +1858,8 @@ void rbrowse(int argc, char *argv[]) {
     rb_set_scripting(1);
     rb_set_images(1);
     rb_paint_set_images(rb_image_view_node);
+    rb_set_canvas(1);
+    rb_paint_set_canvas(rb_canvas_view_node);
     const char *start = "/home/user/rbrowse.html";
     if (argc >= 2 && argv[1] && argv[1][0]) {
         const char *arg = argv[1];
@@ -1915,6 +1920,7 @@ void rbrowse(int argc, char *argv[]) {
             break;
         }
         update_hover();
+        if (rb_canvas_take_dirty()) g_dirty = 1;   /* scripts drew on a canvas */
         int blink = (int)((get_ticks() / 400) & 1);
         if (g_dirty || blink != last_blink) {
             last_blink = blink;
@@ -1927,6 +1933,9 @@ void rbrowse(int argc, char *argv[]) {
     rb_set_scripting(0);
     rb_set_images(0);
     rb_image_reset();
+    rb_set_canvas(0);
+    rb_paint_set_canvas(0);
+    rb_canvas_reset();
     mouse_off();
     reset_input();
     video_leave();

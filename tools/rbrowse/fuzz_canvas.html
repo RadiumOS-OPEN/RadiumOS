@@ -1,0 +1,32 @@
+<!-- Random canvas 2D calls with hostile arguments, for the sanitizer build of
+     test_canvas.c: replace SEED and ITER, then CANVAS_PAGE=this.html rbtest_canvas.
+     It must finish with "done ok=... errs=..." and no sanitizer report. -->
+<canvas id=c width=120 height=90></canvas><canvas id=d width=30 height=20></canvas>
+<script>
+var cv = document.getElementById('c'), ctx = cv.getContext('2d'), d = document.getElementById('d'), dc = d.getContext('2d');
+var seed = SEED;
+function r() { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+var g = ctx.createLinearGradient(0, 0, 50, 50); g.addColorStop(0, 'red'); g.addColorStop(1, 'blue');
+var rg = ctx.createRadialGradient(10, 10, 0, 10, 10, 0); rg.addColorStop(0.5, 'lime');
+var rg2 = ctx.createRadialGradient(10, 10, 30, 60, 40, 5); rg2.addColorStop(0, 'red'); rg2.addColorStop(1, 'rgba(0,0,0,0)');
+var P = new Path2D('M0 0 L50 50 A 10 20 30 1 0 70 10 Q 5 5 9 9 T 20 30 S 1 2 3 4 Z m 5 5 h 10 v -3');
+var vals = [NaN, Infinity, -Infinity, -1e300, 1e300, 0, 1, -1, -5, 0.5, 3, 7.25, 60, 119.9, 300, 70000, 1e6, -1e6, 'x', null, undefined, {}, [], g, rg, rg2, P, '#f80', 'evenodd', 'rgba(1,2,3,.4)', d, cv, 2.5e-7];
+function v() { return vals[Math.floor(r() * vals.length)]; }
+var methods = ['fillRect','strokeRect','clearRect','beginPath','moveTo','lineTo','arc','arcTo','ellipse','rect','roundRect','quadraticCurveTo','bezierCurveTo','closePath','fill','stroke','clip','save','restore','translate','rotate','scale','transform','setTransform','resetTransform','fillText','strokeText','measureText','drawImage','getImageData','putImageData','createImageData','isPointInPath','isPointInStroke','setLineDash','createLinearGradient','createRadialGradient','createPattern'];
+var props = ['fillStyle','strokeStyle','lineWidth','lineCap','lineJoin','miterLimit','globalAlpha','globalCompositeOperation','lineDashOffset','font','textAlign','textBaseline','imageSmoothingEnabled','direction'];
+var pv = ['round','square','butt','bevel','miter','copy','lighter','destination-out','center','right','top','middle','bottom','12px x','0.3', 'rtl'];
+var errs = 0, ok = 0;
+for (var i = 0; i < ITER; i++) {
+  var c = r() < 0.15 ? dc : ctx;
+  try {
+    if (r() < 0.25) { var p = props[Math.floor(r() * props.length)]; c[p] = r() < 0.5 ? v() : pv[Math.floor(r() * pv.length)]; }
+    else if (r() < 0.03) { var e = r() < 0.5 ? cv : d; e.width = Math.floor(r() * 200); e.height = Math.floor(r() * 200); }
+    else if (r() < 0.02) { c.setLineDash([r() * 5, r() * 5, r()]); }
+    else if (r() < 0.02) { var id = c.getImageData(Math.floor(r()*100)-20, 3, 1 + Math.floor(r()*40), 7); c.putImageData(id, Math.floor(r()*130)-10, Math.floor(r()*100)-10, v(), v(), v(), v()); }
+    else if (r() < 0.01) { cv.toDataURL(); }
+    else { var m = methods[Math.floor(r() * methods.length)], n = Math.floor(r() * 10), a = []; for (var k = 0; k < n; k++) a.push(r() < 0.7 ? (r() * 140 - 10) : v()); c[m].apply(c, a); }
+    ok++;
+  } catch (e) { errs++; if (!(e instanceof TypeError || e instanceof RangeError || (e && e.name && /IndexSize|SyntaxError|InvalidState|NotSupported/.test(e.name)))) { console.log('odd error ' + e + ' at ' + i); break; } }
+}
+console.log("done ok=" + ok + " errs=" + errs + " used=" + cv.width + "x" + cv.height);
+</script>
