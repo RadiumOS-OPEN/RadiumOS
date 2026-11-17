@@ -103,6 +103,9 @@ static const char *js(const char *src) {
     else g_pass++;                                                          \
 } while (0)
 
+static int g_abort_calls;
+static int abort_after_3(void) { return ++g_abort_calls >= 3; }
+
 /* The canvas element with this id: its pixels, or 0. */
 static uint32_t *canvas_px(const char *id, int *w, int *h) {
     int node = rb_find_id(id);
@@ -461,6 +464,28 @@ int main(void) {
         rjs_dom_tick();
         CHECK(p[0] == 0xFFFF0000u && rb_canvas_take_dirty());
         dump("c", "page");
+    }
+
+    /* a long fill polls the abort hook and stops when the script is out of
+       time (the kernel's hook is rjs_over_budget) */
+    {
+        page("<canvas id=c width=64 height=64></canvas>");
+        int slot = rb_canvas_open(rb_find_id("c"));
+        CHECK(rb_canvas_resize(slot, 64, 64));
+        rb_cv_set_abort(abort_after_3);
+        g_abort_calls = 0;
+        rb_cv_begin();
+        rb_cv_line(0, 0, 64, 0); rb_cv_line(64, 0, 64, 64); rb_cv_line(64, 64, 0, 64); rb_cv_line(0, 64, 0, 0);
+        RbCvPaint p = {0};
+        p.kind = RB_CV_SOLID;
+        p.argb = 0xFF00FF00u;
+        rb_cv_fill(slot, 0, &p, 255, RB_CV_OVER, 0);
+        uint32_t *px = rb_canvas_pixels(slot);
+        /* rows 0..7 and 8..15 filled, stopped at row 16 */
+        CHECK(px && px[15 * 64] == 0xFF00FF00u && px[16 * 64] == 0 && px[63 * 64] == 0);
+        rb_cv_set_abort(0);
+        rb_cv_fill(slot, 0, &p, 255, RB_CV_OVER, 0);
+        CHECK(px[63 * 64 + 63] == 0xFF00FF00u);
     }
 
     printf("%d passed, %d failed\n", g_pass, g_fail);

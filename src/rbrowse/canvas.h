@@ -91,6 +91,10 @@ typedef struct {
 /* Clip rectangle in device pixels, half-open [x0,x1) x [y0,y1). */
 typedef struct { int x0, y0, x1, y1; } RbCvClip;
 
+/* Long fills and image draws poll fn every few rows and stop when it
+   returns 1 (the script that asked has run out of time). 0 = never stop. */
+void rb_cv_set_abort(int (*fn)(void));
+
 /* Fill the collected segments into slot with paint p, times alpha
    (0..255, globalAlpha), composited with op, inside clip (0 = the whole
    canvas). Leaves the segments in place (rb_cv_begin clears them). */

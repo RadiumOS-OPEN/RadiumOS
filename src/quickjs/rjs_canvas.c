@@ -755,7 +755,9 @@ FN(c_text) {
     g_evenodd = 0;
     rb_cv_begin();
     double cx = x;
+    unsigned glyphs = 0;
     for (size_t i = 0; i < len;) {
+        if ((++glyphs & 255) == 0 && rjs_over_budget()) break;
         unsigned c = (uint8_t)s[i++];
         if (c >= 0x80) {
             /* one glyph per code point: skip continuation bytes */
@@ -958,6 +960,7 @@ static const JSCFunctionListEntry g_canvas_natives[] = {
 };
 
 void rjs_canvas_install(JSContext *ctx, JSValueConst rb) {
+    rb_cv_set_abort(rjs_over_budget);
     g_paint_ok = 1;
     g_paint.kind = RB_CV_SOLID;
     g_paint.argb = 0xFF000000u;

@@ -42,6 +42,11 @@ static int interrupt_cb(JSRuntime *rt, void *opaque) {
     return ++g_checks > g_check_cap;
 }
 
+int rjs_over_budget(void) {
+    if (g_cancel && g_cancel()) return 1;
+    return g_eval_budget && ticks - g_eval_start >= g_eval_budget;
+}
+
 static void out(const char *s, int len) {
     qjs_write(s, len);
 }

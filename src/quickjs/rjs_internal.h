@@ -12,5 +12,8 @@ void rjs_enter(int timeout_ms);
 void rjs_leave(void);
 /* Print the pending exception to the output sink and clear it. */
 void rjs_report(void);
+/* 1 when the script running now is past its time budget (or cancelled):
+   long natives poll it and stop early; QuickJS then interrupts the script. */
+int rjs_over_budget(void);
 
 #endif

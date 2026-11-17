@@ -230,6 +230,11 @@ static int g_tcx[RB_CANVAS_EDGES_MAX], g_tcd[RB_CANVAS_EDGES_MAX];
    fully covered ones */
 static int g_cov[RB_CANVAS_DIM_MAX + 2], g_dif[RB_CANVAS_DIM_MAX + 2];
 
+static int (*g_abort)(void);
+void rb_cv_set_abort(int (*fn)(void)) { g_abort = fn; }
+/* every 8 rows: a fill of 65536 edges over 2048 rows is seconds of work */
+#define ABORT_ROW(y) ((((y) & 7) == 0) && g_abort && g_abort())
+
 void rb_cv_begin(void) { g_nedge = 0; }
 int rb_cv_edges(void) { return g_nedge; }
 
@@ -399,6 +404,7 @@ void rb_cv_fill(int i, int evenodd, const RbCvPaint *p, int alpha, int op, const
     int next = 0, nact = 0;
     int lx = cx0 * 256, rx = cx1 * 256;
     for (int y = ry0; y < ry1; y++) {
+        if (ABORT_ROW(y - ry0)) break;    /* each row's coverage was flushed: scratch is clean */
         /* edges starting above the row's bottom join; ended ones leave */
         while (next < g_nedge && g_edge[g_order[next]].y0 < y + 1) g_active[nact++] = g_order[next++];
         int w = 0;
@@ -548,6 +554,7 @@ void rb_cv_image(int i, const uint32_t *src, int sw, int sh, int stride,
     if (cx0 >= cx1 || cy0 >= cy1) return;
     g_dirty = 1;
     for (int y = cy0; y < cy1; y++) {
+        if (ABORT_ROW(y - cy0)) break;
         double cyc = y + 0.5;
         double u = m[0] * (cx0 + 0.5) + m[2] * cyc + m[4];
         double v = m[1] * (cx0 + 0.5) + m[3] * cyc + m[5];
