@@ -309,6 +309,27 @@ int main(void) {
     EXPECT("var ex; try { ctx.getImageData(0, 0, 0, 5); } catch (e) { ex = e.name; } ex", "IndexSizeError");
     EXPECT("new ImageData(3, 2).data.length + ',' + new ImageData(new Uint8ClampedArray(8), 2).height", "24,1");
 
+    /* putImageData far off the canvas: the offsets used to wrap past the
+       clamps (2^31 - 1 + x1 < 0) and write gigabytes away from the arena;
+       a wrapped dirty-rect origin read before the image */
+    EXPECT("ctx.clearRect(0, 0, 100, 80); ctx.fillStyle = '#010203'; ctx.fillRect(0, 0, 100, 80);"
+           "var big = [2147483647, -2147483648, 4294967296 * 3 + 2147483647, -2147483647, 2147483646];"
+           "for (var bx of big) for (var by of [0, 3].concat(big)) { ctx.putImageData(id, bx, by); ctx.putImageData(id, by, bx); }"
+           "ctx.putImageData(id, 5, 5, 2147483647, 0, 2147483650, 1); ctx.putImageData(id, 5, 5, 0, 2147483647, 1, 2147483650);"
+           "ctx.putImageData(id, 5, 5, -2147483648, -2147483648, 2147483649, 2147483649);"
+           "ctx.putImageData(id, -1, 79, -5, -5, 100, 100);"
+           "[px(0, 0), px(5, 5), px(99, 79), px(0, 79), px(1, 79), count(0, 0, 100, 80)].join(' ')",
+           /* only the last put touches the canvas: its (1,0) pixel at (0,79) */
+           "1,2,3,255 1,2,3,255 1,2,3,255 4,5,6,255 1,2,3,255 8000");
+    /* an ImageData is a plain object: a page can change its fields. The
+       natives take the buffer only after every number is converted (a
+       valueOf may detach it) and size-check it in 64 bits. */
+    EXPECT("var t1 = ctx.createImageData(2, 2); t1.width = 65536; t1.height = 65536; ctx.putImageData(t1, 0, 0);"
+           "var t2 = ctx.createImageData(2, 2); t2.width = {valueOf() { t2.data.buffer.transfer(); return 2; }};"
+           "ctx.putImageData(t2, 0, 0); t2.data.length + ',' + px(0, 0)", "0,1,2,3,255");
+    EXPECT("var keep = ctx.__s.m; ctx.__s.m = [1, 0, 0, 1, 0, {valueOf() { ctx.__rp.d.buffer.transfer(); return 0; }}];"
+           "ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 5, 5); ctx.__rp = null; ctx.__s.m = keep; px(0, 0)", "1,2,3,255");
+
     /* toDataURL is a PNG the image decoder reads back */
     {
         const char *url = js("ctx.clearRect(0, 0, 100, 80); ctx.fillStyle = '#123456'; ctx.fillRect(0, 0, 3, 2); cv.toDataURL()");

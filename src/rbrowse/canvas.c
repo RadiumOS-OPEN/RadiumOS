@@ -596,10 +596,17 @@ void rb_cv_get(int i, int x, int y, int w, int h, uint8_t *rgba) {
 void rb_cv_put(int i, const uint8_t *rgba, int iw, int ih, int dx, int dy, int x0, int y0, int x1, int y1) {
     Slot *s = slot_at(i);
     if (!s || !s->has || !rgba || iw <= 0 || ih <= 0) return;
+    /* An image placed entirely off the canvas draws nothing. Past these two
+       tests dx, dy and the rectangle are all small (|dx| < max(iw, w),
+       0 <= x0 < x1 <= iw), so the sums below cannot wrap: with wrapping,
+       putImageData(img, 2147483647, 0) or a huge dirty-rect origin got past
+       the clamps and read and wrote far outside the buffers. */
+    if (dx <= -iw || dx >= s->w || dy <= -ih || dy >= s->h) return;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > iw) x1 = iw;
     if (y1 > ih) y1 = ih;
+    if (x0 >= x1 || y0 >= y1) return;
     /* and inside the canvas */
     if (dx + x0 < 0) x0 = -dx;
     if (dy + y0 < 0) y0 = -dy;

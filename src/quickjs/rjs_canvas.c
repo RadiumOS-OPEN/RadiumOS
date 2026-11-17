@@ -408,7 +408,12 @@ static int inum(JSContext *ctx, JSValueConst v) {
     return i;
 }
 
-/* A Float64Array's data. 0 when it is not one. */
+/* A Float64Array's data. 0 when it is not one.
+   The pointer is only good until JS runs again: converting another argument
+   can call a valueOf that detaches or resizes the buffer (the values come
+   from prelude objects a page can reach, like ctx.__s.m or an ImageData's
+   width). Every native therefore converts its numbers first and takes its
+   buffers last. */
 static const double *f64(JSContext *ctx, JSValueConst v, int *count) {
     size_t off, len, per;
     *count = 0;
@@ -540,9 +545,9 @@ FN(c_gradient) {
     double x0 = num(ctx, argv[1]), y0 = num(ctx, argv[2]), r0 = num(ctx, argv[3]);
     double x1 = num(ctx, argv[4]), y1 = num(ctx, argv[5]), r1 = num(ctx, argv[6]);
     int ns;
-    const double *st = f64(ctx, argv[7], &ns);
     double m[6], inv[6];
     mat(ctx, argv + 8, m);
+    const double *st = f64(ctx, argv[7], &ns);
     g_paint_ok = 0;
     if (!st || ns < 2 || !invert(m, inv)) return JS_UNDEFINED;
     ns /= 2;
@@ -603,14 +608,15 @@ FN(c_comp) {
 FN(c_fill) {
     UNUSED;
     int slot = inum(ctx, argv[0]), cnt;
-    const double *d = f64(ctx, argv[1], &cnt);
     int n = inum(ctx, argv[2]);
     double m[6];
     mat(ctx, argv + 3, m);
+    int evenodd = inum(ctx, argv[9]) != 0;
+    const double *d = f64(ctx, argv[1], &cnt);
     if (!d || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
     flatten(d, n, m);
     g_target = slot;
-    g_evenodd = inum(ctx, argv[9]) != 0;
+    g_evenodd = evenodd;
     rb_cv_begin();
     fill_subpaths();
     flush_fill();
@@ -644,12 +650,12 @@ static void line_style(JSContext *ctx, JSValueConst *argv, const double m[6]) {
 FN(c_stroke) {
     UNUSED;
     int slot = inum(ctx, argv[0]), cnt;
-    const double *d = f64(ctx, argv[1], &cnt);
     int n = inum(ctx, argv[2]);
     double m[6];
     mat(ctx, argv + 3, m);
-    if (!d || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
     line_style(ctx, argv + 9, m);
+    const double *d = f64(ctx, argv[1], &cnt);
+    if (!d || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
     if (!(g_hw > 0) || g_hw > 1e5) return JS_UNDEFINED;
     flatten(d, n, m);
     g_target = slot;
@@ -664,16 +670,18 @@ FN(c_stroke) {
 FN(c_inside) {
     UNUSED;
     int cnt;
-    const double *d = f64(ctx, argv[0], &cnt);
     int n = inum(ctx, argv[1]);
     double m[6];
     mat(ctx, argv + 2, m);
+    double px = num(ctx, argv[8]), py = num(ctx, argv[9]);
+    int evenodd = inum(ctx, argv[10]) != 0;
+    const double *d = f64(ctx, argv[0], &cnt);
     if (!d || n > cnt || !finite_mat(m)) return JS_FALSE;
     flatten(d, n, m);
     g_target = -1;
     rb_cv_begin();
     fill_subpaths();
-    int r = rb_cv_inside(num(ctx, argv[8]), num(ctx, argv[9]), inum(ctx, argv[10]) != 0);
+    int r = rb_cv_inside(px, py, evenodd);
     rb_cv_begin();
     return JS_NewBool(ctx, r);
 }
@@ -682,18 +690,19 @@ FN(c_inside) {
 FN(c_in_stroke) {
     UNUSED;
     int cnt;
-    const double *d = f64(ctx, argv[0], &cnt);
     int n = inum(ctx, argv[1]);
     double m[6];
     mat(ctx, argv + 2, m);
-    if (!d || n > cnt || !finite_mat(m)) return JS_FALSE;
     line_style(ctx, argv + 8, m);
+    double px = num(ctx, argv[14]), py = num(ctx, argv[15]);
+    const double *d = f64(ctx, argv[0], &cnt);
+    if (!d || n > cnt || !finite_mat(m)) return JS_FALSE;
     if (!(g_hw > 0) || g_hw > 1e5) return JS_FALSE;
     flatten(d, n, m);
     g_target = -1;
     rb_cv_begin();
     stroke_subpaths();
-    int r = rb_cv_inside(num(ctx, argv[14]), num(ctx, argv[15]), 0);
+    int r = rb_cv_inside(px, py, 0);
     rb_cv_begin();
     return JS_NewBool(ctx, r);
 }
@@ -702,10 +711,10 @@ FN(c_in_stroke) {
 FN(c_bounds) {
     UNUSED;
     int cnt;
-    const double *d = f64(ctx, argv[0], &cnt);
     int n = inum(ctx, argv[1]);
     double m[6];
     mat(ctx, argv + 2, m);
+    const double *d = f64(ctx, argv[0], &cnt);
     if (!d || n > cnt || !finite_mat(m)) return JS_NULL;
     flatten(d, n, m);
     if (g_npt == 0) return JS_NULL;
@@ -862,10 +871,11 @@ FN(c_image_size) {
 FN(c_get) {
     UNUSED;
     size_t n;
-    uint8_t *p = u8(ctx, argv[5], &n);
+    int slot = inum(ctx, argv[0]), x = inum(ctx, argv[1]), y = inum(ctx, argv[2]);
     int w = inum(ctx, argv[3]), h = inum(ctx, argv[4]);
-    if (!p || w <= 0 || h <= 0 || (size_t)w * (size_t)h * 4 > n) return JS_UNDEFINED;
-    rb_cv_get(inum(ctx, argv[0]), inum(ctx, argv[1]), inum(ctx, argv[2]), w, h, p);
+    uint8_t *p = u8(ctx, argv[5], &n);
+    if (!p || w <= 0 || h <= 0 || (uint64_t)w * (uint64_t)h * 4 > n) return JS_UNDEFINED;
+    rb_cv_get(slot, x, y, w, h, p);
     return JS_UNDEFINED;
 }
 
@@ -873,11 +883,14 @@ FN(c_get) {
 FN(c_put) {
     UNUSED;
     size_t n;
+    int v[10];
+    for (int k = 0; k < 10; k++) v[k] = k == 1 ? 0 : inum(ctx, argv[k]);
+    int iw = v[2], ih = v[3];
     uint8_t *p = u8(ctx, argv[1], &n);
-    int iw = inum(ctx, argv[2]), ih = inum(ctx, argv[3]);
-    if (!p || iw <= 0 || ih <= 0 || (size_t)iw * (size_t)ih * 4 > n) return JS_UNDEFINED;
-    rb_cv_put(inum(ctx, argv[0]), p, iw, ih, inum(ctx, argv[4]), inum(ctx, argv[5]),
-              inum(ctx, argv[6]), inum(ctx, argv[7]), inum(ctx, argv[8]), inum(ctx, argv[9]));
+    /* 64-bit product: on i686 size_t is 32 bits, and a page can set an
+       ImageData's width and height to anything */
+    if (!p || iw <= 0 || ih <= 0 || (uint64_t)iw * (uint64_t)ih * 4 > n) return JS_UNDEFINED;
+    rb_cv_put(v[0], p, iw, ih, v[4], v[5], v[6], v[7], v[8], v[9]);
     return JS_UNDEFINED;
 }
 
