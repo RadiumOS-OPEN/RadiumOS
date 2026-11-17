@@ -118,7 +118,17 @@ void handle_interrupt(TrapFrame regs) {
         system_error("Invalid interrupt vector", "0x005");
         return;
     }
-    
+
+    if (regs.interrupt < 32) {
+        uint32_t cr2;
+        char code[8];
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        printr("CPU exception vector %u EIP=0x%08x ERR=0x%08x CR2=0x%08x\n",
+               regs.interrupt, regs.eip, regs.error, cr2);
+        snprintf(code, sizeof(code), "0x%02X", regs.interrupt);
+        kernel_panic("CPU exception", code);
+    }
+
     // Visual indicator at top of screen
     *(VGA_MEMORY + 79) = 0xF100 | 'T';
 
