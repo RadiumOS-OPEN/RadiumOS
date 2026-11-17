@@ -229,6 +229,11 @@ static void vga_dac_restore(void) {
 
 static uint16_t s_saved_text[VGA_TEXT_CELLS];
 static bool s_text_saved = false;
+// True between vga_gfx_set_mode13h() and vga_gfx_set_text_mode(). The screen
+// changes between graphics sessions (the shell keeps printing), so it is
+// snapshotted on every entry from text mode, never while already in graphics
+// (that would capture mode-13h pixels).
+static bool s_in_gfx = false;
 
 static void vga_text_save(void) {
     volatile uint16_t* src = (volatile uint16_t*)VGA_TEXT_ADDR;
@@ -305,7 +310,7 @@ void vga_gfx_set_mode13h(void) {
         s_regs_saved = true;
     }
 
-    if (!s_text_saved) {
+    if (!s_in_gfx) {
         vga_text_save();
         s_text_saved = true;
     }
@@ -327,6 +332,7 @@ void vga_gfx_set_mode13h(void) {
         s_font_saved = true;
     }
     vga_apply_register_table(g_mode13h);
+    s_in_gfx = true;
 }
 
 void vga_gfx_set_text_mode(void) {
@@ -360,6 +366,7 @@ void vga_gfx_set_text_mode(void) {
     }
 
     fbcon_resume();
+    s_in_gfx = false;
 }
 
 uint8_t* vga_gfx_get_framebuffer(void) {
