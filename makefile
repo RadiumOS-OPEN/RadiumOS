@@ -142,7 +142,7 @@ full:
 	@$(MAKE) run
 
 .PHONY: all
-all: check-rust-status verify-sources $(ISO_FILE) $(DISK_IMG) $(FETCH_DISK_IMG) verify-symbols
+all: check-rust-status verify-sources $(ISO_FILE) $(FETCH_DISK_IMG) verify-symbols
 	@echo "✓ Build complete and verified"
 
 .PHONY: check-rust-status
