@@ -1,0 +1,14 @@
+// acmod: Graphics enhancer: richer colours and contrast
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 {
+        out_set(OUT_SAT, 100);
+        out_set(OUT_CON, 100);
+        out_set(OUT_VIG, 0);
+    } else {
+        out_set(OUT_SAT, 130);
+        out_set(OUT_CON, 115);
+        out_set(OUT_VIG, 20);
+    }
+}

@@ -3,89 +3,99 @@
 #include "../terminal/terminal.h"
 #include "../utility/utility.h"
 
-// Bitmap to track page allocation
-static uint32_t* page_bitmap = NULL;
+#define PMM_MAX_PHYSICAL_ADDRESS 0x140000000ULL
+#define PMM_IDENTITY_LIMIT       0x100000000ULL
+#define PMM_HIGH_VIRTUAL_BASE    0xC0000000u
+#define PMM_MAX_PAGES ((uint32_t)(PMM_MAX_PHYSICAL_ADDRESS / PAGE_SIZE))
+
+// 1 bit per 4-KiB frame, covering 4 GiB of RAM including the QEMU remap.
+static uint32_t page_bitmap[PMM_MAX_PAGES / 32];
 static uint32_t total_pages = 0;
 static uint32_t used_pages = 0;
 static uint32_t bitmap_size = 0;
 
 // Memory statistics
-static uint32_t total_memory = 0;
+static uint64_t total_memory = 0;
 
 // Bitmap operations
-#define BITMAP_SET(bitmap, bit) ((bitmap)[(bit) / 32] |= (1 << ((bit) % 32)))
-#define BITMAP_CLEAR(bitmap, bit) ((bitmap)[(bit) / 32] &= ~(1 << ((bit) % 32)))
-#define BITMAP_TEST(bitmap, bit) ((bitmap)[(bit) / 32] & (1 << ((bit) % 32)))
-static uint32_t bitmap_start_page = 0;
+#define BITMAP_SET(bitmap, bit) ((bitmap)[(bit) / 32] |= (1u << ((bit) % 32)))
+#define BITMAP_CLEAR(bitmap, bit) ((bitmap)[(bit) / 32] &= ~(1u << ((bit) % 32)))
+#define BITMAP_TEST(bitmap, bit) ((bitmap)[(bit) / 32] & (1u << ((bit) % 32)))
 
-static uint32_t bitmap_end_page = 0;
+static void* frame_to_pointer(uint32_t page) {
+    uint64_t physical = (uint64_t)page * PAGE_SIZE;
+    if (physical >= PMM_IDENTITY_LIMIT) {
+        physical = PMM_HIGH_VIRTUAL_BASE + (physical - PMM_IDENTITY_LIMIT);
+    }
+    return (void*)(uintptr_t)physical;
+}
+
+static uint32_t pointer_to_frame(const void* pointer) {
+    uint64_t address = (uintptr_t)pointer;
+    if (address >= PMM_HIGH_VIRTUAL_BASE) {
+        address = PMM_IDENTITY_LIMIT + (address - PMM_HIGH_VIRTUAL_BASE);
+    }
+    return (uint32_t)(address / PAGE_SIZE);
+}
 
 // Initialize the physical memory manager
-void pmm_init(uint32_t mem_size) {
-    total_memory = mem_size;
-    total_pages = mem_size / PAGE_SIZE;
-    
-    // Calculate bitmap size (1 bit per page)
-    bitmap_start_page = ADDR_TO_PAGE((uint32_t)page_bitmap);
+void pmm_init(uint64_t physical_limit) {
+    if (physical_limit > PMM_MAX_PHYSICAL_ADDRESS) {
+        physical_limit = PMM_MAX_PHYSICAL_ADDRESS;
+    }
+    total_pages = (uint32_t)((physical_limit + PAGE_SIZE - 1) / PAGE_SIZE);
+    bitmap_size = (total_pages + 31) / 32;
 
-    bitmap_end_page = ADDR_TO_PAGE((uint32_t)page_bitmap + (bitmap_size * 4) - 1);
-
-    
-    // Mark all pages as used initially
+    // Treat frames as reserved until an available memory-map range frees them.
     for (uint32_t i = 0; i < bitmap_size; i++) {
         page_bitmap[i] = 0xFFFFFFFF;
     }
+    if (total_pages % 32 != 0 && bitmap_size != 0) {
+        page_bitmap[bitmap_size - 1] = (1u << (total_pages % 32)) - 1u;
+    }
     used_pages = total_pages;
-    
-    print("PMM: Initialized with ");
-    print_capacity(mem_size);
-    print(" of memory\n");
-    
-    printr("PMM: Total pages: %d\n", total_pages);
-    printr("PMM: Bitmap at: 0x%x (size: %d bytes)\n", page_bitmap, bitmap_size * 4);
+    total_memory = 0;
+
+    print("PMM: Initialized frame map for ");
+    printr("%d pages below 5 GiB\n", total_pages);
 }
 
 // Initialize a memory region as available
-void pmm_init_region(uint32_t base, uint32_t length) {
-    uint32_t start_page = ADDR_TO_PAGE(PAGE_ALIGN(base));
-    uint32_t end_page = ADDR_TO_PAGE(PAGE_ALIGN_DOWN(base + length));
-    
+void pmm_init_region(uint64_t base, uint64_t length) {
+    if (length == 0 || base >= PMM_MAX_PHYSICAL_ADDRESS) return;
+    uint64_t end = base + length;
+    if (end < base || end > PMM_MAX_PHYSICAL_ADDRESS) {
+        end = PMM_MAX_PHYSICAL_ADDRESS;
+    }
+    uint32_t start_page = (uint32_t)((base + PAGE_SIZE - 1) / PAGE_SIZE);
+    uint32_t end_page = (uint32_t)(end / PAGE_SIZE);
+
     for (uint32_t page = start_page; page < end_page; page++) {
-
-    if (page >= bitmap_start_page && page <= bitmap_end_page) {
-
-        continue;  // Skip bitmap pages to prevent freeing them
-
+        if (page < total_pages && BITMAP_TEST(page_bitmap, page)) {
+            BITMAP_CLEAR(page_bitmap, page);
+            used_pages--;
+            total_memory += PAGE_SIZE;
+        }
     }
-
-    if (page < total_pages && BITMAP_TEST(page_bitmap, page)) {
-
-        BITMAP_CLEAR(page_bitmap, page);
-
-        used_pages--;
-
-    }
-
-}
-    
-    printr("PMM: Initialized region 0x%x - 0x%x (%d pages)\n", 
-           base, base + length, end_page - start_page);
 }
 
 // Mark a memory region as unavailable
-void pmm_deinit_region(uint32_t base, uint32_t length) {
-    uint32_t start_page = ADDR_TO_PAGE(PAGE_ALIGN_DOWN(base));
-    uint32_t end_page = ADDR_TO_PAGE(PAGE_ALIGN(base + length));
-    
+void pmm_deinit_region(uint64_t base, uint64_t length) {
+    if (length == 0 || base >= PMM_MAX_PHYSICAL_ADDRESS) return;
+    uint64_t end = base + length;
+    if (end < base || end > PMM_MAX_PHYSICAL_ADDRESS) {
+        end = PMM_MAX_PHYSICAL_ADDRESS;
+    }
+    uint32_t start_page = (uint32_t)(base / PAGE_SIZE);
+    uint32_t end_page = (uint32_t)((end + PAGE_SIZE - 1) / PAGE_SIZE);
+
     for (uint32_t page = start_page; page < end_page; page++) {
         if (page < total_pages && !BITMAP_TEST(page_bitmap, page)) {
             BITMAP_SET(page_bitmap, page);
             used_pages++;
+            total_memory -= PAGE_SIZE;
         }
     }
-    
-    printr("PMM: Reserved region 0x%x - 0x%x (%d pages)\n", 
-           base, base + length, end_page - start_page);
 }
 
 // pmm.c - Better approach
@@ -98,8 +108,7 @@ void* pmm_alloc_page(void) {
             BITMAP_SET(page_bitmap, i);
             used_pages++;
             
-            void* addr = (void*)PAGE_TO_ADDR(i);
-            return addr;
+            return frame_to_pointer(i);
         }
     }
     
@@ -136,8 +145,7 @@ void* pmm_alloc_pages(uint32_t count) {
                 }
                 used_pages += count;
                 
-                void* addr = (void*)PAGE_TO_ADDR(start_page);
-                return addr;
+                return frame_to_pointer(start_page);
             }
         } else {
             found = 0;
@@ -173,7 +181,7 @@ void pmm_free_page(void* addr) {
         return;
     }
     
-    uint32_t page = ADDR_TO_PAGE((uint32_t)addr);
+    uint32_t page = pointer_to_frame(addr);
     
     if (page >= total_pages) {
         printr("PMM: ERROR - Invalid page address: 0x%x\n", addr);
@@ -195,7 +203,7 @@ void pmm_free_pages(void* addr, uint32_t count) {
         return;
     }
     
-    uint32_t start_page = ADDR_TO_PAGE((uint32_t)addr);
+    uint32_t start_page = pointer_to_frame(addr);
     
     for (uint32_t i = 0; i < count; i++) {
         uint32_t page = start_page + i;
@@ -236,18 +244,18 @@ bool pmm_is_page_free(uint32_t page) {
 }
 
 // Get total memory in bytes
-uint32_t pmm_get_total_memory(void) {
+uint64_t pmm_get_total_memory(void) {
     return total_memory;
 }
 
 // Get used memory in bytes
-uint32_t pmm_get_used_memory(void) {
-    return used_pages * PAGE_SIZE;
+uint64_t pmm_get_used_memory(void) {
+    return (uint64_t)used_pages * PAGE_SIZE;
 }
 
 // Get free memory in bytes
-uint32_t pmm_get_free_memory(void) {
-    return (total_pages - used_pages) * PAGE_SIZE;
+uint64_t pmm_get_free_memory(void) {
+    return (uint64_t)(total_pages - used_pages) * PAGE_SIZE;
 }
 
 // Get total pages

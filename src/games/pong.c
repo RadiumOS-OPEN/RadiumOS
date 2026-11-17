@@ -7,6 +7,8 @@
 #include "../vga/vga.h"
 #include "../keyboard/keyboard.h"
 #include "../timers/timer.h"
+#include "../commands/fsapp.h"
+#include "../timers/tsc.h"
 #include "pong.h"
 // Global game state
 SnakeGame gh;
@@ -75,6 +77,7 @@ bool check_collision(Snake* snake) {
 }
 
 void move_snake(Snake* snake, bool grow) {
+    if (grow && snake->length >= MAX_SNAKE_LENGTH - 1) grow = false;
     // Update direction (prevent 180-degree turns)
     if (snake->next_direction == DIR_UP && snake->direction != DIR_DOWN) {
         snake->direction = DIR_UP;
@@ -182,13 +185,16 @@ void snake_gh_loop_timer_based(void) {
         return;
     }
     
-    gh.last_move_time = get_ticks();
+    // Timed from the TSC: the PIT tick count does not advance while a command runs with interrupts off.
+    uint64_t next_move = tsc_deadline_ms((uint32_t)gh.speed);
     
     while (gh.gh_running) {
-        uint32_t current_time = get_ticks();
-        
-        // Always check for input (assumes keyboard_key returns 0 if no key - common pattern)
-        int key = keyboard_key();
+        // Scancode of a key press, 0 when nothing was pressed (keyboard_key() would wait for one)
+        int key = fs_poll_key();
+        if (key == 0x11) key = 0x48;        // W
+        else if (key == 0x1F) key = 0x50;   // S
+        else if (key == 0x1E) key = 0x4B;   // A
+        else if (key == 0x20) key = 0x4D;   // D
         
         if (key != 0) {  // Only process if a key was actually pressed
             if (key == 0x01) { // ESC
@@ -202,7 +208,7 @@ void snake_gh_loop_timer_based(void) {
                     vga_win_puts_centered(&gh.gh_win, GAME_HEIGHT / 2, "PAUSED");
                     vga_win_puts_centered(&gh.gh_win, GAME_HEIGHT / 2 + 1, "Press P to resume");
                     vga_win_refresh(&gh.gh_win);
-                    sleep_ms(200); // Debounce
+                    fs_wait(200); // Debounce
                 }
             } else if (!gh.paused) {
                 // Arrow keys for direction
@@ -220,13 +226,13 @@ void snake_gh_loop_timer_based(void) {
         
         // Skip gh logic if paused
         if (gh.paused) {
-            sleep_ms(50);  // Small sleep to not burn CPU
+            fs_present();
             continue;
         }
         
         // Only move snake if enough time has passed
-        if (current_time - gh.last_move_time >= gh.speed) {
-            gh.last_move_time = current_time;
+        if (tsc_reached(next_move)) {
+            next_move = tsc_deadline_ms((uint32_t)gh.speed);
             
             // Move snake
             bool ate_food = false;
@@ -268,8 +274,8 @@ void snake_gh_loop_timer_based(void) {
             vga_win_refresh(&gh.gh_win);
         }
         
-        // Small sleep to prevent CPU spinning
-        sleep_ms(10);
+        // Let the console redraw; fs_poll_key above already does on every pass, so only idle here
+        __asm__ volatile("pause");
     }
 }
 
@@ -279,8 +285,7 @@ void play_pong(void) {
     memset(&gh, 0, sizeof(SnakeGame));
     
     // Create gh window
-    gh.gh_win = vga_create_centered_window(GAME_WIDTH, GAME_HEIGHT,
-        VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    gh.gh_win = vga_create_fullscreen_window(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     vga_win_set_title(&gh.gh_win, "SNAKE - Arrow Keys to Move | P: Pause | ESC: Exit");
     
     // Initialize gh state
@@ -329,3 +334,4 @@ void play_pong(void) {
     vga_destroy_window(&gh.gh_win);
     terminal_clear();
 }
+void snake_command(int argc, char *argv[]) { (void)argc; (void)argv; play_pong(); }

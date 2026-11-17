@@ -1,0 +1,6 @@
+// acmod: Rapid fire: no delay between shots
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 { out_set(OUT_RAPID, 0); } else { out_set(OUT_RAPID, 1); }
+}

@@ -118,7 +118,17 @@ void handle_interrupt(TrapFrame regs) {
         system_error("Invalid interrupt vector", "0x005");
         return;
     }
-    
+
+    if (regs.interrupt < 32) {
+        uint32_t cr2;
+        char code[8];
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        printr("CPU exception vector %u EIP=0x%08x ERR=0x%08x CR2=0x%08x\n",
+               regs.interrupt, regs.eip, regs.error, cr2);
+        snprintf(code, sizeof(code), "0x%02X", regs.interrupt);
+        kernel_panic("CPU exception", code);
+    }
+
     // Visual indicator at top of screen
     *(VGA_MEMORY + 79) = 0xF100 | 'T';
 
@@ -129,9 +139,20 @@ void handle_interrupt(TrapFrame regs) {
             extern bool rust_fetch_active(void);
             extern volatile uint32_t ticks;
             ticks++;
+            extern bool ctrlc_running(void);
+            extern void ctrlc_tick(void);
+            extern void rust_guard_tick(void);
+            if (ctrlc_running()) {          // nested in a command: watch for Ctrl+C and run the kernel guards, never start another task
+                outb(0x20, 0x20);
+                rust_guard_tick();
+                ctrlc_tick();
+                return;
+            }
+            extern void fbcon_tick(void);
+            fbcon_tick();
             // Fetch waits for network I/O with IRQs enabled, without nesting shell tasks.
             outb(0x20, 0x20);
-            if (!rust_fetch_active()) rust_schedule();
+            if (!rust_fetch_active()) rust_schedule(); else rust_guard_tick();
             return;
         }
         
