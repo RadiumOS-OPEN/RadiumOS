@@ -115,6 +115,14 @@ FN(n_create_text) {
     return INT(node);
 }
 
+FN(n_root) { UNUSED; return INT(rb_dom_root(N(0))); }
+FN(n_release) { UNUSED; return JS_NewBool(ctx, rb_dom_release(N(0))); }
+/* gc(): run the cycle collector now, so wrappers of detached nodes that no
+   script can reach are finalized (the prelude then releases their nodes). */
+FN(n_gc) { UNUSED; (void)argv; JS_RunGC(JS_GetRuntime(ctx)); return JS_UNDEFINED; }
+/* liveNodes(): engine node slots in use. */
+FN(n_live_nodes) { UNUSED; (void)argv; return INT(rb_debug_stat(13)); }
+
 FN(n_append) { UNUSED; mutated(); return JS_NewBool(ctx, rb_dom_append_child(N(0), N(1))); }
 FN(n_insert) { UNUSED; mutated(); return JS_NewBool(ctx, rb_dom_insert_before(N(0), N(1), N(2))); }
 FN(n_replace) { UNUSED; mutated(); return JS_NewBool(ctx, rb_dom_replace_child(N(0), N(1), N(2))); }
@@ -401,13 +409,15 @@ static int ev_type(JSContext *ctx, JSValueConst v) {
     return t;
 }
 
-/* listen(node, type, capture): 1 if the engine produces that event type. */
+/* listen(node, type, capture): 1 registered, 0 the engine does not produce
+   that event type, -1 it does but the registration failed (listener table
+   full, or a dead node). */
 FN(n_listen) {
     UNUSED;
     int t = ev_type(ctx, argv[1]);
-    if (t < 0) return JS_FALSE;
+    if (t < 0) return INT(0);
     int ok = N(2) ? rb_listen_capture(N(0), t, on_capture, 0) : rb_listen(N(0), t, on_bubble, 0);
-    return JS_NewBool(ctx, ok);
+    return INT(ok ? 1 : -1);
 }
 
 /* dispatch(node, type): run an engine event (el.click()); -1 if the engine
@@ -607,6 +617,10 @@ static const JSCFunctionListEntry g_natives[] = {
     JS_CFUNC_DEF("insert", 3, n_insert),
     JS_CFUNC_DEF("replace", 3, n_replace),
     JS_CFUNC_DEF("detach", 1, n_detach),
+    JS_CFUNC_DEF("root", 1, n_root),
+    JS_CFUNC_DEF("release", 1, n_release),
+    JS_CFUNC_DEF("gc", 0, n_gc),
+    JS_CFUNC_DEF("liveNodes", 0, n_live_nodes),
     JS_CFUNC_DEF("text", 1, n_text),
     JS_CFUNC_DEF("setText", 2, n_set_text),
     JS_CFUNC_DEF("html", 2, n_html),

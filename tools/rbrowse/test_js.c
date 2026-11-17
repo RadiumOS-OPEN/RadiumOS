@@ -296,6 +296,51 @@ int main(void) {
            "live.replaceChildren(nu, keepI); live.innerHTML", "<s></s><i>2</i>");
     EXPECT("live.replaceChildren(); live.childNodes.length", "0");
 
+    /* Nodes a script made or held and then dropped are given back to the
+       engine (wrappers of detached trees are weak; their trees are released
+       when collected), while held detached trees keep their listeners and
+       connected nodes keep their wrapper state. */
+    {
+        int base = rb_debug_stat(13);
+        /* 30000 dropped elements with listeners: more than the 16384 slots */
+        EXPECT("var made = 0; for (var i = 0; i < 30000; i++) { var d = document.createElement('div');"
+               "  if (!d) break; d.textContent = 'x' + i; d.addEventListener('click', () => d.id); d.onclick = () => d; d.style.color = 'red'; made++; } made",
+               "30000");
+        EXPECT("var hits = 0; var keep = document.createElement('div'); (function () { var b = document.createElement('button');"
+               "  b.addEventListener('click', () => hits++); b.onclick = () => hits += 10; keep.appendChild(b); })();"
+               "var gone = document.createElement('section'); gone.innerHTML = '<p>a</p><p>b</p>'; gone.querySelector('p').onclick = () => gone; gone = null;"
+               "var ex = document.createElement('div'); ex.expando = 42; document.body.appendChild(ex); ex = null;"
+               "setTimeout(function () {}, 0); 1", "1");
+        for (int i = 0; i < 6; i++) {          /* a few sweeps (every 2 s) */
+            js("setTimeout(function () {}, 0); 1");
+            tick(2200);
+        }
+        int after = rb_debug_stat(13);
+        if (after - base > 40) { printf("FAIL: %d nodes still held after sweeps\n", after - base); g_fail++; }
+        else g_pass++;
+        EXPECT("document.body.appendChild(keep); keep.firstChild.click(); hits", "11");
+        EXPECT("document.body.lastChild.previousSibling.expando", "42");
+        EXPECT("keep.firstChild.tagName + (keep.firstChild === keep.childNodes[0])", "BUTTONtrue");
+    }
+    /* more listening elements than the engine's old 256-registration table:
+       an engine click still reaches the last one */
+    EXPECT("var lastHit = -1; for (var i = 0; i < 600; i++) { var bt = document.createElement('button'); bt.id = 'bt' + i;"
+           "  (function (k) { bt.addEventListener('click', () => lastHit = k); })(i); document.body.appendChild(bt); } 1", "1");
+    rb_dispatch(rb_find_id("bt599"), RB_EV_CLICK);
+    EXPECT("lastHit", "599");
+
+    /* node generations are 16 bits: the 65536th node made on a page must not
+       get generation 0 (which reads as a dead node) */
+    {
+        int bad = 0;
+        for (int i = 0; i < 140000 && !bad; i++) {
+            int n = rb_dom_create_element(RB_TAG_DIV);
+            if (!n || !rb_dom_generation(n)) bad = i + 1;
+            rb_dom_release(n);
+        }
+        if (bad) { printf("FAIL: node %d got generation 0\n", bad); g_fail++; } else g_pass++;
+    }
+
     /* select.value against an option whose value is longer than the
        engine's compare buffer (it used to memcmp past the buffer) */
     EXPECT("live.innerHTML = '<select id=sl><option>short</option><option id=lo>x</option></select>';"

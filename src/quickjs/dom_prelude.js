@@ -15,9 +15,34 @@ delete global.__rb;
 
 /* ---------------- wrappers ---------------- */
 
-const cache = new Map();          // handle -> {gen, obj}
-const listeners = new Map();      // handle -> Map(type -> [{fn, capture, once}])
-const nativeHooked = new Set();   // "handle:type:capture" registered with the engine
+/* Wrapper lifetime. A connected node keeps its wrapper (cache entry .obj)
+   as long as the node lives: expandos, listeners, on* properties and canvas
+   contexts live on it. A wrapper of a node in a detached tree is held only
+   weakly (.ref), and all wrappers of one detached tree share a group array
+   (non-enumerable __grp on each), so a script holding any node of the tree
+   keeps every wrapper of it, with their listeners, alive. Once no script
+   can reach any of them the group is collected and the tree is released in
+   the engine (releaseTree). sweep() moves wrappers between the two states
+   every few seconds; inserting or detaching a node pins its tree's group
+   first, so a tree that becomes connected again never loses a wrapper. */
+const cache = new Map();          // handle -> {gen, obj, ref}
+/* A wrapper's listeners (Map type -> [{fn, capture, once}]) and on*
+   handlers live in hidden properties of the wrapper itself, not in a
+   WeakMap keyed by it: listener closures usually capture their element, and
+   QuickJS keeps such key <-> value cycles of a WeakMap alive forever. */
+function hidden(o, k) {
+  let v = Object.prototype.hasOwnProperty.call(o, k) ? o[k] : null;
+  if (!v) {
+    v = k === '__ls' ? new Map() : {};
+    Object.defineProperty(o, k, {value: v, writable: true, configurable: true, enumerable: false});
+  }
+  return v;
+}
+function hiddenGet(o, k) { return Object.prototype.hasOwnProperty.call(o, k) ? o[k] : null; }
+const nativeHooked = new Map();   // handle -> {gen, keys: Set("type:capture")} registered with the engine
+const groups = new Map();         // detached tree root -> {gen, id, ref: WeakRef(group)}
+const groupReg = new FinalizationRegistry(tok => releaseTree(tok));
+let groupSeq = 0;
 const fragments = new WeakSet();  // DocumentFragment wrappers (detached containers)
 /* Markup or an on* attribute was added since inline handlers were last bound
    (bindInlineHandlers, at the end of the file). */
@@ -28,15 +53,142 @@ function wrap(h) {
   const g = rb.gen(h);
   if (!g) return null;
   const c = cache.get(h);
-  if (c && c.gen === g) return c.obj;
+  if (c && c.gen === g) {
+    if (c.obj) return c.obj;
+    const o = c.ref && c.ref.deref();
+    if (o) return o;
+  }
   let obj;
   if (h === 1) obj = document;
   else if (rb.isText(h)) obj = Object.create(Text.prototype);
   else obj = Object.create(elementProto(rb.tag(h)));
   obj.__h = h;
-  cache.set(h, {gen: g, obj});
+  cache.set(h, {gen: g, obj, ref: null});
   return obj;
 }
+
+function liveWrapper(h) {
+  const c = cache.get(h);
+  if (!c || c.gen !== rb.gen(h)) return null;
+  return c.obj || (c.ref && c.ref.deref()) || null;
+}
+
+/* Hold every wrapper of h's detached tree strongly again: h is about to be
+   inserted somewhere or cut out of its tree. sweep() regroups later. */
+function pinTree(h) {
+  if (!groups.size || !h) return;
+  const r = rb.root(h);
+  const e = r && r !== 1 ? groups.get(r) : null;
+  if (!e) return;
+  groups.delete(r);
+  const grp = e.gen === rb.gen(r) && e.ref.deref();
+  if (!grp) return;
+  for (const o of grp) {
+    const c = cache.get(o.__h);
+    if (c && !c.obj && c.gen === rb.gen(o.__h)) { c.obj = o; c.ref = null; }
+  }
+}
+for (const [name, at] of [['append', 1], ['insert', 1], ['detach', 0]]) {
+  const f = rb[name];
+  rb[name] = function (...a) { pinTree(a[at]); return f.apply(rb, a); };
+}
+
+/* A group died: nothing a script can reach is left in that detached tree,
+   unless a wrapper was made for one of its nodes since (held). */
+function releaseTree(tok) {
+  const e = groups.get(tok.r);
+  if (e && e.id !== tok.id) return;
+  if (e) groups.delete(tok.r);
+  if (tok.r === 1 || rb.gen(tok.r) !== tok.gen || rb.root(tok.r) !== tok.r) return;
+  if (!held(tok.r)) rb.release(tok.r);
+}
+
+/* Release the trees whose group the collector already took (the registry
+   would say so too, but only in a later job). */
+function releaseDead() {
+  for (const [r, e] of groups) if (!e.ref.deref()) releaseTree({r, gen: e.gen, id: e.id});
+}
+
+const SWEEP_MS = 2000;
+let sweepAt = 0, sweepTimer = 0, gcPasses = 0;
+/* Newly grouped trees get a few collector passes on later sweeps: a cycle
+   that held them can take more than one pass to go. */
+function sweep(force) {
+  sweepAt = rb.now() + SWEEP_MS;
+  const trees = new Map();        // detached root -> wrappers to add to its group
+  for (const [h, c] of cache) {
+    if (h === 1) continue;
+    const g = rb.gen(h);
+    if (c.gen !== g) {
+      cache.delete(h);
+      const k = nativeHooked.get(h);
+      if (k && k.gen !== g) nativeHooked.delete(h);
+      continue;
+    }
+    const o = c.obj || (c.ref && c.ref.deref());
+    if (!o) { cache.delete(h); continue; }
+    const r = rb.root(h);
+    if (r === 1) {
+      if (!c.obj) { c.obj = o; c.ref = null; }
+      continue;
+    }
+    if (!c.obj) continue;
+    let t = trees.get(r);
+    if (!t) trees.set(r, t = []);
+    t.push(o);
+  }
+  if (trees.size) gcPasses = 3;
+  for (const [r, add] of trees) {
+    const gen = rb.gen(r);
+    const e = groups.get(r);
+    let grp = e && e.gen === gen ? e.ref.deref() : null;
+    if (!grp) {
+      grp = [];
+      const id = ++groupSeq;
+      groups.set(r, {gen, id, ref: new WeakRef(grp)});
+      groupReg.register(grp, {r, gen, id});
+    }
+    for (const o of add) {
+      grp.push(o);
+      Object.defineProperty(o, '__grp', {value: grp, writable: true, configurable: true, enumerable: false});
+      const c = cache.get(o.__h);
+      c.obj = null;
+      c.ref = new WeakRef(o);
+    }
+  }
+  trees.clear();                  /* it holds wrappers: let go before collecting */
+  if (gcPasses > 0 || force) {
+    if (gcPasses > 0) gcPasses--;
+    rb.gc();
+    releaseDead();
+    /* come back for the trees still waiting, whether the page has timers or not */
+    if (gcPasses > 0 && !sweepTimer) sweepTimer = addTimer(() => { sweepTimer = 0; sweep(); }, SWEEP_MS + 100, [], false);
+  }
+}
+function maybeSweep() { if (rb.now() >= sweepAt) sweep(); }
+/* A full engine table: collect now, but not again before 250 ms or 256 more
+   nodes/registrations (a page that really holds that much must not pay a
+   collection on every call). */
+let forcedAt = -1e9, madeSinceForced = 0;
+function sweepForced() {
+  const now = rb.now();
+  if (now - forcedAt < 250 && madeSinceForced < 256) return false;
+  forcedAt = now;
+  madeSinceForced = 0;
+  sweep(true);
+  return true;
+}
+/* Out of engine nodes: collect what scripts dropped, then try again. */
+const NODES_NEARLY_FULL = 16384 - 256;
+function retryOnFull(f) {
+  return function (...a) {
+    let r = f.apply(rb, a);
+    if (!r && rb.liveNodes() >= NODES_NEARLY_FULL && sweepForced()) r = f.apply(rb, a);
+    if (r) madeSinceForced++;
+    return r;
+  };
+}
+for (const name of ['create', 'createText', 'setText', 'setHtml', 'adjHtml']) rb[name] = retryOnFull(rb[name]);
 
 function handle(x) {
   if (x == null) return 0;
@@ -182,7 +334,7 @@ function nativeEvent(type, target) {
 }
 
 function invoke(node, ev, capture) {
-  const m = node === global ? windowListeners : listeners.get(node.__h);
+  const m = node === global ? windowListeners : hiddenGet(node, '__ls');
   const arr = m && m.get(ev.type);
   ev.currentTarget = node;
   if (arr) {
@@ -198,7 +350,7 @@ function invoke(node, ev, capture) {
     if (ev.__stopImm) break;
   }
   }
-  const on = node === global ? global['on' + ev.type] : handlerProps.get(node) && handlerProps.get(node)[ev.type];
+  const on = node === global ? global['on' + ev.type] : hiddenGet(node, '__on') && hiddenGet(node, '__on')[ev.type];
   if (!capture && typeof on === 'function' && !ev.__stopImm) {
     try {
       if (on.call(node, ev) === false) ev.preventDefault();
@@ -222,6 +374,7 @@ global.__rb_fire = function (type, target, current, capture) {
     invoke(global, ev, false);
   }
   if (inlineStale) bindInlineHandlers();
+  maybeSweep();
 };
 
 function jsDispatch(target, ev) {
@@ -252,20 +405,22 @@ const windowListeners = new Map();
 
 function listenerMap(node, create) {
   if (node === global) return windowListeners;
-  const h = node.__h;
-  let m = listeners.get(h);
-  if (!m && create) { m = new Map(); listeners.set(h, m); }
-  return m;
+  return create ? hidden(node, '__ls') : hiddenGet(node, '__ls');
 }
 
 function hookNative(node, type, capture) {
   const h = node === global ? 1 : node.__h;
-  const key = h + ':' + type + ':' + capture;
-  if (!nativeHooked.has(key) && rb.listen(h, type, capture ? 1 : 0)) nativeHooked.add(key);
+  const key = type + ':' + capture, gen = rb.gen(h);
+  let k = nativeHooked.get(h);
+  if (!k || k.gen !== gen) nativeHooked.set(h, k = {gen, keys: new Set()});
+  if (k.keys.has(key)) return;
+  let r = rb.listen(h, type, capture ? 1 : 0);
+  /* table full: released nodes give their registrations back */
+  if (r < 0 && sweepForced()) r = rb.listen(h, type, capture ? 1 : 0);
+  if (r > 0) { k.keys.add(key); madeSinceForced++; }
 }
 
 /* el.onclick = fn style handlers. */
-const handlerProps = new WeakMap();
 const EVENT_PROPS = ['click', 'dblclick', 'mousedown', 'mouseup', 'mouseover', 'mouseout', 'mousemove',
   'mouseenter', 'mouseleave', 'input', 'change', 'submit', 'reset', 'focus', 'blur', 'keydown', 'keyup',
   'keypress', 'scroll', 'load', 'error', 'abort', 'contextmenu', 'wheel', 'touchstart', 'touchend',
@@ -445,10 +600,9 @@ class Node extends EventTarget {
 for (const t of EVENT_PROPS) {
   Object.defineProperty(Node.prototype, 'on' + t, {
     configurable: true,
-    get() { const m = handlerProps.get(this); return (m && m[t]) || null; },
+    get() { const m = hiddenGet(this, '__on'); return (m && m[t]) || null; },
     set(fn) {
-      let m = handlerProps.get(this);
-      if (!m) { m = {}; handlerProps.set(this, m); }
+      const m = hidden(this, '__on');
       m[t] = typeof fn === 'function' ? fn : null;
       if (m[t]) hookNative(this, t, false);
     },
@@ -465,12 +619,12 @@ function nodeList(arr) {
 }
 
 /* Does a script hold this node or anything inside it? Nodes only reach
-   scripts through wrap(), and every wrapper stays in the cache. */
+   scripts through wrap(); a live wrapper is in the cache, strongly or
+   weakly (see pinTree/sweep). */
 function held(root) {
   let n = root;
   for (;;) {
-    const c = cache.get(n);
-    if (c && c.gen === rb.gen(n)) return true;
+    if (liveWrapper(n)) return true;
     let k = rb.first(n);
     while (!k) {
       if (n === root) return false;
@@ -525,7 +679,6 @@ class Comment extends CharacterData {
 
 /* ---------------- Element ---------------- */
 
-const styleObjects = new WeakMap();
 
 function parseStyle(text) {
   const out = new Map();
@@ -545,7 +698,7 @@ function writeStyle(el, map) {
 }
 
 function styleFor(el) {
-  let st = styleObjects.get(el);
+  let st = hiddenGet(el, '__st');    /* a hidden property, not a WeakMap: see hidden() */
   if (st) return st;
   const api = {
     getPropertyValue(k) { return parseStyle(rb.getAttr(el.__h, 'style')).get(String(k).toLowerCase()) || ''; },
@@ -582,7 +735,7 @@ function styleFor(el) {
       return true;
     },
   });
-  styleObjects.set(el, st);
+  Object.defineProperty(el, '__st', {value: st, writable: true, configurable: true, enumerable: false});
   return st;
 }
 
@@ -2147,6 +2300,7 @@ global.queueMicrotask = fn => { Promise.resolve().then(fn); };
 /* Due timers in due order; one pass per tick, so an interval that is always
    late cannot starve the main loop. */
 global.__rb_tick = function (now) {
+  maybeSweep();
   const due = [...timers].filter(([, t]) => t.due <= now).sort((a, b) => a[1].due - b[1].due);
   for (const [id, t] of due) {
     if (!timers.has(id)) continue;
