@@ -8,6 +8,9 @@
          $Q/rjs.c $Q/rjs_dom.c $Q/rjs_canvas.c $Q/dom_prelude.c \
          src/rbrowse/canvas.c src/rbrowse/image.c src/stb/stb_image.c $T/font.c -lm -o /tmp/rbtest_js && /tmp/rbtest_js
 
+   clang >= 17 also reports upstream's benign js_realloc_rt cast in cutils.c
+   under -fsanitize=function; see src/quickjs/README.radiumos.
+
    (Regenerate dom_prelude.c first if dom_prelude.js changed:
     python3 tools/rbrowse/js2c.py src/quickjs/dom_prelude.js src/quickjs/dom_prelude.c rjs_dom_prelude)
 */

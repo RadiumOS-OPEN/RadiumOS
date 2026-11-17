@@ -1,0 +1,44 @@
+QuickJS in RadiumOS
+===================
+
+Upstream: QuickJS by Fabrice Bellard and Charlie Gordon, release 2026-06-04
+(see VERSION). The upstream files are kept as close to the release as
+possible so a newer release can be dropped in.
+
+Local changes to upstream files
+-------------------------------
+- quickjs.c: CONFIG_ATOMICS is not defined under __radiumos__ (the kernel
+  has no threads for Atomics.wait/notify).
+
+Everything else here is ours: rjs*.c / rjs*.h (embedding, DOM and canvas
+bindings), dom_prelude.js (+ the generated dom_prelude.c), and compat/
+(the freestanding libc, allocator and musl libm the kernel build uses).
+
+Known sanitizer report (upstream, benign, left alone)
+-----------------------------------------------------
+A host build with clang >= 17 and -fsanitize=undefined (which includes
+-fsanitize=function for C) reports, the first time a dynamic buffer grows or
+is freed:
+
+  cutils.c:119: runtime error: call to function js_realloc_rt through
+  pointer to incorrect function type 'void *(*)(void *, void *, unsigned long)'
+
+(also cutils.c:209 in dbuf_free.) The cause is upstream's
+
+  dbuf_init2(s, ctx->rt, (DynBufReallocFunc *)js_realloc_rt);
+
+in js_dbuf_init and js_string_normalize (quickjs.c): js_realloc_rt takes a
+JSRuntime * where DynBufReallocFunc takes a void *. The call is formally
+undefined in ISO C, but both are plain data pointers passed identically by
+every ABI QuickJS targets (i386 cdecl included), the RadiumOS kernel is not
+built with control-flow integrity, and upstream has carried the cast for
+years. It is not a bug in our code; none of rjs*.c casts function pointers.
+
+To keep the host test runs quiet without patching upstream, compile cutils.c
+(the call site) without that one check, e.g.
+
+  clang ... -fno-sanitize=function -c src/quickjs/cutils.c
+
+With that, tools/rbrowse/test_js.c and test_canvas.c run clean under
+-fsanitize=address,undefined (Homebrew clang 22, 2026-11). Apple clang 21
+does not enable the check for C and reports nothing.
