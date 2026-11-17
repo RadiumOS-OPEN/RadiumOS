@@ -650,29 +650,37 @@ static void test_form_forms_and_scopes(void) {
     CHECK(strcmp(out, "https://example.com/?q=1") == 0);
 }
 
-static void test_form_post_unsupported(void) {
-    char nav[256];
+static void test_form_post(void) {
+    char nav[256], body[256];
     const char *post =
-        "<form action=\"/do\" method=\"POST\"><input name=\"q\" value=\"x\">"
-        "<input type=\"submit\"></form>";
+        "<form action=\"/do#frag\" method=\"POST\"><input name=\"q\" value=\"x y&z\">"
+        "<input type=\"hidden\" name=\"h\" value=\"1\"><input type=\"submit\" name=\"go\" value=\"Go\"></form>";
     rb_open(post, (int)strlen(post));
     int submit = control_at(1);
     CHECK(submit > 0);
     CHECK(rb_form_post(submit) == 1);
     CHECK(rb_form_post(rb_focus_node(0)) == 1);
-    /* Refused: no navigation queued, activation stays a no-op. */
-    CHECK(rb_activate(submit) == 0);
-    CHECK(!rb_take_nav(nav, (int)sizeof(nav)));
-    CHECK(rb_activate(rb_focus_node(0)) == 0);
-    CHECK(!rb_take_nav(nav, (int)sizeof(nav)));
+    /* The submit button: URL is the action (no query, no fragment), the
+       controls (the activated button included) travel in the body. */
+    CHECK(rb_activate(submit) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(strcmp(nav, "/do") == 0);
+    CHECK(rb_nav_body(body, (int)sizeof(body)) == 21);
+    CHECK(strcmp(body, "q=x%20y%26z&h=1&go=Go") == 0);
+    /* Read once. */
+    CHECK(rb_nav_body(body, (int)sizeof(body)) == -1);
+    /* Enter in the field: same body without the button. */
+    CHECK(rb_activate(rb_focus_node(0)) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(strcmp(nav, "/do") == 0);
+    CHECK(rb_nav_body(body, (int)sizeof(body)) == 15 && strcmp(body, "q=x%20y%26z&h=1") == 0);
 
-    rb_open("<form action=\"/do\" method=\"post\"><input name=\"q\" value=\"x\">"
-            "<input type=\"submit\"></form>", (int)strlen(
-            "<form action=\"/do\" method=\"post\"><input name=\"q\" value=\"x\">"
-            "<input type=\"submit\"></form>"));
-    CHECK(rb_form_post(control_at(1)) == 1);
+    /* Truncation reports the full length. */
+    CHECK(rb_activate(submit) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(rb_nav_body(body, 5) == 21 && strcmp(body, "q=x%") == 0);
 
-    /* Explicit get keeps submitting. */
+    /* A GET navigation afterwards has no body. */
     rb_open("<form action=\"/do\" method=\"get\"><input name=\"q\" value=\"x\">"
             "<input type=\"submit\"></form>", (int)strlen(
             "<form action=\"/do\" method=\"get\"><input name=\"q\" value=\"x\">"
@@ -681,6 +689,30 @@ static void test_form_post_unsupported(void) {
     CHECK(rb_activate(control_at(1)) == 2);
     CHECK(rb_take_nav(nav, (int)sizeof(nav)));
     CHECK(strcmp(nav, "/do?q=x") == 0);
+    CHECK(rb_nav_body(body, (int)sizeof(body)) == -1);
+
+    /* No action: the current document, spelled "#". An empty form posts an
+       empty body. */
+    rb_open("<form method=post><input type=submit></form>",
+            (int)strlen("<form method=post><input type=submit></form>"));
+    CHECK(rb_activate(control_at(0)) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(strcmp(nav, "#") == 0);
+    CHECK(rb_nav_body(body, (int)sizeof(body)) == 0 && body[0] == 0);
+
+    /* A body larger than RB_NAV_BODY_MAX is not sent truncated. */
+    {
+        static char big[RB_NAV_BODY_MAX * 2];
+        int w = 0;
+        w += snprintf(big + w, sizeof(big) - w, "<form action=/b method=post>");
+        for (int i = 0; i < 60; i++)
+            w += snprintf(big + w, sizeof(big) - w,
+                          "<input type=hidden name=f%d value=\"%0200d\">", i, 0);
+        w += snprintf(big + w, sizeof(big) - w, "<input type=submit></form>");
+        rb_open(big, w);
+        CHECK(rb_activate(control_at(0)) == 0);
+        CHECK(!rb_take_nav(nav, (int)sizeof(nav)));
+    }
 }
 
 /* Field policy: disabled controls are untabbable and unsubmitted; reset and
@@ -788,12 +820,17 @@ static void test_unquoted_attrs(void) {
     CHECK(strcmp(nav, "/search?ie=ISO-8859-1&q=cats%20%26%20dogs") == 0);
 
     /* A later unquoted attribute must still be parsed: unquoted method=post
-       is seen, so submission is refused. */
+       is seen, so the submission carries a body instead of a query. */
     rb_open("<form action=/s method=post><input name=q><input type=submit></form>",
             (int)strlen("<form action=/s method=post><input name=q><input type=submit></form>"));
     CHECK(rb_form_post(rb_focus_node(1)) == 1);
-    CHECK(rb_activate(rb_focus_node(1)) == 0);
-    CHECK(!rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(rb_activate(rb_focus_node(1)) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(strcmp(nav, "/s") == 0);
+    {
+        char body[64];
+        CHECK(rb_nav_body(body, (int)sizeof(body)) == 2 && strcmp(body, "q=") == 0);
+    }
 
     /* Plain links with unquoted href work again. */
     rb_open("<a href=/x>go</a>", (int)strlen("<a href=/x>go</a>"));
@@ -1523,8 +1560,8 @@ static void test_ev_active_recycle(void) {
     CHECK(rb_dom_is_focusable(n) == 1);
 }
 
-/* RB_EV_SUBMIT on a form: default action navigates (GET only), prevent
-   suppresses it, and a post form stays a silent no-op. */
+/* RB_EV_SUBMIT on a form: default action navigates, prevent suppresses it,
+   and a post form queues its body. */
 static void test_ev_submit_event(void) {
     char nav[64];
     const char *html =
@@ -1546,8 +1583,10 @@ static void test_ev_submit_event(void) {
     rb_open("<form id=\"fm\" method=post action=\"/s\"><input name=q></form>",
             (int)strlen("<form id=\"fm\" method=post action=\"/s\"><input name=q></form>"));
     fm = rb_find_id("fm");
-    CHECK(rb_dispatch(fm, RB_EV_SUBMIT) == 0);
-    CHECK(!rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(rb_dispatch(fm, RB_EV_SUBMIT) == 2);
+    CHECK(rb_take_nav(nav, (int)sizeof(nav)));
+    CHECK(strcmp(nav, "/s") == 0);
+    CHECK(rb_nav_body(nav, (int)sizeof(nav)) == 2 && strcmp(nav, "q=") == 0);
 }
 
 /* --- event payload (rb_dispatch_ex / rb_event_key|x|y|button) --- */
@@ -4200,7 +4239,7 @@ int main(void) {
     test_form_submit();
     test_form_action_variants();
     test_form_forms_and_scopes();
-    test_form_post_unsupported();
+    test_form_post();
     test_form_field_policy();
     test_unquoted_attrs();
     test_named_entities();

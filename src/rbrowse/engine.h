@@ -197,6 +197,13 @@ int rb_click(int x, int y);
 /* 0 unchanged, 1 document mutated, 2 navigation queued. */
 int rb_activate(int node);
 int rb_take_nav(char *out, int cap);
+/* Call right after rb_take_nav returned 1: the navigation's POST body
+   (application/x-www-form-urlencoded, from a method=post form) is copied
+   into out (NUL-terminated, truncated to cap - 1) and its full length is
+   returned; -1 when it is a plain GET. A POST to the current document (empty
+   action) has the URL "#". Reading clears it. */
+#define RB_NAV_BODY_MAX 8192
+int rb_nav_body(char *out, int cap);
 int rb_type_char(int node, char ch);
 int rb_backspace(int node);
 int rb_is_field(int node);
@@ -235,9 +242,8 @@ int rb_debug_box(int node, int *x, int *y, int *w, int *h);
    memo, misses from real scans. 0 both when no layout has run since reset. */
 int rb_style_stats(int *hits, int *misses);
 
-/* 1 when the node's nearest <form> ancestor declares method="post". The
-   engine refuses to submit POST forms, so callers use this to explain why
-   rb_activate did nothing. */
+/* 1 when the node's nearest <form> ancestor declares method="post": its
+   submission queues a navigation with a body (rb_nav_body). */
 int rb_form_post(int node);
 
 /* --- mutable tree ---

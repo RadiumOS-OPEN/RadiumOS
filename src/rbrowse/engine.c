@@ -205,7 +205,7 @@ typedef struct {
     uint8_t preserve;
     uint8_t input_btn;
     uint8_t hidden;
-    uint8_t method_post;    /* <form method="post">: submission unsupported */
+    uint8_t method_post;    /* <form method="post">: submits a urlencoded body */
     uint8_t disabled;       /* disabled attribute: not focusable, not submitted */
     uint8_t checked;        /* checked attribute on a checkbox/radio */
     uint8_t ctl;            /* RB_CTL_* classification of <input type> */
@@ -311,6 +311,10 @@ static char g_fold[RAW_MAX];
 static char g_title[80];
 static char g_nav[480];
 static int g_nav_len;
+/* The POST body of the queued navigation (urlencoded form data), or -1 when
+   it is a GET. set_nav resets it, so it always belongs to g_nav. */
+static char g_nav_body[RB_NAV_BODY_MAX];
+static int g_nav_body_len = -1;
 static int g_page_h;
 static int g_page_bg;
 static int g_stop;
@@ -3396,6 +3400,7 @@ static void set_nav(const char *s, int n) {
     if (n > 0) memcpy(g_nav, s, (size_t)n);
     g_nav[n] = 0;
     g_nav_len = n;
+    g_nav_body_len = -1;
 }
 
 static int run_one(const char *start, const char *e) {
@@ -3625,6 +3630,7 @@ static void reset_doc(void) {
     g_lay_pool_hi = -1;
     g_nav_len = 0;
     g_nav[0] = 0;
+    g_nav_body_len = -1;
     g_title[0] = 0;
     g_script_n = 0;
     g_tn_n = 0;
@@ -4270,14 +4276,13 @@ int rb_activate(int node) {
     /* Activation is a CLICK dispatch with the Enter semantics below: disabled
        form controls do not fire their handler and cannot submit; an inline
        onclick runs as a bubble handler at the node; <a href> queues nav; and
-       a control submits its nearest GET form (a text field press included —
+       a control submits its nearest form (a text field press included —
        the UI routes mouse clicks on fields to focus without coming here). */
     return dispatch_ev(node, RB_EV_CLICK, 1, 0);
 }
 
-/* 1 when the node's nearest <form> ancestor declares method="post". The engine
-   refuses such submissions, so callers can turn the silent rb_activate no-op
-   into a status message. */
+/* 1 when the node's nearest <form> ancestor declares method="post" (its
+   submission queues a navigation with a body: rb_nav_body). */
 int rb_form_post(int node) {
     if (node <= 0 || node >= g_node_n || g_nodes[node].dead) return 0;
     int form = form_of(node);
@@ -4302,6 +4307,16 @@ int rb_take_nav(char *out, int cap) {
     g_nav_len = 0;
     g_nav[0] = 0;
     return 1;
+}
+
+int rb_nav_body(char *out, int cap) {
+    int n = g_nav_body_len;
+    g_nav_body_len = -1;
+    if (n < 0 || !out || cap <= 0) return -1;
+    int k = n < cap - 1 ? n : cap - 1;
+    if (k > 0) memcpy(out, g_nav_body, (size_t)k);
+    out[k] = 0;
+    return n;
 }
 
 int rb_is_field(int node) {
@@ -4404,10 +4419,15 @@ static void pct_append(char *out, int cap, int *w, const char *s, int n) {
 
 /* Append "name=value", percent-encoded, to the query string under construction.
    The first pair is joined with qmark ('?' or '&' when the action already has a
-   query); later pairs always use '&'. */
+   query; 0 for a POST body, which starts with the pair); later pairs always
+   use '&'. */
 static void form_pair(const char *name, int nlen, const char *val, int vlen,
                       char *out, int cap, int *w, int *used, int qmark) {
-    if (*w + 1 < cap) out[(*w)++] = *used ? '&' : (char)qmark;
+    if (*used) {
+        if (*w + 1 < cap) out[(*w)++] = '&';
+    } else if (qmark && *w + 1 < cap) {
+        out[(*w)++] = (char)qmark;
+    }
     *used = 1;
     pct_append(out, cap, w, name, nlen);
     if (*w + 1 < cap) out[(*w)++] = '=';
@@ -4451,8 +4471,11 @@ static void form_walk(int node, int submitter, int qmark,
 /* Build the GET URL for a form submit: action + '?' + encoded controls.
    The engine has no base URL, so an absent/empty action yields "?query" and
    the caller resolves it against the current page (rb_resolve keeps the base
-   path for query-only links). POST forms never reach this (rb_activate
-   refuses them). */
+   path for query-only links).
+   A POST form queues its action as the URL ("#" when it is empty: the
+   current document, which rb_resolve cannot express) and the encoded
+   controls as the body (rb_nav_body). A body that would not fit in
+   RB_NAV_BODY_MAX is not sent at all. */
 static int submit_build(int form, int submitter) {
     char out[512];
     int w = 0;
@@ -4464,6 +4487,19 @@ static int submit_build(int form, int submitter) {
         alen = g_nodes[form].action_len;
     }
     for (int i = 0; i < alen; i++) if (action[i] == '#') { alen = i; break; }
+    if (g_nodes[form].method_post) {
+        static char body[RB_NAV_BODY_MAX + 4];
+        int bw = 0, bused = 0;
+        body[0] = 0;
+        form_walk(form, submitter, 0, body, (int)sizeof(body), &bw, &bused);
+        if (bw > RB_NAV_BODY_MAX) return 0;
+        while (alen > 0 && (action[0] == ' ' || action[0] == '\t')) { action++; alen--; }
+        if (alen <= 0) set_nav("#", 1);
+        else set_nav(action, alen);
+        memcpy(g_nav_body, body, (size_t)bw);
+        g_nav_body_len = bw;
+        return 1;
+    }
     int qmark = '?';
     for (int i = 0; i < alen; i++) if (action[i] == '?') { qmark = '&'; break; }
     append_n(out, (int)sizeof(out), &w, action, alen);
@@ -4480,9 +4516,6 @@ static int submit_build(int form, int submitter) {
    (a removed form) falls back to building here. */
 static int submit_form(int form, int submitter) {
     if (form <= 0 || form >= g_node_n || g_nodes[form].dead) return 0;
-    /* A POST form is refused outright: no event, no navigation (same policy as
-       the click/Enter guards, kept here so the fallback cannot build one). */
-    if (g_nodes[form].method_post) return 0;
     int prev_form = g_submit_form;
     int prev_sub = g_submit_submitter;
     int nav0 = g_nav_len;
@@ -6429,8 +6462,8 @@ static void ev_radio_clear(int node) {
    rb_activate contract (2 nav > 1 mutation > 0).
 
    enter selects the historical Enter path: a field (text input or textarea)
-   or a button-like control submits its nearest GET form, a post form stays
-   a silent no-op (rb_form_post explains it), button/reset never submit.
+   or a button-like control submits its nearest form (GET builds the URL,
+   POST also the body: rb_nav_body), button/reset never submit.
    A plain public click instead focuses fields; submit/image inputs and
    bare <button>s submit. Checkbox clicks toggle, radios pick one of their
    same-name group (new behaviour: these used to be no-ops). */
@@ -6441,7 +6474,7 @@ static int ev_default_action(int target, int type, int enter, int carried) {
     Node *n = &g_nodes[target];
     int r = carried;
     if (type == RB_EV_SUBMIT) {
-        if (n->tag != RB_TAG_FORM || n->method_post) return r;
+        if (n->tag != RB_TAG_FORM) return r;
         /* submit_form pre-set the pending form+submitter, so the URL is built
            here (after the listeners ran) rather than inside submit_form; that
            keeps a single build per submission. A direct rb_dispatch(fm,
@@ -6494,8 +6527,7 @@ static int ev_default_action(int target, int type, int enter, int carried) {
             if (ctl == RB_CTL_BUTTON || ctl == RB_CTL_RESET ||
                 ctl == RB_CTL_CHECKBOX || ctl == RB_CTL_RADIO) return r;
             int form = form_of(target);
-            if (form && !g_nodes[form].method_post &&
-                submit_form(form, target) && r < 2) r = 2;
+            if (form && submit_form(form, target) && r < 2) r = 2;
             return r;
         }
         return r;
@@ -6512,8 +6544,7 @@ static int ev_default_action(int target, int type, int enter, int carried) {
         submit_click = 1;   /* bare <button> defaults to type=submit */
     if (submit_click) {
         int form = form_of(target);
-        if (form && !g_nodes[form].method_post &&
-            submit_form(form, target) && r < 2) r = 2;
+        if (form && submit_form(form, target) && r < 2) r = 2;
     }
     return r;
 }
