@@ -419,6 +419,7 @@ class Node extends EventTarget {
   }
   replaceChildren(...nodes) {
     detachChildren(this.__h);
+    if (rb.first(this.__h)) rb.setHtml(this.__h, '');   /* the children nobody holds */
     this.append(...nodes);
   }
   get children() { return children(this.__h, true); }
@@ -458,12 +459,35 @@ function nodeList(arr) {
   return arr;
 }
 
+/* Does a script hold this node or anything inside it? Nodes only reach
+   scripts through wrap(), and every wrapper stays in the cache. */
+function held(root) {
+  let n = root;
+  for (;;) {
+    const c = cache.get(n);
+    if (c && c.gen === rb.gen(n)) return true;
+    let k = rb.first(n);
+    while (!k) {
+      if (n === root) return false;
+      k = rb.next(n);
+      if (!k) n = rb.parent(n);
+    }
+    n = k;
+  }
+}
+
 /* Replacing an element's content in the engine recycles the old children,
-   but scripts may still hold them (jQuery moves them right back): detach
-   first so they stay valid. Text nodes have no children to save. */
+   but scripts may still hold them (jQuery moves them right back): those are
+   detached first so they stay valid. A child no script has ever seen is
+   left for the engine to recycle: detaching it too kept every old node
+   alive, and a page that sets textContent or innerHTML in a timer ran out
+   of nodes after a few thousand updates. Text nodes have no children. */
 function detachChildren(h) {
   if (rb.isText(h)) return;
-  for (let c = rb.first(h); c; c = rb.first(h)) if (!rb.detach(c)) break;
+  for (let c = rb.first(h), n; c; c = n) {
+    n = rb.next(c);
+    if (held(c) && !rb.detach(c)) break;
+  }
 }
 
 function toNode(n) {

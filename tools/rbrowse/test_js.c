@@ -260,6 +260,25 @@ int main(void) {
            "hold.textContent = ''; var dst = document.createElement('div'); kids.forEach(k => dst.appendChild(k)); dst.innerHTML", "<b>1</b><i>2</i>");
     EXPECT("var k2 = dst.firstChild; dst.innerHTML = 'x'; hold.appendChild(k2); hold.innerHTML", "<b>1</b>");
 
+    /* ...while content no script ever looked at is recycled: a page that
+       rewrites textContent or innerHTML in a timer must not run out of
+       nodes (16384) however long it runs */
+    {
+        int before = rb_debug_stat(0);
+        EXPECT("var live = document.createElement('div'); document.body.appendChild(live); var bad = -1;"
+               "for (var i = 0; i < 40000 && bad < 0; i++) { live.textContent = 'tick ' + i; if (live.textContent !== 'tick ' + i) bad = i; }"
+               "for (var i = 0; i < 20000 && bad < 0; i++) { live.innerHTML = '<span>n <b>' + i + '</b></span>';"
+               "  if (live.innerHTML !== '<span>n <b>' + i + '</b></span>') bad = i; } bad", "-1");
+        if (rb_debug_stat(0) - before > 64) { printf("FAIL: %d nodes leaked by content updates\n", rb_debug_stat(0) - before); g_fail++; }
+        else g_pass++;
+    }
+    /* a held node deep inside keeps its whole branch; its unseen siblings go */
+    EXPECT("live.innerHTML = '<p><em id=deep>k</em></p><i>gone</i>'; var deep = live.querySelector('#deep'); live.textContent = 'x';"
+           "[deep.textContent, deep.parentNode.tagName, deep.isConnected, live.innerHTML].join()", "k,P,false,x");
+    EXPECT("live.innerHTML = '<b>1</b><i>2</i><u>3</u>'; var keepI = live.children[1], nu = document.createElement('s');"
+           "live.replaceChildren(nu, keepI); live.innerHTML", "<s></s><i>2</i>");
+    EXPECT("live.replaceChildren(); live.childNodes.length", "0");
+
     /* detached documents never touch the page */
     EXPECT("var before = document.body.children.length; var d2 = document.implementation.createHTMLDocument('');"
            "d2.body.innerHTML = '<form></form><form></form>'; d2.body.childNodes.length + ',' + (document.body.children.length === before)", "2,true");
