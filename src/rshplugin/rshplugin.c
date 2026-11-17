@@ -38,6 +38,7 @@
 // These are the symbols exported by the Rust script engine via #[no_mangle].
 extern void script_reset_flags_ctx(void *ctx);
 extern void  script_init_ctx    (void *ctx);
+extern unsigned int rsh_ctx_size(void);
 extern int   exec_file_ctx      (const char *path, void *ctx);
 extern int   call_function_ctx  (const char *name, const char **args, int argc, void *ctx);
 extern void  script_set_var_ctx (const char *name, const char *val,  void *ctx);
@@ -65,23 +66,25 @@ static char *_itoa_local  (int n, char *buf, int bufsz);
 // =============================================================================
 // SCRIPT CONTEXT POOL
 //
-// Each plugin needs its own ScriptCtx (~178 KB) so their variables and
+// Each plugin needs its own ScriptCtx (see rsh_ctx_size()) so their variables and
 // function tables don't collide.  We allocate them statically here.
 //
 // ScriptCtx is defined in the Rust crate; we only need its SIZE in C.
-// The size is stable (it's all fixed arrays, no heap).  If you change
-// the Rust constants you must update RSH_CTX_SIZE_BYTES below.
+// The size is stable (it's all fixed arrays, no heap).  The Rust side
+// asserts size_of::<ScriptCtx>() <= RSH_CTX_MAX_BYTES at compile time and
+// exports rsh_ctx_size(); rsh_plugin_load() refuses to run if the real size
+// exceeds RSH_CTX_SIZE_BYTES.  Keep RSH_CTX_SIZE_BYTES == RSH_CTX_MAX_BYTES.
 //
 // Size breakdown (from the Rust source comment at the top of rsh_engine.rs):
 //   FUNC_BODY_POOL  [Line; 3072]      = 786,432 bytes  (external static, not in ctx)
-//   GLOBAL_CTX      ScriptCtx         = ~178,000 bytes  (our target)
+//   GLOBAL_CTX      ScriptCtx         = rsh_ctx_size() bytes  (our target)
 //   LINES_D0..D3    [Line; 1000] × 4  = 1,024,000 bytes (external, not in ctx)
 //   FBUF_D0..D3     [u8; 32768] × 4   = 131,072 bytes   (external, not in ctx)
 //
-// ScriptCtx alone is ~178 KB.  16 plugins × 178 KB = ~2.8 MB total.
-// That is tight on a 4 MB kernel heap; trim RSH_MAX_PLUGINS if needed.
+// The pool is RSH_MAX_PLUGINS × RSH_CTX_SIZE_BYTES of BSS (16 x 352 KB = 5.5 MiB).
+// Trim RSH_MAX_PLUGINS if that is too much.
 // =============================================================================
-#define RSH_CTX_SIZE_BYTES  234496
+#define RSH_CTX_SIZE_BYTES  360448
 // Statically allocate a pool of script contexts.
 // __attribute__((aligned(64))) ensures the Rust-side atomics are happy.
 static unsigned char g_ctx_pool[RSH_MAX_PLUGINS][RSH_CTX_SIZE_BYTES]
@@ -174,6 +177,11 @@ RshPlugin *rsh_plugin_load(const char *path) {
         print("[rsh] plugin table full (max ");
         _print_int(RSH_MAX_PLUGINS);
         print(")\n");
+        return (void *)0;
+    }
+
+    if (rsh_ctx_size() > RSH_CTX_SIZE_BYTES) {
+        print("[rsh] plugin load: ScriptCtx is larger than the context pool slot\n");
         return (void *)0;
     }
 
