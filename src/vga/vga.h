@@ -128,6 +128,10 @@ uint16_t vga_entry(unsigned char uc, uint8_t color);
 // ===== WINDOW MANAGEMENT =====
 vga_window_t vga_create_window(int x, int y, int w, int h, enum vga_color fg, enum vga_color bg);
 vga_window_t vga_create_centered_window(int w, int h, enum vga_color fg, enum vga_color bg);
+// Same, but w x h is a size designed for 80x25 and grows with the screen (see scaler.h).
+vga_window_t vga_create_scaled_window(int w, int h, enum vga_color fg, enum vga_color bg);
+// Covers the whole window grid (scaler_win_cols() x scaler_win_rows()); read width/height from the result.
+vga_window_t vga_create_fullscreen_window(enum vga_color fg, enum vga_color bg);
 void vga_destroy_window(vga_window_t* win);
 void vga_win_clear(vga_window_t* win);
 void vga_win_refresh(vga_window_t* win);

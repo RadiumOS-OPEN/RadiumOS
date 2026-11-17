@@ -1,0 +1,21 @@
+// mod: Crosshair in the middle of the view
+include "/disk/mods/doom.hls";
+
+fn dot(x: int, y: int, c: int) {
+    wr(mod_screen() + (y * 320 + x) * 4, c);
+}
+
+fn main() {
+    if mod_frame() >= 0 {
+        if in_level() == 1 {
+            let cx = api(A_VIEWX) + api(A_VIEWW) / 2;
+            let cy = api(A_VIEWY) + api(A_VIEWH) / 2;
+            for i in 2..7 {
+                dot(cx - i, cy, 0x40FF40);
+                dot(cx + i, cy, 0x40FF40);
+                dot(cx, cy - i, 0x40FF40);
+                dot(cx, cy + i, 0x40FF40);
+            }
+        }
+    }
+}

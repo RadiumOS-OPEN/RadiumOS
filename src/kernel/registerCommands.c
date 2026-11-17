@@ -1,3 +1,4 @@
+#include "../commands/guard.h"
 #include "../errors/error.h"
 #include "../terminal/terminal.h"
 #include "../vga/vga.h"
@@ -16,6 +17,32 @@
 #include "../commands/text.h"
 #include "../commands/meow.h"
 #include "../commands/rm.h"
+#include "../commands/mv.h"
+#include "../commands/fileutils.h"
+#include "../commands/sysutils.h"
+#include "../commands/shellvars.h"
+#include "../commands/moreutils.h"
+#include "../shell/shsyntax.h"
+#include "../commands/apprun.h"
+#include "../commands/bootpage.h"
+#include "../commands/anim.h"
+#include "../commands/fsapp.h"
+#include "../games/pong.h"
+#include "../vga/scaler.h"
+#include "../commands/rsd.h"
+#include "../commands/update.h"
+#include "../commands/discord.h"
+#include "../user/sudo.h"
+#include "../user/users.h"
+#include "../commands/fsck.h"
+#include "../commands/crypt.h"
+#include "../commands/selftest.h"
+#include "../commands/reboot.h"
+#include "../timers/date.h"
+#include "../timers/timer.h"
+#include "../memory/pmm.h"
+#include <stdbool.h>
+#include "../commands/textfilters.h"
 #include "../commands/cat.h"
 #include "../commands/settings.h"
 #include "../commands/ls.h"
@@ -26,6 +53,14 @@
 #include "../commands/cd.h"
 #include "../commands/text.h"
 #include "../commands/gfxtest.h"
+#include "../commands/diskpart.h"
+#include "../commands/sysops.h"
+#include "../commands/secure.h"
+#include "../commands/ytm.h"
+#include "../commands/vkdemo.h"
+#include "../commands/doomport.h"
+#include "../commands/desktop.h"
+
 
 #include <stdint.h>
 
@@ -52,6 +87,8 @@ extern int32_t  rust_killall_tasks(void);
 extern int rust_send_ntfy_notification(const uint8_t *message);
 extern int rust_ntfy_post_complete(const uint8_t *message, uint32_t message_len);
 extern int rust_image_editor(void);
+extern int rust_mp4_play_file(const char *path);
+extern int rust_mp4_test_audio(void);
 extern int rust_render_test_png(void);
 extern int rust_load_and_render_png(const char *filename, int x, int y);
 
@@ -167,6 +204,30 @@ static void join_args(char *dest, int dest_size, char **argv, int start, int arg
             dest[offset++] = argv[i][j];
     }
     dest[offset] = '\0';
+}
+
+extern int rust_mp4_play_file_ex(const char *path_or_args, const char *args);
+
+void cmd_mp4(int argc, char *argv[]) {
+    if (argc < 2) {
+        // Pass empty string or handle help trigger
+        rust_mp4_play_file_ex("", "");
+        return;
+    }
+    if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        rust_mp4_play_file_ex("--help", "");
+        return;
+    }
+    if (strcmp(argv[1], "--test-audio") == 0 || strcmp(argv[1], "-testaudio") == 0) {
+        rust_mp4_test_audio();
+        return;
+    }
+
+    // Combine all arguments starting from argv[1] into a single space-separated string
+    char arg_string[256];
+    join_args(arg_string, sizeof(arg_string), argv, 1, argc);
+    
+    rust_mp4_play_file_ex(arg_string, "");
 }
 
 // ============================================================
@@ -459,13 +520,24 @@ void kill_command(int argc, char *argv[])
 
 void top_command(int argc, char *argv[])
 {
-    terminal_setcolor(VGA_COLOR_LIGHT_CYAN);
-    print("=== RadiumOS Task Monitor ===\n\n");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
-    print("Active Tasks: "); print_integer(rust_get_task_count());
-    terminal_setcolor(VGA_COLOR_WHITE);
-    rust_list_tasks();
-    print("\nPress any key to return...\n");
+    bool batch = argc > 1 && strcmp(argv[1], "-b") == 0;
+    for (;;) {
+        if (!batch) terminal_clear();
+        uint32_t days, hours, mins, secs, ms;
+        get_uptime_precise(&days, &hours, &mins, &secs, &ms);
+        terminal_setcolor(VGA_COLOR_LIGHT_CYAN);
+        print("=== RadiumOS Task Monitor ===\n");
+        terminal_setcolor(VGA_COLOR_LIGHT_GREEN);
+        printr("up %u:%02u:%02u   tasks %u   memory %u of %u MB used\n\n", hours + days * 24, mins, secs, rust_get_task_count(),
+               (uint32_t)((pmm_get_total_memory() - pmm_get_free_memory()) >> 20), (uint32_t)(pmm_get_total_memory() >> 20));
+        terminal_setcolor(VGA_COLOR_WHITE);
+        rust_list_tasks();
+        if (batch) return;
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY);
+        print("\nRefreshing every 2 seconds - press any key to quit\n");
+        terminal_setcolor(VGA_COLOR_WHITE);
+        if (fs_wait(2000)) break;
+    }
 }
 
 // ============================================================
@@ -534,6 +606,8 @@ void cmd_png(int argc, char *argv[]) {
     }
     rust_load_and_render_png(argv[1], 0, 0);
 }
+
+
 
 // ============================================================
 // Network commands
@@ -884,19 +958,123 @@ void registerCommands(void)
     register_command("rpkg", "Radium Package Manager", cmd_rpkg);
     register_command("rie",       "Rust image editor",              rie);
     register_command("png",       "Render PNG (Mode 13h)",          cmd_png);
+    register_command("mp4",       "Play local H.264/AAC MP4",       cmd_mp4);
+    register_command("diskpart", "Disk partition management", diskpart_command);
     register_command("help",      "Displays this message",          help_command);
     register_command("ls",        "List directory",                 ls_command);
     register_command("cat",       "Read text file",                 cat_command);
     register_command("rm",        "Remove file",                    rm_command);
+    register_command("mv",        "Move or rename files",           mv_command);
+    register_command("cp",        "Copy files and directories",     cp_command);
+    register_command("mkdir",     "Create directories",             mkdir_command);
+    register_command("touch",     "Create empty files",             touch_command);
+    register_command("pwd",       "Print working directory",        pwd_command);
+    register_command("which",     "Locate a command",               which_command);
+    register_command("export",     "Set an environment variable",    export_command);
+    register_command("unset",      "Remove an environment variable", unset_command);
+    register_command("env",        "List environment variables",     env_command);
+    register_command("alias",      "Define a command alias",         alias_command);
+    register_command("unalias",    "Remove a command alias",         unalias_command);
+    register_command("history",    "Show command history",           history_command);
+    register_command("rrc",        "Run the startup script (.radiumrc)", rrc_command);
+    register_command("sudo",       "Run a command with privileges", sudo_command);
+    register_command("cpw",        "Create or change the sudo password", cpw_command);
+    register_command("useradd",    "Create an account (-s: with sudo rights)", useradd_command);
+    register_command("userdel",    "Remove an account",              userdel_command);
+    register_command("usermod",    "Change an account: --sudo, --nosudo, --lock", usermod_command);
+    register_command("passwd",     "Change an account password",     passwd_command);
+    register_command("su",         "Switch to another account",      su_command);
+    register_command("id",         "Show the user id and groups",    id_command);
+    register_command("users",      "List accounts",                  users_command);
+    register_command("guard",      "Kernel guard: integrity checks, essential tasks, security events (guard selftest | log)", guard_command);
+    register_command("fsck",       "Check the /disk volume (-r repairs it)", fsck_command);
+    register_command("crypt",      "Encrypt or decrypt files with a passphrase (lock/unlock/status)", crypt_command);
+    register_command("selftest",   "Run the security self tests", selftest_command);
+    register_command("logout",     "End the session and show the login",  logout_command);
+    register_command("bootpage",   "Show the boot screen again (-b: built-in)", bootpage_command);
+    register_command("systemctl",  "Control services (units): list-units, status, start, stop, enable...", systemctl_command);
+    register_command("rsd",        "Service manager (same as systemctl)", systemctl_command);
+    register_command("journalctl", "Show the service journal (-u UNIT, -n N)", journalctl_command);
+    register_command("systemd-analyze", "Boot timing of services (blame)", analyze_command);
+    register_command("anim",       "Animated overlays that keep moving (list/start/stop/demo)", anim_command);
+    register_command("sysmon",     "Full-screen system monitor (units, memory, journal)", sysmon_command);
+    register_command("discord",    "Discord client (token saved encrypted); discord logout", discord_command);
+    register_command("life",       "Full-screen Game of Life",       life_command);
+    register_command("matrix",     "Full-screen falling-glyph rain", matrix_command);
+    register_command("snake",      "Snake on the whole screen",      snake_command);
+    register_command("files",      "Full-height file manager",       files_command);
+    register_command("resinfo",    "Show what the display scaler derived from the terminal size", screeninfo_command);
+    register_command("banner",     "Print big block letters",        banner_command);
+    register_command("center",     "Print a centred line of text",   center_command);
+    register_command("color",      "Set the text colour",            color_command);
+    register_command("box",        "Draw boot screen panel parts",   box_command);
+    register_command("update",     "Update RadiumOS without rebuilding", update_command);
+    register_command("welcome",    "Show the boot page again",       bootpage_command);
+    register_command("test",       "Test files and values (for && and ||)", test_command);
+    register_command("[",          "Test files and values (ends with ])",  bracket_command);
+    register_command("find",       "Search for files by name",       find_command);
+    register_command("tree",       "Show a directory tree",          tree_command);
+    register_command("stat",       "Show file type and size",        stat_command);
+    register_command("du",         "Show disk usage of a directory", du_command);
+    register_command("diff",       "Compare two text files",         diff_command);
+    register_command("tee",        "Copy piped input to a file",     tee_command);
+    register_command("seq",        "Print a range of numbers",       seq_command);
+    register_command("whoami",     "Show the current user",          whoami_command);
+    register_command("hostname",   "Show the system name",           hostname_command);
+    register_command("date",       "Show the date and time",         date_command);
+    register_command("time",       "Show the current time",          time_command);
+    register_command("timestamp",  "Show the Unix timestamp",        timestamp_command);
+    register_command("uptime",     "Show how long the system has run", uptime_command);
+    register_command("free",       "Show memory usage",              free_command);
+    register_command("df",         "Show filesystem usage",          df_command);
+    register_command("uname",      "Show system information",        uname_command);
+    register_command("sleep",      "Pause for some seconds",         sleep_command);
+    register_command("app",        "Run a C++ app (static ELF)",     app_command);
+    register_command("true",       "Do nothing, successfully",       true_command);
+    register_command("false",      "Do nothing, unsuccessfully",     false_command);
+    register_command(":",          "Do nothing, successfully",       true_command);
+    register_command("break",      "Leave a for/while/until loop",   break_command);
+    register_command("continue",   "Next round of a loop",           continue_command);
+    register_command("read",       "Read a line into a variable",    read_command);
+    register_command("source",     "Run the commands in a file",     source_command);
+    register_command(".",          "Run the commands in a file",     source_command);
+    register_command("reboot",     "Restart the computer",           reboot_command);
+    register_command("poweroff",   "Shut the computer down",         poweroff_command);
+    register_command("shutdown",   "Shut the computer down",         poweroff_command);
+    register_command("grep",      "Search lines for text",          grep_command);
+    register_command("head",      "Show first lines",               head_command);
+    register_command("tail",      "Show last lines",                tail_command);
+    register_command("wc",        "Count lines, words, bytes",      wc_command);
+    register_command("sort",      "Sort lines",                     sort_command);
+    register_command("uniq",      "Collapse repeated lines",        uniq_command);
     register_command("cowsay",    "Cowsay",                         cowsay_command);
     register_command("boot",      "Show welcome screen",            boot);
     register_command("echo",      "Echo message",                   echo_command);
     register_command("clear",     "Clear terminal",                 clear);
     register_command("hexdump",   "Hexdump toolkit",                geiger_command);
-    register_command("cd",        "Change directory",               cd_command);
+    register_command("cd",        "Change directory",               cd_command);;
     register_command("ps",        "List tasks",                     ps_command);
     register_command("kill",      "Kill task by PID",               kill_command);
-    register_command("top",       "Task monitor",                   top_command);
+    register_command("top",       "Live task monitor (any key quits; top -b prints once)", top_command);
+    register_command("cpuinfo",   "Processor details",              cpuinfo_command);
+    register_command("meminfo",   "Physical memory, RAM filesystem and disk use", meminfo_command);
+    register_command("lspci",     "List PCI devices",               lspci_command);
+    register_command("watch",     "Repeat a command every few seconds (watch [-n S] CMD)", watch_command);
+    register_command("sysstat",   "Graphs of memory, disk and task history", sysstat_command);
+    register_command("syshealth", "System health checks (-q: problems only)", syshealth_command);
+    register_command("secaudit",  "Security audit of this system",  secaudit_command);
+    register_command("integrity", "Record and check hashes of boot-critical files", integrity_command);
+    register_command("prp",       "PRP signatures: hash, keygen, sign, verify, seal, open", prp_command);
+    register_command("sha256sum", "SHA-256 of files",               sha256sum_command);
+    register_command("vault",     "Passphrase-sealed secrets (set/get/list/rm)", vault_command);
+    register_command("shred",     "Overwrite a file three times, then delete it", shred_command);
+    register_command("genpw",     "Generate random passwords",      genpw_command);
+    register_command("ytm",       "Text-based YouTube Music player (search, play, queue; ytm login)", ytm_command);
+    register_command("vulkaninfo", "Show the software Vulkan implementation", vulkaninfo_command);
+    register_command("vkdemo",    "Vulkan demo: rotating cube with SPIR-V shaders (vkdemo [-f N] [-s WxH])", vkdemo_command);
+    register_command("desktop",   "RadiumDE desktop environment (panel, dock, windows, mouse; ~/desktop.cfg)", desktop_command);
+    register_command("rde",       "Alias of desktop", desktop_command);
+    register_command("doom",      "Doom (bring your own WAD in /disk) drawn through Vulkan", doom_command);
     register_command("exit",      "Exit the OS",                    exit_command);
     register_command("whd.diag",  "Watchdog task diagram",          watchdog_diagram);
     register_command("gfxtest",       "Graphics test",  gfxtest);

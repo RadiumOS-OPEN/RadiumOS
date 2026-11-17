@@ -1,7 +1,9 @@
 #[cfg(target_os = "none")]
-mod command;
+pub(crate) mod command;
 #[cfg(target_os = "none")]
 pub(crate) mod native;
+#[cfg(target_os = "none")]
+pub(crate) mod ws;
 mod options;
 mod provider;
 mod verify;
@@ -276,15 +278,20 @@ pub struct Response {
     pub headers: Vec<u8>,
     pub body: Vec<u8>,
     pub location: Option<String>,
+    pub content_length: Option<u64>,
+    pub content_range: Option<(u64, u64, u64)>,
 }
 
 const HEADER_LIMIT: usize = 16384;
 const RECORD_BUFFER: usize = 18432;
 const WIRE_OVERHEAD_LIMIT: usize = 1024 * 1024;
 
-fn request(url: &Url, head: bool) -> String {
-    format!("{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RadiumOS-fetch/1.0\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-        if head { "HEAD" } else { "GET" }, url.path, url.authority())
+fn request(url: &Url, head: bool, range: Option<(u64, u64)>) -> String {
+    let range_header = range.map_or_else(String::new, |(start, end)| {
+        format!("Range: bytes={start}-{end}\r\n")
+    });
+    format!("{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RadiumOS-fetch/1.0\r\nAccept: */*\r\nAccept-Encoding: identity\r\n{}Connection: close\r\n\r\n",
+        if head { "HEAD" } else { "GET" }, url.path, url.authority(), range_header)
 }
 
 pub fn get_plain<T: Transport>(
@@ -293,8 +300,19 @@ pub fn get_plain<T: Transport>(
     head: bool,
     max_size: usize,
 ) -> Result<Response, Error> {
-    let request = request(url, head);
+    let request = request(url, head, None);
     exchange_plain(transport, request.as_bytes(), head, max_size)
+}
+
+pub fn get_plain_range<T: Transport>(
+    transport: &mut T,
+    url: &Url,
+    start: u64,
+    end: u64,
+    max_size: usize,
+) -> Result<Response, Error> {
+    let request = request(url, false, Some((start, end)));
+    exchange_plain(transport, request.as_bytes(), false, max_size)
 }
 
 pub(crate) fn exchange_plain<T: Transport>(
@@ -332,8 +350,20 @@ pub fn get<T: Transport>(
     head: bool,
     max_size: usize,
 ) -> Result<Response, Error> {
-    let request = request(url, head);
+    let request = request(url, head, None);
     exchange_tls(transport, url, config, request.as_bytes(), head, max_size)
+}
+
+pub fn get_range<T: Transport>(
+    transport: &mut T,
+    url: &Url,
+    config: Arc<ClientConfig>,
+    start: u64,
+    end: u64,
+    max_size: usize,
+) -> Result<Response, Error> {
+    let request = request(url, false, Some((start, end)));
+    exchange_tls(transport, url, config, request.as_bytes(), false, max_size)
 }
 
 pub(crate) fn exchange_tls<T: Transport>(
@@ -438,6 +468,24 @@ fn decimal(input: &str) -> Result<usize, Error> {
         .map_err(|_| Error::Message("Content-Length overflow"))
 }
 
+fn decimal_u64(input: &str) -> Result<u64, Error> {
+    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Message("invalid HTTP range number"));
+    }
+    input.parse().map_err(|_| Error::Message("HTTP range number overflow"))
+}
+
+fn parse_content_range(input: &str) -> Result<(u64, u64, u64), Error> {
+    let value = input.strip_prefix("bytes ").ok_or(Error::Message("invalid Content-Range"))?;
+    let (range, total) = value.split_once('/').ok_or(Error::Message("invalid Content-Range"))?;
+    let (start, end) = range.split_once('-').ok_or(Error::Message("invalid Content-Range"))?;
+    let result = (decimal_u64(start)?, decimal_u64(end)?, decimal_u64(total)?);
+    if result.0 > result.1 || result.1 >= result.2 {
+        return Err(Error::Message("invalid Content-Range bounds"));
+    }
+    Ok(result)
+}
+
 fn parse_response(
     bytes: &[u8],
     head: bool,
@@ -493,9 +541,10 @@ fn parse_response_at(
         }
         return parse_response_at(&bytes[end..], head, max_size, closed, informational + 1);
     }
-    let mut length = None;
+    let mut length: Option<u64> = None;
     let mut chunked = false;
     let mut location = None;
+    let mut content_range = None;
     for line in lines.filter(|line| !line.is_empty()) {
         let (name, value) = line
             .split_once(':')
@@ -510,7 +559,7 @@ fn parse_response_at(
         }
         let value = value.trim_matches([' ', '\t']);
         if name.eq_ignore_ascii_case("content-length") {
-            let value = decimal(value)?;
+            let value = decimal_u64(value)?;
             if length.replace(value).is_some() {
                 return Err(Error::Message("duplicate Content-Length"));
             }
@@ -522,6 +571,10 @@ fn parse_response_at(
         } else if name.eq_ignore_ascii_case("location") {
             if location.replace(value.to_string()).is_some() {
                 return Err(Error::Message("duplicate Location"));
+            }
+        } else if name.eq_ignore_ascii_case("content-range") {
+            if content_range.replace(parse_content_range(value)?).is_some() {
+                return Err(Error::Message("duplicate Content-Range"));
             }
         } else if name.eq_ignore_ascii_case("content-encoding")
             && !value.eq_ignore_ascii_case("identity")
@@ -541,13 +594,13 @@ fn parse_response_at(
             None => return Ok(None),
         }
     } else if let Some(length) = length {
-        if length > max_size {
+        if length > max_size as u64 {
             return Err(Error::Message("response exceeds --max-size"));
         }
-        if data.len() < length {
+        if (data.len() as u64) < length {
             return Ok(None);
         }
-        data[..length].to_vec()
+        data[..length as usize].to_vec()
     } else {
         if data.len() > max_size {
             return Err(Error::Message("response exceeds --max-size"));
@@ -562,6 +615,8 @@ fn parse_response_at(
         headers: bytes[..end].to_vec(),
         body,
         location,
+        content_length: length,
+        content_range,
     }))
 }
 
@@ -608,6 +663,28 @@ fn decode_chunks(mut bytes: &[u8], max_size: usize) -> Result<Option<Vec<u8>>, E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_large_content_range_metadata() {
+        let response = b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 4294967291-4294967294/4294967295\r\n\r\ndata";
+        let parsed = parse_response(response, false, 16, false).unwrap().unwrap();
+        assert_eq!(parsed.content_length, Some(4));
+        assert_eq!(parsed.content_range, Some((4_294_967_291, 4_294_967_294, 4_294_967_295)));
+        assert_eq!(parsed.body, b"data");
+        assert!(parse_content_range("bytes 4294967295-4294967295/4294967295").is_err());
+        assert!(parse_content_range("bytes 4-2/8").is_err());
+    }
+
+    #[test]
+    fn parses_large_content_range_metadata() {
+        let response = b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 4294967291-4294967294/4294967295\r\n\r\ndata";
+        let parsed = parse_response(response, false, 16, false).unwrap().unwrap();
+        assert_eq!(parsed.content_length, Some(4));
+        assert_eq!(parsed.content_range, Some((4_294_967_291, 4_294_967_294, 4_294_967_295)));
+        assert_eq!(parsed.body, b"data");
+        assert!(parse_content_range("bytes 4294967295-4294967295/4294967295").is_err());
+        assert!(parse_content_range("bytes 4-2/8").is_err());
+    }
 
     #[test]
     fn urls_and_http_framing() {

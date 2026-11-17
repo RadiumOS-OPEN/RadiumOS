@@ -1,0 +1,146 @@
+diff --git a/config/autostart/welcome.cfg b/config/autostart/welcome.cfg
+index 64fd89e..db9d11e 100644
+--- a/config/autostart/welcome.cfg
++++ b/config/autostart/welcome.cfg
+@@ -1,6 +1 @@
+-// show main menu on startup, if enabled
+-
+-if $showmenuonstartup [
+-  sleep 2000 [ if (strlen (curmenu)) [] [showmenu main ] ] 1
+-]
+-
++// the main menu is not opened at startup on RadiumOS: it would take the keyboard away from the game
+diff --git a/source/src/client.cpp b/source/src/client.cpp
+index 248d2b7..6446822 100644
+--- a/source/src/client.cpp
++++ b/source/src/client.cpp
+@@ -107,7 +107,11 @@ void connectserv_(const char *servername, int serverport = 0, const char *passwo
+ 
+ void connectserv(char *servername, int *serverport, char *password)
+ {
++#ifdef RADIUMOS
++    if(true)   // no game-account key on RadiumOS: join as a guest
++#else
+     if(sk)
++#endif
+     {
+         modprotocol = false;
+         connectserv_(servername, *serverport, password);
+diff --git a/source/src/main.cpp b/source/src/main.cpp
+index e3d4288..0a755fe 100644
+--- a/source/src/main.cpp
++++ b/source/src/main.cpp
+@@ -1503,13 +1503,12 @@ int main(int argc, char **argv)
+ 
+     localconnect();
+ 
+-    if(initscript) execute(initscript);
+-
+     initlog("mainloop");
+ 
+     inputgrab(grabinput = true);
+ 
+     inmainloop = true;
++    if(initscript) execute(initscript);   // RadiumOS port: after inmainloop, or callvote-based commands such as `map` are ignored
+     static bool onceauthed = true;
+ #ifdef _DEBUG
+     int lastflush = 0;
+diff --git a/source/src/server.cpp b/source/src/server.cpp
+index 4f59d7e..3250d8b 100644
+--- a/source/src/server.cpp
++++ b/source/src/server.cpp
+@@ -3050,39 +3050,48 @@ volatile servinfoauth *servinfoauth_dropbox = NULL;
+ volatile bool servinfoauth_done = false;
+ sl_semaphore servinfoauth_deferred(0, NULL);
+ 
+-int deferredprocessingthread(void *nop)
++static void deferredprocessing_step()
+ {
+-    for(;;)
++    if(!servinfoauth_done && servinfoauths.length())
+     {
+-        servinfoauth_deferred.wait();
+-        if(!servinfoauth_done && servinfoauths.length())
++        servinfoauth *sa = servinfoauths.remove();
++        servinfoauth_dropbox = sa;
++        sa->success = 0;
++        switch(sa->type)
+         {
+-            servinfoauth *sa = servinfoauths.remove();
+-            servinfoauth_dropbox = sa;
+-            sa->success = 0;
+-            switch(sa->type)
++            case SV_SERVINFO_RESPONSE:
+             {
+-                case SV_SERVINFO_RESPONSE:
+-                {
+-                    if(!sa->wantauth) sa->success = 1;
+-                    else if(sa->clientmsglen && ed25519_sign_check((uchar*)sa->clientmsg, sa->clientmsglen + 64, sa->clientpubkey))
+-                    { // client message checks out, now sign the answer
+-                        ed25519_sign((uchar*)sa->servermsg, NULL, (uchar*)sa->servermsg, sa->servermsglen, ssk);
+-                        sa->success = 1;
+-                    }
+-                    break;
++                if(!sa->wantauth) sa->success = 1;
++                else if(sa->clientmsglen && ed25519_sign_check((uchar*)sa->clientmsg, sa->clientmsglen + 64, sa->clientpubkey))
++                { // client message checks out, now sign the answer
++                    ed25519_sign((uchar*)sa->servermsg, NULL, (uchar*)sa->servermsg, sa->servermsglen, ssk);
++                    sa->success = 1;
+                 }
++                break;
+             }
+-            servinfoauth_done = true;
+         }
++        servinfoauth_done = true;
++    }
++}
++
++int deferredprocessingthread(void *nop)
++{
++    for(;;)
++    {
++        servinfoauth_deferred.wait();
++        deferredprocessing_step();
+     }
+     return 0;
+ }
+ 
+ void polldeferredprocessing()
+ {
++#ifdef RADIUMOS
++    deferredprocessing_step();   // RadiumOS has no threads: do the authentication work right here
++#else
+     static void *deferredprocessingthread_ti = NULL;
+     if(!deferredprocessingthread_ti) deferredprocessingthread_ti = sl_createthread(deferredprocessingthread, NULL);
++#endif
+ 
+     if(servinfoauth_done)
+     {
+diff --git a/source/src/serverbrowser.cpp b/source/src/serverbrowser.cpp
+index a56f09a..3f4fc4d 100644
+--- a/source/src/serverbrowser.cpp
++++ b/source/src/serverbrowser.cpp
+@@ -109,6 +109,13 @@ void resolverclear()
+ 
+ void resolverquery(const char *name)
+ {
++#ifdef RADIUMOS   // no threads: look the name up right here
++    resolverresult &rr = resolverresults.add();
++    rr.query = name;
++    rr.address.host = ENET_HOST_ANY; rr.address.port = 0;
++    if(enet_address_set_host(&rr.address, name) < 0) resolverresults.drop();
++    return;
++#endif
+     if(resolverthreads.empty()) resolverinit();
+ 
+     SDL_LockMutex(resolvermutex);
+@@ -146,6 +153,9 @@ extern bool isdedicated;
+ 
+ bool resolverwait(const char *name, ENetAddress *address)
+ {
++#ifdef RADIUMOS
++    return enet_address_set_host(address, name) >= 0;
++#endif
+     if(isdedicated) return enet_address_set_host(address, name) >= 0;
+ 
+     if(resolverthreads.empty()) resolverinit();

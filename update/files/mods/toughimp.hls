@@ -1,0 +1,25 @@
+// mod: Imps: 3x health and twice as fast
+include "/disk/mods/doom.hls";
+
+const MT_TROOP: int = 11;
+
+// state: [0] patched flag, [4] original health, [8] original speed
+fn main() {
+    let s = mod_state();
+    let imp = mobjinfo(MT_TROOP);
+    if mod_frame() < 0 {
+        if rd(s) == 1 {
+            wr(imp + api(O_MI_SPAWNHEALTH), rd(s + 4));
+            wr(imp + api(O_MI_SPEED), rd(s + 8));
+            wr(s, 0);
+        }
+    } else {
+        if rd(s) == 0 {
+            wr(s + 4, rd(imp + api(O_MI_SPAWNHEALTH)));
+            wr(s + 8, rd(imp + api(O_MI_SPEED)));
+            wr(imp + api(O_MI_SPAWNHEALTH), rd(s + 4) * 3);
+            wr(imp + api(O_MI_SPEED), rd(s + 8) * 2);
+            wr(s, 1);
+        }
+    }
+}

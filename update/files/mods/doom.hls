@@ -1,0 +1,196 @@
+// Helpers over the game API table (argv(5), built by src/commands/doomport.c). The indices mirror that table; every value is
+// read live, so a mod only calls these from main(). argv(1..4): frame (-1 = being switched off), screen, state, font.
+
+const A_PLAYER: int = 0;
+const A_MOBJ: int = 1;
+const A_LEVELTIME: int = 2;
+const A_GAMEMAP: int = 3;
+const A_EPISODE: int = 4;
+const A_GAMESTATE: int = 5;
+const A_PAUSED: int = 6;
+const A_GAMETIC: int = 7;
+const A_MOBJINFO: int = 8;
+const A_MOBJINFO_SIZE: int = 9;
+const A_KEYS: int = 37;
+const A_MS: int = 38;
+
+const O_PL_HEALTH: int = 12;
+const O_PL_ARMOR: int = 13;
+const O_PL_ARMORTYPE: int = 14;
+const O_PL_POWERS: int = 15;
+const O_PL_CARDS: int = 16;
+const O_PL_WEAPONOWNED: int = 18;
+const O_PL_AMMO: int = 19;
+const O_PL_MAXAMMO: int = 20;
+const O_PL_BACKPACK: int = 21;
+const O_PL_KILLS: int = 22;
+const O_MO_HEALTH: int = 23;
+const O_MO_MOMX: int = 24;
+const O_MO_MOMY: int = 25;
+const O_MO_MOMZ: int = 26;
+const O_MO_FLAGS: int = 27;
+const O_MO_Z: int = 31;
+const O_MI_SPAWNHEALTH: int = 32;
+const O_MI_SPEED: int = 33;
+const O_MO_FLOORZ: int = 39;
+const O_PL_DAMAGECOUNT: int = 40;
+const O_PL_BONUSCOUNT: int = 41;
+const O_PL_EXTRALIGHT: int = 42;
+const O_PL_FIXEDCOLORMAP: int = 43;
+const O_PL_CHEATS: int = 44;
+const O_MO_ANGLE: int = 45;
+const O_MO_PLAYER: int = 46;
+
+const A_VIEWX: int = 48;
+const A_VIEWY: int = 49;
+const A_VIEWW: int = 50;
+const A_VIEWH: int = 51;
+// nearest visible monster while OUT_WANT_TARGET is 1: its address (0 = none), the angle to it, its distance in map units
+const A_TARGET: int = 52;
+const A_TARGET_ANGLE: int = 53;
+const A_TARGET_DIST: int = 54;
+const A_THINKERCAP: int = 10;
+const A_MOBJTHINKER: int = 11;
+const O_TH_NEXT: int = 35;
+const O_TH_FUNCTION: int = 36;
+const O_MO_X: int = 29;
+const O_MO_Y: int = 30;
+
+// outputs: a mod writes these with out_set(); set them back to the defaults in the frame -1 call
+const OUT_WANT_TARGET: int = 60;
+const OUT_FIRE: int = 61;
+const OUT_FOV: int = 62;        // degrees 40..120, 0 = Doom's 90
+const OUT_SAT: int = 63;        // percent, 100 = unchanged
+const OUT_CON: int = 64;        // percent, 100 = unchanged
+const OUT_VIG: int = 65;        // 0..100
+const OUT_SHARP: int = 66;      // 0..100
+const OUT_TIMESCALE: int = 67;  // percent, 100 = normal
+const OUT_KILL0: int = 68;      // 8 slots (68..75): addresses of monsters to kill
+const OUT_DMG: int = 76;        // damage of the kill slots, 0 = 10000
+const OUT_UPSCALE: int = 77;    // 0 nearest, 1 smooth, 2 crisp smooth, 3 CRT
+
+const O_PL_READYWEAPON: int = 17;
+const A_STATES: int = 55;
+const A_STATE_SIZE: int = 56;
+const A_WEAPONINFO: int = 57;
+const A_WI_SIZE: int = 58;
+const O_PL_PSPRITES: int = 59;
+// with OUT_WANT_TARGET = 2: A_VIS_COUNT visible monsters at API 96 + 3 * i = (address, sideways distance, distance ahead)
+const A_VIS_COUNT: int = 95;
+const A_VIS: int = 96;
+
+// monster flags
+const MF_SHOOTABLE: int = 4;
+const MF_COUNTKILL: int = 4194304;
+
+fn rd(addr: int) -> int {
+    let mut v = 0;
+    unsafe { v = peek(addr, 32); }
+    return v;
+}
+
+fn wr(addr: int, v: int) {
+    unsafe { poke(addr, v, 32); }
+}
+
+fn api(i: int) -> int {
+    return rd(stoi(argv(5)) + i * 4);
+}
+
+fn out_set(i: int, v: int) {
+    wr(stoi(argv(5)) + i * 4, v);
+}
+
+fn mod_frame() -> int { return stoi(argv(1)); }
+fn mod_screen() -> int { return stoi(argv(2)); }
+fn mod_state() -> int { return stoi(argv(3)); }
+fn mod_font() -> int { return stoi(argv(4)); }
+
+// 1 while a level is being played and the player has a body
+fn in_level() -> int {
+    if api(A_GAMESTATE) == 0 {
+        if api(A_MOBJ) != 0 { return 1; }
+    }
+    return 0;
+}
+
+fn alive() -> int {
+    if in_level() == 1 {
+        if rd(api(A_MOBJ) + api(O_MO_HEALTH)) > 0 { return 1; }
+    }
+    return 0;
+}
+
+fn level_time() -> int { return api(A_LEVELTIME); }
+
+fn health() -> int { return rd(api(A_PLAYER) + api(O_PL_HEALTH)); }
+
+fn set_health(v: int) {
+    wr(api(A_PLAYER) + api(O_PL_HEALTH), v);
+    wr(api(A_MOBJ) + api(O_MO_HEALTH), v);
+}
+
+fn armor() -> int { return rd(api(A_PLAYER) + api(O_PL_ARMOR)); }
+
+fn set_armor(points: int, kind: int) {
+    wr(api(A_PLAYER) + api(O_PL_ARMOR), points);
+    wr(api(A_PLAYER) + api(O_PL_ARMORTYPE), kind);
+}
+
+fn kills() -> int { return rd(api(A_PLAYER) + api(O_PL_KILLS)); }
+
+// ammo types: 0 bullets, 1 shells, 2 cells, 3 rockets
+fn ammo(i: int) -> int { return rd(api(A_PLAYER) + api(O_PL_AMMO) + i * 4); }
+fn max_ammo(i: int) -> int { return rd(api(A_PLAYER) + api(O_PL_MAXAMMO) + i * 4); }
+fn set_ammo(i: int, v: int) { wr(api(A_PLAYER) + api(O_PL_AMMO) + i * 4, v); }
+
+// weapons: 0 fist, 1 pistol, 2 shotgun, 3 chaingun, 4 rocket launcher, 5 plasma, 6 BFG, 7 chainsaw, 8 super shotgun
+fn give_weapon(i: int) { wr(api(A_PLAYER) + api(O_PL_WEAPONOWNED) + i * 4, 1); }
+
+// keys: 0-2 blue/yellow/red keycard, 3-5 blue/yellow/red skull key
+fn give_key(i: int) { wr(api(A_PLAYER) + api(O_PL_CARDS) + i * 4, 1); }
+
+// address of the mobjinfo entry for a monster type (imp = 11)
+fn mobjinfo(kind: int) -> int { return api(A_MOBJINFO) + kind * api(A_MOBJINFO_SIZE); }
+
+// 1 while mod key n is held: 0 = Z, 1 = X, 2 = C, 3 = V, 4 = F, 5 = G (Doom never sees them while a mod is on)
+fn key_down(n: int) -> int { return (api(A_KEYS) >> n) & 1; }
+
+fn now_ms() -> int { return api(A_MS); }
+
+// players[].powers: 1 strength, 2 invisibility, 3 radiation suit
+fn power(i: int) -> int { return rd(api(A_PLAYER) + api(O_PL_POWERS) + i * 4); }
+fn set_power(i: int, v: int) { wr(api(A_PLAYER) + api(O_PL_POWERS) + i * 4, v); }
+
+// fields of the player (pl_*) and of its body (mo_*); `off` is one of the O_ constants
+fn pl_get(off: int) -> int { return rd(api(A_PLAYER) + api(off)); }
+fn pl_set(off: int, v: int) { wr(api(A_PLAYER) + api(off), v); }
+fn mo_get(off: int) -> int { return rd(api(A_MOBJ) + api(off)); }
+fn mo_set(off: int, v: int) { wr(api(A_MOBJ) + api(off), v); }
+
+// Shortens the weapon's attack states `div` times (2 = twice as fast, 100 = one tic each). Call once per frame from main().
+// state: [0] the weapon state seen last
+fn fire_rate(div: int) {
+    let s = mod_state();
+    let wi = api(A_WEAPONINFO) + pl_get(O_PL_READYWEAPON) * api(A_WI_SIZE);
+    let ssz = api(A_STATE_SIZE);
+    let sts = api(A_STATES);
+    let ready = sts + rd(wi + 12) * ssz;
+    let up = sts + rd(wi + 4) * ssz;
+    let down = sts + rd(wi + 8) * ssz;
+    let psp = api(A_PLAYER) + api(O_PL_PSPRITES);
+    let st = rd(psp);
+    if st != 0 && st != ready && st != up && st != down {
+        if st != rd(s) {
+            wr(s, st);
+            let t = rd(psp + 4);
+            if t > 1 {
+                let mut nt = t / div;
+                if nt < 1 { nt = 1; }
+                wr(psp + 4, nt);
+            }
+        }
+    } else {
+        wr(s, 0);
+    }
+}
