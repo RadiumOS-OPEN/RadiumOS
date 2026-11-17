@@ -390,6 +390,14 @@ int rb_dom_get_html(int node, int outer, char *out, int cap);
    node it replaces, so to keep that one alive insert the new node before it
    and rb_dom_detach it instead. */
 int rb_dom_detach(int node);
+/* The top of node's tree: 1 (the document) when it is connected, else the
+   root of the detached subtree it is in (node itself when it has no parent);
+   0 for a bad handle. */
+int rb_dom_root(int node);
+/* Recycle a detached subtree (node must have no parent and not be the
+   document): what scripts call garbage collection of nodes no wrapper can
+   reach any more. Returns 1 when it was released. */
+int rb_dom_release(int node);
 
 /* Navigation requested by a script (location.href = ...): same slot
    rb_take_nav reads; the host resolves it against the current URL. At most

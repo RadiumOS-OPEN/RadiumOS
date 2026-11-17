@@ -572,7 +572,9 @@ static int new_node(void) {
     memset(&g_nodes[i], 0, sizeof(g_nodes[i]));
     /* Fresh generation for every occupancy of the slot. Skip 0 so it can be
        read as "never assigned" during debugging. */
-    if (++g_gen == 0) g_gen = 1;
+    /* gen is 16 bits: skip every value that truncates to 0, or the 65536th
+       node made on a page would read as dead to rb_dom_generation */
+    do g_gen++; while ((uint16_t)g_gen == 0);
     g_nodes[i].gen = (uint16_t)g_gen;
     return i;
 }
@@ -3955,6 +3957,7 @@ int rb_debug_stat(int which) {
     case 7: return g_istr_n;
     case 8: return g_work;
     case 10: return g_var_n;
+    case 13: return g_node_n - g_free_n;   /* live nodes */
 #ifdef RBROWSE_HOST
     case 11: {                       /* the node that was laid out the most times */
         int best = 0;
@@ -4899,6 +4902,19 @@ int rb_dom_remove_child(int child) {
     if (!node_ok(child) || child == 1) return 0;
     detach(child);
     recycle_subtree(child);
+    return 1;
+}
+
+int rb_dom_root(int node) {
+    if (!node_ok(node)) return 0;
+    int guard = MAX_NODES;
+    while (g_nodes[node].parent && guard-- > 0) node = g_nodes[node].parent;
+    return node;
+}
+
+int rb_dom_release(int node) {
+    if (!node_ok(node) || node == 1 || g_nodes[node].parent) return 0;
+    recycle_subtree(node);
     return 1;
 }
 
@@ -6024,7 +6040,10 @@ int rb_dom_offset_height(int node, int *h) {
    while a public rb_dispatch click focuses text fields instead.
    ===================================================================== */
 
-#define EV_LISTEN_MAX 256
+/* Native listener registrations per page: one per (node, type, phase) a
+   script listens on. 256 was too few for a page with a few hundred
+   clickable elements: the rest silently never saw a click. */
+#define EV_LISTEN_MAX 4096
 /* One live dispatch plus three nested re-entrant dispatches. The default
    action's FOCUS/BLUR dispatch consumes one level, so this still allows a
    click -> focus -> nested dispatch -> nested dispatch chain. Kept small on
@@ -6070,10 +6089,10 @@ static int g_ev_last_prevented;
 /* Per-depth dispatch scratch. A nested dispatch owns the next row, so an
    outer walk is never clobbered. Path entries remember {slot, gen}: a slot
    recycled mid-dispatch (and possibly reused) is skipped rather than visited
-   as a different node. Slots are uint16_t; listener indices fit uint8_t. */
+   as a different node. Slots and listener indices are uint16_t. */
 static uint16_t g_ev_path[EV_MAX_DEPTH][MAX_NODES];      /* slot ids */
 static uint16_t g_ev_path_gen[EV_MAX_DEPTH][MAX_NODES];  /* generation at snapshot */
-static uint8_t g_ev_match[EV_MAX_DEPTH][EV_LISTEN_MAX];  /* listener indices */
+static uint16_t g_ev_match[EV_MAX_DEPTH][EV_LISTEN_MAX]; /* listener indices */
 static uint16_t g_ev_walk[MAX_NODES];                    /* radio-group DFS scratch */
 
 static void ev_reset(void) {
@@ -6308,13 +6327,13 @@ static void ev_visit(int node, EvState *st, int phase, int *result) {
     /* The snapshot lives in this dispatch level's own slot: a listener that
        re-enters rb_dispatch uses the next depth's slot and cannot clobber the
        indices this walk has not read yet. */
-    uint8_t *match = g_ev_match[(int)(st - g_ev_states)];
+    uint16_t *match = g_ev_match[(int)(st - g_ev_states)];
     int m = 0;
     for (int i = 0; i < g_ev_listen_n; i++) {
         EvListen *L = &g_ev_listen[i];
         if (!L->dead && L->node == node && L->type == st->type &&
             L->capture == (uint8_t)phase && m < EV_LISTEN_MAX)
-            match[m++] = (uint8_t)i;
+            match[m++] = (uint16_t)i;
     }
     for (int k = 0; k < m; k++) {
         int i = match[k];

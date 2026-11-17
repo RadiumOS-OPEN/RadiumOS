@@ -2223,12 +2223,12 @@ static void test_ev_listener_overflow(void) {
     const char *html = "<div id=\"x\">x</div>";
     rb_open(html, (int)strlen(html));
     int x = rb_find_id("x");
-    for (int i = 0; i < 256; i++)
+    for (int i = 0; i < 4096; i++)     /* EV_LISTEN_MAX in engine.c */
         CHECK(rb_listen(x, RB_EV_CLICK, ev_log_cb, (void *)(intptr_t)0));
-    CHECK(rb_listener_count() == 256);
+    CHECK(rb_listener_count() == 4096);
     CHECK(rb_listen(x, RB_EV_CLICK, ev_log_cb, 0) == 0);
     CHECK(rb_oom() == 0);              /* not the "memory full" banner */
-    CHECK(rb_listener_count() == 256);
+    CHECK(rb_listener_count() == 4096);
 }
 
 /* --- P1.7: scripted style writes invalidate the style memo --- */
