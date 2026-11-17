@@ -1,0 +1,17 @@
+// mod: Heal 10 HP for every kill
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            let s = mod_state();
+            let k = kills();
+            if k > rd(s) {
+                let mut h = health() + (k - rd(s)) * 10;
+                if h > 100 { h = 100; }
+                set_health(h);
+            }
+            wr(s, k);
+        }
+    }
+}

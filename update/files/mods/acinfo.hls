@@ -1,0 +1,16 @@
+// acmod: Info line: position, speed and enemies in sight
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if in_game() == 1 {
+            let mut seen = 0;
+            let n = api(A_NPL);
+            for i in 0..n {
+                if pl(i, P_ENEMY) == 1 && pl(i, P_VISIBLE) == 1 { seen += 1; }
+            }
+            let txt = "X " + itos(api(A_X) / 16) + "  Y " + itos(api(A_Y) / 16) + "  Z " + itos(api(A_Z) / 16) + "  SPEED " + itos(api(A_SPEED) / 10) + "  IN SIGHT " + itos(seen);
+            ag_label(api(A_SCRW) / 2 - strlen(txt) * 4, 6, txt, 0xFFE060);
+        }
+    }
+}

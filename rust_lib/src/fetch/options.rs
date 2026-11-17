@@ -23,8 +23,11 @@ pub const HELP: &str = concat!(
     "      --timeout SECONDS  Timeout: 1..300\n",
     "                         (default 30)\n",
     "      --max-size BYTES   Max body: 1..\n",
-    "                         16777216 (default\n",
-    "                         1048576)\n",
+    "                         4294967295 (default\n",
+    "                         1048576 in memory;\n",
+    "                         none for /disk/\n",
+    "                         output)\n",
+    "      --test-disk        Test /disk/ storage\n",
     "      --cacert FILE      Use CA certificates\n",
     "                         from FILE\n",
     "      --insecure         Accept self-signed or\n",
@@ -45,6 +48,7 @@ pub struct Options {
     pub overwrite: bool,
     pub timeout: u32,
     pub max_size: usize,
+    pub max_size_set: bool,
     pub cacert: Option<String>,
     pub insecure: bool,
 }
@@ -64,6 +68,7 @@ impl Options {
             overwrite: false,
             timeout: 30,
             max_size: 1024 * 1024,
+            max_size_set: false,
             cacert: None,
             insecure: false,
         };
@@ -102,7 +107,7 @@ impl Options {
                         "-o" | "--output" => set(&mut options.output, value.to_string())?,
                         "--cacert" => set(&mut options.cacert, value.to_string())?,
                         "--timeout" => set(&mut timeout, number(value, 300)? as u32)?,
-                        "--max-size" => set(&mut max_size, number(value, 16 * 1024 * 1024)?)?,
+                        "--max-size" => set(&mut max_size, number(value, u32::MAX as usize)?)?,
                         _ => unreachable!(),
                     }
                 }
@@ -111,6 +116,7 @@ impl Options {
         }
         options.timeout = timeout.unwrap_or(options.timeout);
         options.max_size = max_size.unwrap_or(options.max_size);
+        options.max_size_set = max_size.is_some();
         if options.url.is_none() && !options.help {
             return Err(Error::Message("fetch requires an HTTP or HTTPS URL"));
         }
@@ -170,7 +176,7 @@ mod tests {
             "--timeout",
             "300",
             "--max-size",
-            "16777216",
+            "4294967295",
             "--cacert",
             "roots.pem",
             "--",
@@ -180,7 +186,7 @@ mod tests {
         assert_eq!(options.output.as_deref(), Some("page.html"));
         assert_eq!(options.cacert.as_deref(), Some("roots.pem"));
         assert_eq!(options.timeout, 300);
-        assert_eq!(options.max_size, 16 * 1024 * 1024);
+        assert_eq!(options.max_size, u32::MAX as usize);
         assert!(
             options.overwrite
                 && options.head
@@ -215,7 +221,7 @@ mod tests {
             &["--timeout", "+1", "https://a.com"],
             &["--timeout", "1.5", "https://a.com"],
             &["--max-size", "0", "https://a.com"],
-            &["--max-size", "16777217", "https://a.com"],
+            &["--max-size", "4294967296", "https://a.com"],
             &["--max-size", "999999999999999999999999", "https://a.com"],
             &["--timeout", "1", "--timeout", "2", "https://a.com"],
             &["--max-size", "1", "--max-size", "2", "https://a.com"],

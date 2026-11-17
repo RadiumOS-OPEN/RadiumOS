@@ -194,7 +194,7 @@ bool dns_resolve(const char* hostname, uint32_t* ip_out) {
         return false;
     }
     
-    if (!selectedNIC) {
+    if (!netstack_nic_ready()) {
         print("Network interface not available\n");
         return false;
     }
@@ -242,13 +242,11 @@ bool dns_resolve(const char* hostname, uint32_t* ip_out) {
     // Wait for response
     uint32_t start_time = get_time_ms();
     while (get_time_ms() - start_time < DNS_QUERY_TIMEOUT_MS) {
-        // Process incoming packets using receiveRTL8139
-        receiveRTL8139(selectedNIC);
-        
-        // Check network queue for DNS responses
+        // Check for DNS responses
         static uint8_t rx_buffer[2048];
-        int length = net_queue_get(selectedNIC, rx_buffer, sizeof(rx_buffer));
+        int length = netstack_poll_frame(rx_buffer, sizeof(rx_buffer));
         
+        bool is_dns_answer = false;
         if (length > 42) { // Ethernet + IP + UDP headers
             // Extract UDP payload
             ethernet_frame_t* eth = (ethernet_frame_t*)rx_buffer;
@@ -259,6 +257,7 @@ bool dns_resolve(const char* hostname, uint32_t* ip_out) {
                     udp_header_t* udp = (udp_header_t*)(((uint8_t*)ip) + ip_header_len);
                     
                     if (ntohs(udp->src_port) == DNS_PORT) {
+                        is_dns_answer = true;
                         // This is a DNS response
                         uint8_t* dns_data = ((uint8_t*)udp) + 8;
                         int dns_len = ntohs(udp->length) - 8;
@@ -276,6 +275,8 @@ bool dns_resolve(const char* hostname, uint32_t* ip_out) {
             }
         }
         
+        if (length > 0 && !is_dns_answer) netstack_process_packet(rx_buffer, (uint16_t)length);   // ARP replies etc.
+
         delay(10);
     }
     

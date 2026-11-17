@@ -5,8 +5,17 @@
 #include "../keyboard/keyboard.h"
 #include "../io/io.h"
 #include "../timers/timer.h"
+#include "scaler.h"
 
 static uint16_t* const VGA_MEMORY = (uint16_t*)0xB8000;
+
+// Windows live on the scaler's window grid (up to 80x50) instead of a fixed 80x25. The 0xB8000 rows are always
+// 80 cells apart.
+#undef VGA_WIDTH
+#undef VGA_HEIGHT
+#define VGA_WIDTH  scaler_win_cols()
+#define VGA_HEIGHT scaler_win_rows()
+#define VGA_STRIDE SCALER_WIN_COLS_MAX
 
 // FIXED: Updated buffer size to support 80x50 mode (4000 entries)
 // Previously was (80 * 25) = 2000, which failed for the editor (height 47)
@@ -97,7 +106,7 @@ vga_window_t vga_create_window(int x, int y, int w, int h, enum vga_color fg, en
         const char* err = "ERR: No free window buf!";
         uint8_t color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_RED);
         for (int i = 0; err[i] != '\0' && i < VGA_WIDTH - 2; i++) {
-            vga[VGA_WIDTH * 2 + i] = vga_entry(err[i], color);
+            vga[VGA_STRIDE * 2 + i] = vga_entry(err[i], color);
         }
     }
     
@@ -122,6 +131,18 @@ vga_window_t vga_create_centered_window(int w, int h, enum vga_color fg, enum vg
     return win;
 }
 
+vga_window_t vga_create_scaled_window(int w, int h, enum vga_color fg, enum vga_color bg) {
+    scaler_fit_window(&w, &h);
+    return vga_create_centered_window(w, h, fg, bg);
+}
+
+vga_window_t vga_create_fullscreen_window(enum vga_color fg, enum vga_color bg) {
+    vga_window_t win = vga_create_window(0, 0, VGA_WIDTH, VGA_HEIGHT, fg, bg);
+    win.has_border = true;
+    win.has_shadow = false;
+    return win;
+}
+
 void vga_destroy_window(vga_window_t* win) {
     if (!win) return;
     
@@ -133,7 +154,7 @@ void vga_destroy_window(vga_window_t* win) {
         for (int col = 0; col < win->width; col++) {
             int screen_x = win->x + col;
             if (screen_x < 0 || screen_x >= VGA_WIDTH) continue;
-            VGA_MEMORY[screen_y * VGA_WIDTH + screen_x] = blank;
+            VGA_MEMORY[screen_y * VGA_STRIDE + screen_x] = blank;
         }
     }
     
@@ -170,7 +191,7 @@ void vga_win_refresh(vga_window_t* win) {
             for (int i = 1; i <= win->width && (win->x + i) < VGA_WIDTH; i++) {
                 int sx = win->x + i;
                 if (sx >= 0) {
-                    VGA_MEMORY[sy * VGA_WIDTH + sx] = vga_entry(0xB0, shadow_color);
+                    VGA_MEMORY[sy * VGA_STRIDE + sx] = vga_entry(0xB0, shadow_color);
                 }
             }
         }
@@ -181,7 +202,7 @@ void vga_win_refresh(vga_window_t* win) {
             for (int j = 1; j <= win->height && (win->y + j) < VGA_HEIGHT; j++) {
                 int sy_right = win->y + j;
                 if (sy_right >= 0) {
-                    VGA_MEMORY[sy_right * VGA_WIDTH + sx] = vga_entry(0xB0, shadow_color);
+                    VGA_MEMORY[sy_right * VGA_STRIDE + sx] = vga_entry(0xB0, shadow_color);
                 }
             }
         }
@@ -199,7 +220,7 @@ void vga_win_refresh(vga_window_t* win) {
         if (start_col < end_col) {
             int screen_x = win->x + start_col;
             int buffer_index = row * win->width + start_col;
-            int screen_index = screen_y * VGA_WIDTH + screen_x;
+            int screen_index = screen_y * VGA_STRIDE + screen_x;
             int copy_count = end_col - start_col;
             
             // Fast memory copy for the row
@@ -218,7 +239,7 @@ void vga_win_refresh(vga_window_t* win) {
             for (int x = 0; x < win->width; x++) {
                 int screen_x = win->x + x;
                 if (screen_x >= 0 && screen_x < VGA_WIDTH) {
-                    VGA_MEMORY[win->y * VGA_WIDTH + screen_x] = vga_entry(0xCD, border_color);
+                    VGA_MEMORY[win->y * VGA_STRIDE + screen_x] = vga_entry(0xCD, border_color);
                 }
             }
         }
@@ -229,7 +250,7 @@ void vga_win_refresh(vga_window_t* win) {
             for (int x = 0; x < win->width; x++) {
                 int screen_x = win->x + x;
                 if (screen_x >= 0 && screen_x < VGA_WIDTH) {
-                    VGA_MEMORY[bottom_y * VGA_WIDTH + screen_x] = vga_entry(0xCD, border_color);
+                    VGA_MEMORY[bottom_y * VGA_STRIDE + screen_x] = vga_entry(0xCD, border_color);
                 }
             }
         }
@@ -239,7 +260,7 @@ void vga_win_refresh(vga_window_t* win) {
             for (int y = 0; y < win->height; y++) {
                 int screen_y = win->y + y;
                 if (screen_y >= 0 && screen_y < VGA_HEIGHT) {
-                    VGA_MEMORY[screen_y * VGA_WIDTH + win->x] = vga_entry(0xBA, border_color);
+                    VGA_MEMORY[screen_y * VGA_STRIDE + win->x] = vga_entry(0xBA, border_color);
                 }
             }
         }
@@ -250,23 +271,23 @@ void vga_win_refresh(vga_window_t* win) {
             for (int y = 0; y < win->height; y++) {
                 int screen_y = win->y + y;
                 if (screen_y >= 0 && screen_y < VGA_HEIGHT) {
-                    VGA_MEMORY[screen_y * VGA_WIDTH + right_x] = vga_entry(0xBA, border_color);
+                    VGA_MEMORY[screen_y * VGA_STRIDE + right_x] = vga_entry(0xBA, border_color);
                 }
             }
         }
         
         // Corners
         if (win->x >= 0 && win->x < VGA_WIDTH && win->y >= 0 && win->y < VGA_HEIGHT) {
-            VGA_MEMORY[win->y * VGA_WIDTH + win->x] = vga_entry(0xC9, border_color);
+            VGA_MEMORY[win->y * VGA_STRIDE + win->x] = vga_entry(0xC9, border_color);
         }
         if (right_x >= 0 && right_x < VGA_WIDTH && win->y >= 0 && win->y < VGA_HEIGHT) {
-            VGA_MEMORY[win->y * VGA_WIDTH + right_x] = vga_entry(0xBB, border_color);
+            VGA_MEMORY[win->y * VGA_STRIDE + right_x] = vga_entry(0xBB, border_color);
         }
         if (win->x >= 0 && win->x < VGA_WIDTH && bottom_y >= 0 && bottom_y < VGA_HEIGHT) {
-            VGA_MEMORY[bottom_y * VGA_WIDTH + win->x] = vga_entry(0xC8, border_color);
+            VGA_MEMORY[bottom_y * VGA_STRIDE + win->x] = vga_entry(0xC8, border_color);
         }
         if (right_x >= 0 && right_x < VGA_WIDTH && bottom_y >= 0 && bottom_y < VGA_HEIGHT) {
-            VGA_MEMORY[bottom_y * VGA_WIDTH + right_x] = vga_entry(0xBC, border_color);
+            VGA_MEMORY[bottom_y * VGA_STRIDE + right_x] = vga_entry(0xBC, border_color);
         }
     }
     
@@ -282,7 +303,7 @@ void vga_win_refresh(vga_window_t* win) {
             int screen_x = win->x + title_x + i;
             int screen_y = win->y;
             if (screen_x >= 0 && screen_x < VGA_WIDTH && screen_y >= 0 && screen_y < VGA_HEIGHT) {
-                VGA_MEMORY[screen_y * VGA_WIDTH + screen_x] = vga_entry(win->title[i], title_color);
+                VGA_MEMORY[screen_y * VGA_STRIDE + screen_x] = vga_entry(win->title[i], title_color);
             }
         }
     }
@@ -518,7 +539,7 @@ void vga_win_draw_shadow(vga_window_t* win, int x, int y, int w, int h) {
         int sx = win->x + x + i;
         int sy = win->y + y + h;
         if (sx >= 0 && sx < VGA_WIDTH && sy >= 0 && sy < VGA_HEIGHT) {
-            VGA_MEMORY[sy * VGA_WIDTH + sx] = vga_entry(0xB0, shadow_color);
+            VGA_MEMORY[sy * VGA_STRIDE + sx] = vga_entry(0xB0, shadow_color);
         }
     }
     
@@ -527,7 +548,7 @@ void vga_win_draw_shadow(vga_window_t* win, int x, int y, int w, int h) {
         int sx = win->x + x + w;
         int sy = win->y + y + j;
         if (sx >= 0 && sx < VGA_WIDTH && sy >= 0 && sy < VGA_HEIGHT) {
-            VGA_MEMORY[sy * VGA_WIDTH + sx] = vga_entry(0xB0, shadow_color);
+            VGA_MEMORY[sy * VGA_STRIDE + sx] = vga_entry(0xB0, shadow_color);
         }
     }
 }
