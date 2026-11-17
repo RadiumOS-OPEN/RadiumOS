@@ -329,6 +329,10 @@ int main(void) {
     rb_dispatch(rb_find_id("bt599"), RB_EV_CLICK);
     EXPECT("lastHit", "599");
 
+    /* querySelectorAll returns every match, past the old 4096 cap */
+    EXPECT("var qa = document.createElement('div'); document.body.appendChild(qa); qa.innerHTML = '<i></i>'.repeat(5000);"
+           "var n5 = qa.querySelectorAll('i').length; qa.remove(); qa = null; n5", "5000");
+
     /* node generations are 16 bits: the 65536th node made on a page must not
        get generation 0 (which reads as a dead node) */
     {

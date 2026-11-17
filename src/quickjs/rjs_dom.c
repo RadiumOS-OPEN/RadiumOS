@@ -272,7 +272,8 @@ FN(n_set_checked) { UNUSED; mutated(); return JS_NewBool(ctx, rb_dom_set_checked
 
 /* ---- selectors ---- */
 
-#define QUERY_MAX 4096
+/* Every node of a page can match: the engine holds at most 16384 (MAX_NODES). */
+#define QUERY_MAX 16384
 static int g_hits[QUERY_MAX];
 
 FN(n_query) {
