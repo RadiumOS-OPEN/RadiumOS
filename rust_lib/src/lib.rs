@@ -4,12 +4,41 @@
 #![allow(unused_variables)]
 
 mod prp;
+mod guard;
 mod png;
+mod mp4;
+mod vulkan;
+mod disk_store;
 #[cfg(target_os = "none")]
 mod rchat;
 extern crate alloc;
+
+#[cfg(target_os = "none")]
+mod kernel_critical_section {
+    struct KernelCriticalSection;
+
+    critical_section::set_impl!(KernelCriticalSection);
+
+    unsafe impl critical_section::Impl for KernelCriticalSection {
+        unsafe fn acquire() -> critical_section::RawRestoreState {
+            let flags: u32;
+            core::arch::asm!("pushfd", "pop {0}", "cli", out(reg) flags);
+            flags & (1 << 9) != 0
+        }
+
+        unsafe fn release(restore_state: critical_section::RawRestoreState) {
+            if restore_state {
+                core::arch::asm!("sti");
+            }
+        }
+    }
+}
+
 mod fetch;
 mod heap;
+mod helios;
+mod imgdec;
+mod sniff;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 static FETCH_NETWORK_SILENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -33,6 +62,9 @@ extern "C" {
     // Memory functions
     fn malloc(size: u32) -> *mut u8;
     fn free(ptr: *mut u8);
+    fn pmm_get_total_memory() -> u32;
+    fn pmm_get_used_memory() -> u32;
+    fn pmm_get_free_memory() -> u32;
 
     // AVFS functions
     fn avfs_create_file(name: *const u8, size: u32) -> i32;
@@ -211,11 +243,23 @@ unsafe fn term_putc(c: u8) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rust_print(s: &[u8]) {
+fn rust_print(s: &[u8]) {
     if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
     unsafe {
         for &c in s { terminal_putchar(c); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_c_print(s: *const u8) {
+    if s.is_null() { return; }
+    if FETCH_NETWORK_SILENT.load(Ordering::Relaxed) { return; }
+    unsafe {
+        let mut p = s;
+        while *p != 0 {
+            terminal_putchar(*p);
+            p = p.add(1);
+        }
     }
 }
 
@@ -592,6 +636,7 @@ pub extern "C" fn rust_rtl8139_send(packet: *const u8, packet_size: u32) -> i32 
         for i in 0..packet_size {
             *tx_buffer.add(i as usize) = *packet.add(i as usize);
         }
+        sniff::tap(core::slice::from_raw_parts(packet, packet_size as usize), true);
 
         outl(iobase + TSAD_ARRAY[tx_curr], device.tx_buff_physical[tx_curr]);
         outl(iobase + TSD_ARRAY[tx_curr], packet_size & 0x1FFF);
@@ -608,6 +653,40 @@ static mut RX_RESPONSE_LENGTH: u32 = 0;
 #[no_mangle]
 pub extern "C" fn rust_rtl8139_receive() -> i32 {
     rtl8139_receive(usize::MAX)
+}
+
+/// Copies the next received Ethernet frame (without the CRC) to `out`; returns its length, 0 if none waits, -1 without a card.
+/// Unlike rust_rtl8139_receive this keeps frames apart, for the C UDP stack (src/network/udpsock.c).
+#[no_mangle]
+pub extern "C" fn rust_rtl8139_poll_frame(out: *mut u8, cap: u32) -> i32 {
+    unsafe {
+        let device = match RTL8139_DEVICE.as_mut() {
+            Some(dev) => dev,
+            None => return -1,
+        };
+        let iobase = device.iobase;
+        if (inb(iobase + RTL8139_REG_CMD) & CMD_BUFFER_EMPTY) != 0 {
+            return 0;
+        }
+        let current_packet = device.current_packet as usize;
+        let buffer_ptr = device.rx_buff_virtual.add(current_packet) as *const u16;
+        let packet_status = read_volatile(buffer_ptr);
+        let packet_length = read_volatile(buffer_ptr.add(1));
+        if (packet_status & 0x01) == 0 || packet_length < 64 || packet_length > 1518 {
+            return 0;
+        }
+        let packet_data = buffer_ptr.add(2) as *const u8;
+        let frame_len = packet_length as usize - 4;
+        sniff::tap(core::slice::from_raw_parts(packet_data, frame_len), false);
+        let n = if frame_len > cap as usize { cap as usize } else { frame_len };
+        for i in 0..n {
+            *out.add(i) = *packet_data.add(i);
+        }
+        let new_position = (current_packet + packet_length as usize + 4 + 3) & !3;
+        device.current_packet = (new_position % RX_RING_SIZE) as u16;
+        outw(iobase + 0x38, device.current_packet.wrapping_sub(0x10));
+        n as i32
+    }
 }
 
 fn rtl8139_receive_one() -> i32 {
@@ -640,6 +719,9 @@ fn rtl8139_receive(limit: usize) -> i32 {
             }
 
             let packet_data = buffer_ptr.add(2) as *const u8;
+
+            // Frame length includes the 4-byte CRC
+            sniff::tap(core::slice::from_raw_parts(packet_data, packet_length as usize - 4), false);
 
             // Copy to response buffer
             if RX_RESPONSE_LENGTH == 0 || RX_RESPONSE_LENGTH + packet_length as u32 <= 4096 {
@@ -2774,8 +2856,8 @@ pub extern "C" fn graphics_draw_char_scaled(x: u32, y: u32, ch: u8, color: u32, 
 // BROWSER CONSTANTS
 // Firefox-style: tab bar → nav bar → bookmark bar → content → status bar
 // ─────────────────────────────────────────────────────────────────────────────
-const BW: u32 = 800;
-const BH: u32 = 600;
+const BW: u32 = 1280;
+const BH: u32 = 720;
 const TAB_BAR_H:    u32 = 30;
 const NAV_BAR_H:    u32 = 38;
 const BM_BAR_H:     u32 = 24;
@@ -9339,10 +9421,20 @@ impl<T> Vec<T> {
         if capacity == 0 {
             return Vec::new();
         }
+        if core::mem::size_of::<T>() == 0 {
+            return Vec {
+                ptr: core::ptr::NonNull::<T>::dangling().as_ptr(),
+                len: 0,
+                capacity,
+            };
+        }
         
         unsafe {
             let size = capacity * core::mem::size_of::<T>();
-            let ptr = malloc(size as u32) as *mut T;
+            let align = core::mem::align_of::<T>().max(1);
+            let layout = core::alloc::Layout::from_size_align(size, align)
+                .expect("vec layout");
+            let ptr = alloc::alloc::alloc(layout) as *mut T;
             
             if ptr.is_null() {
                 panic!("Failed to allocate memory for Vec");
@@ -9590,19 +9682,35 @@ impl<T> Vec<T> {
         if new_capacity <= self.capacity {
             return;
         }
+        if core::mem::size_of::<T>() == 0 {
+            if self.ptr.is_null() {
+                self.ptr = core::ptr::NonNull::<T>::dangling().as_ptr();
+            }
+            self.capacity = new_capacity;
+            return;
+        }
         
         unsafe {
             let new_size = new_capacity * core::mem::size_of::<T>();
-            let new_ptr = malloc(new_size as u32) as *mut T;
+            let align = core::mem::align_of::<T>().max(1);
+            let layout = core::alloc::Layout::from_size_align(new_size, align)
+                .expect("vec grow layout");
+            let new_ptr = alloc::alloc::alloc(layout) as *mut T;
             
             if new_ptr.is_null() {
                 panic!("Failed to allocate memory for Vec growth");
             }
             
-            // Copy old data
             if self.len > 0 && !self.ptr.is_null() {
                 core::ptr::copy_nonoverlapping(self.ptr, new_ptr, self.len);
-                free(self.ptr as *mut u8);
+            }
+            if !self.ptr.is_null() {
+                let old_size = self.capacity * core::mem::size_of::<T>();
+                if old_size > 0 {
+                    let old_layout = core::alloc::Layout::from_size_align(old_size, align)
+                        .expect("vec old layout");
+                    alloc::alloc::dealloc(self.ptr as *mut u8, old_layout);
+                }
             }
             
             self.ptr = new_ptr;
@@ -9647,9 +9755,12 @@ impl<T> Drop for Vec<T> {
                 core::ptr::drop_in_place(self.ptr.add(i));
             }
             
-            // Free memory
-            if !self.ptr.is_null() {
-                free(self.ptr as *mut u8);
+            if core::mem::size_of::<T>() != 0 && !self.ptr.is_null() && self.capacity > 0 {
+                let size = self.capacity * core::mem::size_of::<T>();
+                let align = core::mem::align_of::<T>().max(1);
+                if let Ok(layout) = core::alloc::Layout::from_size_align(size, align) {
+                    alloc::alloc::dealloc(self.ptr as *mut u8, layout);
+                }
             }
         }
     }
@@ -10037,8 +10148,23 @@ unsafe fn map_framebuffer_region(fb_base: u32, size: u32) -> bool {
 // Graphics Initialization
 //-----------------------------------------------------------------------------
 
+extern "C" {
+    fn fbcon_suspend();
+    fn fbcon_resume();
+}
+
+// Takes the display from the 1280x720 text console; it comes back on graphics_shutdown or a failed init.
 #[no_mangle]
 pub extern "C" fn graphics_init(width: u32, height: u32, bpp: u32) -> i32 {
+    unsafe { fbcon_suspend(); }
+    let result = graphics_init_impl(width, height, bpp);
+    if result != 0 {
+        unsafe { fbcon_resume(); }
+    }
+    result
+}
+
+fn graphics_init_impl(width: u32, height: u32, bpp: u32) -> i32 {
     unsafe {
         rust_print(b"\n=== Graphics Initialization ===\n");
         
@@ -10156,7 +10282,8 @@ pub extern "C" fn graphics_shutdown() {
         // 4. Disable VBE - hardware last
         vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         //terminal_initialize();
-        // 5. Safe - rust_print uses VGA text, not the framebuffer
+        // 5. Back to the 1280x720 text console (no-op when the console is not in use)
+        fbcon_resume();
         rust_print(b"Graphics shut down\n");
     }
 }
@@ -11922,8 +12049,19 @@ pub extern "C" fn rust_aes_encrypt(data: *mut u8, len: u32) -> i32 {
         log_banner(b"AES-128 CBC  --  ENCRYPT", 0x0E);
         tp(b"\n    Input:  ", 0x0F); tp_num(len, 0x0F); tp(b" bytes\n", 0x07);
 
-        let out_len = cbc_encrypt(data, len, AES_BUF.as_mut_ptr(), trace());
-        core::ptr::copy_nonoverlapping(AES_BUF.as_ptr(), data, out_len as usize);
+        let total_len = match len.checked_add(pkcs7_pad(len % 16) as u32) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let layout = match core::alloc::Layout::from_size_align(total_len as usize, 16) {
+            Ok(l) => l,
+            Err(_) => return -1,
+        };
+        let dst = alloc::alloc::alloc(layout);
+        if dst.is_null() { return -1; }
+        let out_len = cbc_encrypt(data, len, dst, trace());
+        core::ptr::copy_nonoverlapping(dst, data, out_len as usize);
+        alloc::alloc::dealloc(dst, layout);
 
         tp(b"\n    Output: ", 0x0F); tp_num(out_len, 0x0C);
         tp(b" bytes (padded to ", 0x07);
@@ -11942,12 +12080,40 @@ pub extern "C" fn rust_aes_decrypt(data: *mut u8, len: u32) -> i32 {
         log_banner(b"AES-128 CBC  --  DECRYPT", 0x0E);
         tp(b"\n    Input:  ", 0x0F); tp_num(len, 0x0F); tp(b" bytes\n", 0x07);
 
-        let out_len = cbc_decrypt(data, len, AES_BUF.as_mut_ptr(), trace());
-        core::ptr::copy_nonoverlapping(AES_BUF.as_ptr(), data, out_len as usize);
+        let layout = match core::alloc::Layout::from_size_align(len as usize, 16) {
+            Ok(l) => l,
+            Err(_) => return -1,
+        };
+        let dst = alloc::alloc::alloc(layout);
+        if dst.is_null() { return -1; }
+        let out_len = cbc_decrypt(data, len, dst, trace());
+        core::ptr::copy_nonoverlapping(dst, data, out_len as usize);
+        alloc::alloc::dealloc(dst, layout);
 
         tp(b"\n    Output: ", 0x0F); tp_num(out_len, 0x0A); tp(b" bytes\n", 0x07);
         out_len as i32
     }
+}
+
+/// Replace `filename` with `new_len` bytes from `new`. If create or write fails,
+/// restore `old_len` bytes from `old`. Returns true if the new contents were written.
+unsafe fn aes_replace_file(filename: *const u8, new: *const u8, new_len: u32,
+                           old: *const u8, old_len: u32) -> bool {
+    if avfs_remove_file(filename) != 0 {
+        tp(b"  [ERROR] Failed to remove original; file left unchanged.\n", 0x0C);
+        return false;
+    }
+    if avfs_create_file(filename, new_len) == 0
+        && (new_len == 0 || avfs_write_file(filename, new, new_len, 0) == 0)
+    {
+        return true;
+    }
+    tp(b"  [ERROR] Failed to write new file; restoring original.\n", 0x0C);
+    avfs_remove_file(filename);
+    if avfs_create_file(filename, old_len) == 0 {
+        avfs_write_file(filename, old, old_len, 0);
+    }
+    false
 }
 
 /// Encrypt an AVFS file by replacing the original with a newly created one.
@@ -11955,64 +12121,59 @@ pub extern "C" fn rust_aes_decrypt(data: *mut u8, len: u32) -> i32 {
 pub extern "C" fn rust_aes_encrypt_file(filename: *const u8) -> i32 {
     unsafe {
         if filename.is_null() { return -1; }
-        
-        // 1. Read the existing file into memory
+
         let sz = avfs_get_filesize(filename);
         if sz <= 0 {
             tp(b"  [ERROR] aes_encrypt_file: file not found\n", 0x0C);
             return -1;
         }
+        let sz = sz as u32;
 
         tp(b"\n    AVFS: encrypting \"", 0x0F);
         let mut p = filename;
         while *p != 0 { terminal_putchar(*p); p = p.add(1); }
-        tp(b"\"  (", 0x07); tp_num(sz as u32, 0x0B); tp(b" bytes)\n", 0x07);
+        tp(b"\"  (", 0x07); tp_num(sz, 0x0B); tp(b" bytes)\n", 0x07);
 
-        // Allocate buffer (aligned to 16 bytes for AES)
-        let buf = simple_malloc(((sz as usize + 15) & !15) as u32 + 16);
-        if buf.is_null() { 
-            tp(b"  [ERROR] malloc failed\n", 0x0C); 
-            return -1; 
+        let enc_len = match sz.checked_add(pkcs7_pad(sz % 16) as u32) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let (pl, el) = match (
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+            core::alloc::Layout::from_size_align(enc_len as usize, 16),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return -1,
+        };
+        let plain = alloc::alloc::alloc(pl);
+        if plain.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            return -1;
+        }
+        let enc = alloc::alloc::alloc(el);
+        if enc.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            alloc::alloc::dealloc(plain, pl);
+            return -1;
         }
 
-        avfs_read_file(filename, buf, sz as u32, 0);
-
-        // 2. Encrypt the data in the buffer
-        let enc_len = rust_aes_encrypt(buf, sz as u32);
-
-        if enc_len <= 0 {
+        let mut ret = -1;
+        if avfs_read_file(filename, plain, sz, 0) != 0 {
+            tp(b"  [ERROR] aes_encrypt_file: read failed\n", 0x0C);
+        } else if cbc_encrypt(plain, sz, enc, trace()) != enc_len {
             tp(b"  [ERROR] Encryption failed.\n", 0x0C);
-            return -1;
+        } else if aes_replace_file(filename, enc, enc_len, plain, sz) {
+            tp(b"    Written ", 0x0A); tp_num(enc_len, 0x0A);
+            tp(b" encrypted bytes.\n", 0x0A);
+            ret = 0;
         }
 
-        // 3. Define AVFS functions
-        extern "C" {
-            fn avfs_remove_file(filename: *const u8) -> i32;
-            fn avfs_create_file(filename: *const u8, size: u32) -> i32;
-        }
-        
-        // 4. Delete the old file
-        tp(b"    [INFO] Deleting original file...\n", 0x0E);
-        avfs_remove_file(filename); 
-
-        // 5. Create the new file with the exact padded size
-        // Since avfs_write_file doesn't resize, we must allocate the full size here.
-        tp(b"    [INFO] Creating new file (size=", 0x0E); tp_num(enc_len as u32, 0x0E); tp(b")...\n", 0x0E);
-        
-        if avfs_create_file(filename, enc_len as u32) != 0 {
-            tp(b"  [ERROR] Failed to create new file. Disk full?\n", 0x0C);
-            return -1;
-        }
-
-        // 6. Write the encrypted data
-        tp(b"    [INFO] Writing encrypted data...\n", 0x0E);
-        avfs_write_file(filename, buf, enc_len as u32, 0);
-
-        tp(b"    Written ", 0x0A); tp_num(enc_len as u32, 0x0A);
-        tp(b" encrypted bytes.\n", 0x0A);
-        0
+        alloc::alloc::dealloc(enc, el);
+        alloc::alloc::dealloc(plain, pl);
+        ret
     }
 }
+
 /// Decrypt an AVFS file in-place.
 #[no_mangle]
 pub extern "C" fn rust_aes_decrypt_file(filename: *const u8) -> i32 {
@@ -12023,20 +12184,45 @@ pub extern "C" fn rust_aes_decrypt_file(filename: *const u8) -> i32 {
             tp(b"  [ERROR] aes_decrypt_file: bad file (not found or not block-aligned)\n", 0x0C);
             return -1;
         }
+        let sz = sz as u32;
         tp(b"\n    AVFS: decrypting \"", 0x0F);
         let mut p = filename;
         while *p != 0 { terminal_putchar(*p); p = p.add(1); }
-        tp(b"\"  (", 0x07); tp_num(sz as u32, 0x0B); tp(b" bytes)\n", 0x07);
+        tp(b"\"  (", 0x07); tp_num(sz, 0x0B); tp(b" bytes)\n", 0x07);
 
-        let buf = simple_malloc(sz as u32);
-        if buf.is_null() { return -1; }
+        let (cl, pl) = match (
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+            core::alloc::Layout::from_size_align(sz as usize, 16),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return -1,
+        };
+        let cipher = alloc::alloc::alloc(cl);
+        if cipher.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            return -1;
+        }
+        let plain = alloc::alloc::alloc(pl);
+        if plain.is_null() {
+            tp(b"  [ERROR] malloc failed\n", 0x0C);
+            alloc::alloc::dealloc(cipher, cl);
+            return -1;
+        }
 
-        avfs_read_file(filename, buf, sz as u32, 0);
-        rust_aes_decrypt(buf, sz as u32);
-        avfs_write_file(filename, buf, sz as u32, 0);
+        let mut ret = -1;
+        if avfs_read_file(filename, cipher, sz, 0) != 0 {
+            tp(b"  [ERROR] aes_decrypt_file: read failed\n", 0x0C);
+        } else {
+            let out_len = cbc_decrypt(cipher, sz, plain, trace());
+            if aes_replace_file(filename, plain, out_len, cipher, sz) {
+                tp(b"    File decrypted.\n", 0x0A);
+                ret = 0;
+            }
+        }
 
-        tp(b"    File decrypted.\n", 0x0A);
-        0
+        alloc::alloc::dealloc(plain, pl);
+        alloc::alloc::dealloc(cipher, cl);
+        ret
     }
 }
 
@@ -13631,20 +13817,13 @@ pub extern "C" fn rust_start_demo_tasks() {
         init_net_defaults(); 
         draw_separator();
         rust_create_task_ex(keyboard_handler as u32, true, 10,  0, 0);
-        rust_create_task_ex(watchdog_task    as u32, true, 10,  0, 0);
-        
         rust_create_task_ex(heartbeat_task   as u32, true,  8,  0, 0);
         rust_create_task_ex(timed_message    as u32, true,  4,  0, 0);
-        
-        // --- NEW TASK ADDED HERE ---
-        
-        // ---------------------------
-
-        rust_create_task_ex(thermal_task     as u32, true,  7,  1, 0); 
-        rust_create_task_ex(io_stress_task   as u32, true,  5,  2, 0); 
-        rust_create_task_ex(reaper_task      as u32, true,  9,  0, 0);
-        rust_create_task_ex(affinity_task    as u32, true,  6,  0, 0);
-        rust_create_task_ex(ipc_monitor_task as u32, true,  7,  0, 0);
+        // These three cannot be killed and come back if they ever vanish; the guard tasks watch over them and the kernel.
+        guard::protect(keyboard_handler as u32, 10);
+        guard::protect(heartbeat_task   as u32,  8);
+        guard::protect(timed_message    as u32,  4);
+        guard::spawn_all();
     }
 }
 
@@ -13689,6 +13868,11 @@ pub extern "C" fn rust_kill_task(pid: u32) -> i32 {
         if pid == 0 { rust_print(b"Error: Cannot kill idle task\n"); return -1; }
         for i in 0..MAX_TASKS {
             if TASKS[i].is_active && TASKS[i].pid == pid {
+                if guard::is_essential(TASKS[i].entry_point) {
+                    guard::kill_refused(pid);
+                    rust_print(b"Error: that task is protected by the kernel guard\n");
+                    return -1;
+                }
                 // Mark as Zombie so the reaper can clean it up properly
                 TASKS[i].state = TaskState::Zombie;
                 rust_print(b"Marked PID "); print_num(pid as i32); rust_print(b" as Zombie\n");
@@ -13704,6 +13888,39 @@ pub extern "C" fn rust_kill_task(pid: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_get_task_count() -> u32 {
     unsafe { NUM_TASKS as u32 }
+}
+
+/// Fills `out` with 8 u32 per active task: pid, id, state (0 ready, 1 running, 2 blocked, 3 zombie, 4 sleeping),
+/// priority, affinity, total ticks, created tick, entry point. Returns the number of tasks written.
+#[no_mangle]
+pub extern "C" fn rust_task_snapshot(out: *mut u32, max: u32) -> u32 {
+    let mut n = 0u32;
+    if out.is_null() { return 0; }
+    unsafe {
+        for i in 0..MAX_TASKS {
+            if !TASKS[i].is_active || n >= max { continue; }
+            let p = out.add(n as usize * 8);
+            *p = TASKS[i].pid;
+            *p.add(1) = TASKS[i].id;
+            *p.add(2) = TASKS[i].state as u32;
+            *p.add(3) = TASKS[i].priority as u32;
+            *p.add(4) = TASKS[i].affinity as u32;
+            *p.add(5) = TASKS[i].total_ticks;
+            *p.add(6) = TASKS[i].created_tick;
+            *p.add(7) = TASKS[i].entry_point;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A NUL-terminated name for the built-in demo tasks, null for any other entry point.
+#[no_mangle]
+pub extern "C" fn rust_task_name(entry: u32) -> *const u8 {
+    if entry == keyboard_handler as u32 { return b"keyboard\0".as_ptr(); }
+    if entry == heartbeat_task as u32 { return b"heartbeat\0".as_ptr(); }
+    if entry == timed_message as u32 { return b"messages\0".as_ptr(); }
+    guard::name(entry)
 }
 
 #[no_mangle]
@@ -14431,21 +14648,22 @@ pub extern "C" fn watchdog_diagram() {
 //   - Function bodies now stored in flat FUNC_BODY_POOL (external static)
 //   - ScriptFunction stores (pool_start: u16, body_count: u16) indices only
 //   - FUNC_BODY_BUF scratch removed from global; replaced by direct pool slice
-//   - GLOBAL_CTX BSS footprint: ~178 KB (was ~2.1 MB)
+//   - GLOBAL_CTX BSS footprint: see size_of::<ScriptCtx>() (was ~2.1 MB)
 //   - FUNC_BODY_POOL BSS: 768 KB (3072 lines × 256 bytes)
 //   - All other logic identical to v2.2
 //
 // SIZE BREAKDOWN (BSS):
 //   FUNC_BODY_POOL  [Line; 3072]        = 786,432 bytes
-//   GLOBAL_CTX      ScriptCtx           = ~178,000 bytes
+//   GLOBAL_CTX      ScriptCtx           = size_of::<ScriptCtx>() (~0.3 MB)
 //   LINES_D0..D3    [Line; 1000] × 4   = 1,024,000 bytes
 //   FBUF_D0..D3     [u8; 32768] × 4    = 131,072 bytes
 //   FREAD_SCRATCH   [u8; 4096]          = 4,096 bytes
-//   Total                               ≈ 2.1 MB  (was ≈ 4.2 MB, was crashing)
+//   Total                               ≈ 2.2 MB  (was ≈ 4.2 MB, was crashing)
 // =============================================================================
 
 // ── Size constants ────────────────────────────────────────────────────────────
 pub const MAX_VARS:          usize = 322;
+pub const SAVE_STACK_SIZE:   usize = 512;  // shared across all call frames
 pub const MAX_FUNCTIONS:     usize = 644;
 pub const MAX_CALL_STACK:    usize = 16;
 pub const MAX_LINES:         usize = 1000;
@@ -14464,6 +14682,10 @@ pub const MAX_MAP_VAL_LEN:   usize = 128;
 pub const MAX_FILE_SIZE:     usize = 32768;
 pub const MAX_ONCE_TAGS:     usize = 32;
 pub const MAX_ONCE_TAG_LEN:  usize = 32;
+pub const MAX_ALIASES:       usize = 32;
+pub const MAX_ALIAS_DEPTH:   usize = 4;
+pub const MAX_MEM_ALLOCS:    usize = 32;
+pub const MAX_MEM_ALLOC_SIZE: i64  = 65536;
 
 // ── Function body pool ────────────────────────────────────────────────────────
 // Stored OUTSIDE ScriptCtx to avoid BSS explosion.
@@ -14703,22 +14925,21 @@ impl ScriptFunction {
 
 // ── CallFrame  (compact var save) ────────────────────────────────────────────
 // Saves only in-use variable slots (by index), not the full table.
-// Worst case: 32 slots × (32+128+1) bytes = ~5 KB per frame × 16 frames = 83 KB.
-// That's fine.  The key win was removing the body[] from ScriptFunction.
+// All frames share one save stack in ScriptCtx (save_vars/save_idx, SAVE_STACK_SIZE
+// entries); each frame records (base, count) into it.  A call fails cleanly if the
+// shared stack cannot hold the caller's live variables.
 
 #[derive(Clone, Copy)]
 pub struct CallFrame {
     pub func_name:     FuncName,
-    pub saved_vars:    [Variable; MAX_VARS],
-    pub saved_indices: [u8; MAX_VARS],
+    pub save_base:     usize,
     pub saved_count:   usize,
 }
 impl CallFrame {
     pub const fn new() -> Self {
         Self {
             func_name:     Str::new(),
-            saved_vars:    [Variable::new(); MAX_VARS],
-            saved_indices: [0u8; MAX_VARS],
+            save_base:     0,
             saved_count:   0,
         }
     }
@@ -14735,8 +14956,29 @@ impl OnceTag {
     pub const fn new() -> Self { Self { tag: Str::new(), used: false } }
 }
 
+// ── Alias table ───────────────────────────────────────────────────────────────
+// Kept separate from ctx.vars so aliases do not consume variable slots.
+// MAX_ALIASES * size_of::<AliasEntry>() bytes inside ScriptCtx.
+
+#[derive(Clone, Copy)]
+pub struct AliasEntry {
+    pub name:  VarName,
+    pub value: VarVal,
+    pub used:  bool,
+}
+
+impl AliasEntry {
+    pub const fn new() -> Self { Self { name: Str::new(), value: Str::new(), used: false } }
+}
+
+// Pointers handed out by mem_alloc (script-visible), so mem_free only frees
+// what mem_alloc returned.
+static mut MEM_ALLOCS: [usize; MAX_MEM_ALLOCS] = [0; MAX_MEM_ALLOCS];
+static mut ALIAS_DEPTH: usize = 0;
+
 // ── Script context ────────────────────────────────────────────────────────────
-// BSS footprint with pool fix: ~178 KB  (was ~2.1 MB)
+// Size is authoritative via size_of::<ScriptCtx>() (see rsh_ctx_size() and the
+// const assert below); the C plugin pool (RSH_CTX_SIZE_BYTES) must be >= it.
 
 #[derive(Clone, Copy)]
 pub struct ScriptCtx {
@@ -14744,7 +14986,11 @@ pub struct ScriptCtx {
     pub funcs:         [ScriptFunction; MAX_FUNCTIONS],
     pub maps:          [ScriptMap; MAX_MAPS],
     pub call_stack:    [CallFrame; MAX_CALL_STACK],
+    pub save_vars:     [Variable; SAVE_STACK_SIZE],
+    pub save_idx:      [u16; SAVE_STACK_SIZE],
+    pub save_top:      usize,
     pub once_tags:     [OnceTag; MAX_ONCE_TAGS],
+    pub aliases:       [AliasEntry; MAX_ALIASES],
     pub call_depth:    usize,
     pub in_function:   bool,
     pub break_flag:    bool,
@@ -14754,6 +15000,7 @@ pub struct ScriptCtx {
     pub exit_code:     i32,
     pub active_map:    Str<32>,
     pub with_map:      Str<32>,
+    pub main_called:   bool,
 }
 
 impl ScriptCtx {
@@ -14763,7 +15010,11 @@ impl ScriptCtx {
             funcs:         [ScriptFunction::new(); MAX_FUNCTIONS],
             maps:          [ScriptMap::new(); MAX_MAPS],
             call_stack:    [CallFrame::new(); MAX_CALL_STACK],
+            save_vars:     [Variable::new(); SAVE_STACK_SIZE],
+            save_idx:      [0u16; SAVE_STACK_SIZE],
+            save_top:      0,
             once_tags:     [OnceTag::new(); MAX_ONCE_TAGS],
+            aliases:       [AliasEntry::new(); MAX_ALIASES],
             call_depth:    0,
             in_function:   false,
             break_flag:    false,
@@ -14773,6 +15024,7 @@ impl ScriptCtx {
             exit_code:     0,
             active_map:    Str::new(),
             with_map:      Str::new(),
+            main_called:   false,
         }
     }
 
@@ -15429,15 +15681,28 @@ fn parse_lines(data: &[u8], lines: &mut [Line; MAX_LINES]) -> usize {
 }
 
 fn resolve_path(path: &[u8], out: &mut [u8; 256]) -> bool {
-    let len = path.len().min(255);
-    out[..len].copy_from_slice(&path[..len]);
-    out[len] = 0;
-    if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
-    if len + 4 < 256 {
-        out[len..len+4].copy_from_slice(b".rsh");
-        out[len+4] = 0;
-        if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+    fn try_path(bytes: &[u8], out: &mut [u8; 256]) -> bool {
+        let len = bytes.len().min(255);
+        out[..len].copy_from_slice(&bytes[..len]);
         out[len] = 0;
+        if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+        if len + 4 < 256 {
+            out[len..len+4].copy_from_slice(b".rsh");
+            out[len+4] = 0;
+            if unsafe { avfs_file_exists(out.as_ptr()) } { return true; }
+            out[len] = 0;
+        }
+        false
+    }
+    if try_path(path, out) { return true; }
+    if !path.starts_with(b"/") {
+        let mut prefixed = [0u8; 256];
+        let pfx = b"/bin/";
+        if pfx.len() + path.len() < 256 {
+            prefixed[..pfx.len()].copy_from_slice(pfx);
+            prefixed[pfx.len()..pfx.len()+path.len()].copy_from_slice(path);
+            if try_path(&prefixed[..pfx.len()+path.len()], out) { return true; }
+        }
     }
     false
 }
@@ -15447,6 +15712,7 @@ fn resolve_path(path: &[u8], out: &mut [u8; 256]) -> bool {
 // =============================================================================
 
 fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
+    if name == b"main" { ctx.main_called = true; }
     let func_idx = match ctx.find_func(name) {
         Some(i) => i,
         None => {
@@ -15482,19 +15748,28 @@ fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
 
     // ── Save only in-use variable slots (compact) ─────────────────────────────
     {
-        let frame = &mut ctx.call_stack[ctx.call_depth];
-        frame.func_name.set(name);
-        frame.saved_count = 0;
+        let mut live = 0usize;
+        for i in 0..MAX_VARS {
+            if ctx.vars[i].used { live += 1; }
+        }
+        if ctx.save_top + live > SAVE_STACK_SIZE {
+            rust_print(b"Error: too many live variables to save across call\n");
+            return -1;
+        }
+        let base = ctx.save_top;
+        let mut n = 0usize;
         for i in 0..MAX_VARS {
             if ctx.vars[i].used {
-                let sc = frame.saved_count;
-                if sc < MAX_VARS {
-                    frame.saved_vars[sc]    = ctx.vars[i];
-                    frame.saved_indices[sc] = i as u8;
-                    frame.saved_count += 1;
-                }
+                ctx.save_vars[base + n] = ctx.vars[i];
+                ctx.save_idx[base + n]  = i as u16;
+                n += 1;
             }
         }
+        ctx.save_top = base + n;
+        let frame = &mut ctx.call_stack[ctx.call_depth];
+        frame.func_name.set(name);
+        frame.save_base   = base;
+        frame.saved_count = n;
     }
     ctx.call_depth += 1;
 
@@ -15539,13 +15814,14 @@ fn call_function(name: &[u8], args: &[&[u8]], ctx: &mut ScriptCtx) -> i32 {
     // ── Restore saved variables ───────────────────────────────────────────────
     for v in ctx.vars.iter_mut() { v.used = false; }
     {
-        let frame = &ctx.call_stack[ctx.call_depth];
-        for i in 0..frame.saved_count {
-            let idx = frame.saved_indices[i] as usize;
+        let (base, n) = (ctx.call_stack[ctx.call_depth].save_base, ctx.call_stack[ctx.call_depth].saved_count);
+        for i in 0..n {
+            let idx = ctx.save_idx[base + i] as usize;
             if idx < MAX_VARS {
-                ctx.vars[idx] = frame.saved_vars[i];
+                ctx.vars[idx] = ctx.save_vars[base + i];
             }
         }
+        ctx.save_top = base;
     }
 
     result
@@ -15635,17 +15911,20 @@ pub fn exec_file(path: &[u8], ctx: &mut ScriptCtx) -> i32 {
         i += 1;
     }
 
-    // Second pass: execute (unless ^entrypoint delegates to main())
+    // Second pass: run top-level statements, then main() if ^entrypoint.
     ctx.include_depth += 1;
+    let setup = exec_block(lines_slice, 0, line_count - 1, ctx);
     let result = if requires_main {
         if ctx.find_func(b"main").is_none() {
             rust_print(b"Error: ^entrypoint but no main() defined\n");
             ctx.include_depth -= 1;
             return -1;
         }
-        call_function(b"main", &[], ctx)
+        if setup != 0 { setup }
+        else if ctx.main_called { 0 }
+        else { call_function(b"main", &[], ctx) }
     } else {
-        exec_block(lines_slice, 0, line_count - 1, ctx)
+        setup
     };
     ctx.include_depth -= 1;
     result
@@ -16111,6 +16390,107 @@ fn dispatch_cmd(
             let mut i = 1;
             while i < argc { if i > 1 { rust_print(b" "); } rust_print(val!(i)); i += 1; }
             rust_print(b"\n");
+        }
+        b"alias" => {
+            if argc >= 3 {
+                let mut tmp = VarVal::new();
+                let mut i = 2;
+                while i < argc {
+                    if i > 2 { tmp.push(b' '); }
+                    tmp.append(arg!(i));
+                    i += 1;
+                }
+                let name = arg!(1);
+                let slot = ctx.aliases.iter().position(|a| a.used && a.name.as_bytes() == name)
+                    .or_else(|| ctx.aliases.iter().position(|a| !a.used));
+                match slot {
+                    Some(k) => {
+                        let a = &mut ctx.aliases[k];
+                        a.name.set(name);
+                        a.value.set(tmp.as_bytes());
+                        a.used = true;
+                    }
+                    None => rust_print(b"Error: alias table full\n"),
+                }
+            }
+        }
+        b"unalias" => {
+            if argc >= 2 {
+                let name = arg!(1);
+                for a in ctx.aliases.iter_mut() {
+                    if a.used && a.name.as_bytes() == name { a.used = false; }
+                }
+            }
+        }
+        b"aliases" => {
+            for a in ctx.aliases.iter() {
+                if a.used {
+                    rust_print(a.name.as_bytes());
+                    rust_print(b" = ");
+                    rust_print(a.value.as_bytes());
+                    rust_print(b"\n");
+                }
+            }
+        }
+        b"concat" => {
+            if argc >= 2 {
+                let mut out = Line::new();
+                let mut i = 2;
+                while i < argc {
+                    for &b in val!(i) { out.push(b); }
+                    i += 1;
+                }
+                ctx.set_var(arg!(1), out.as_bytes());
+            }
+        }
+        b"mem_alloc" => {
+            if argc >= 3 {
+                let n = ival!(1);
+                let mut p: *mut u8 = core::ptr::null_mut();
+                if n > 0 && n <= MAX_MEM_ALLOC_SIZE {
+                    unsafe {
+                        if let Some(slot) = MEM_ALLOCS.iter().position(|&a| a == 0) {
+                            p = malloc(n as u32);
+                            MEM_ALLOCS[slot] = p as usize;
+                        }
+                    }
+                }
+                let mut buf = [0u8; 24];
+                ctx.set_var(arg!(2), int_to_str(p as usize as i64, &mut buf));
+            }
+        }
+        b"mem_total" | b"mem_used" => {
+            // KB of physical memory, from the PMM
+            let bytes = unsafe { if cmd == b"mem_total" { pmm_get_total_memory() } else { pmm_get_used_memory() } };
+            ctx.set_var_int(if argc >= 2 { arg!(1) } else if cmd == b"mem_total" { b"MEM_TOTAL" } else { b"MEM_USED" }, (bytes / 1024) as i64);
+        }
+        b"mem_free" => {
+            // `mem_free PTR` frees a mem_alloc block; `mem_free NAME` (non-numeric)
+            // stores free physical memory (KB) in variable NAME.
+            let raw = if argc >= 2 { arg!(1) } else { b"MEM_FREE" };
+            if !raw.is_empty() && raw.iter().all(|c| c.is_ascii_digit()) {
+                let p = parse_int(raw) as usize;
+                if p != 0 {
+                    unsafe {
+                        if let Some(slot) = MEM_ALLOCS.iter().position(|&a| a == p) {
+                            MEM_ALLOCS[slot] = 0;
+                            free(p as *mut u8);
+                        }
+                    }
+                }
+            } else {
+                let kb = unsafe { pmm_get_free_memory() } / 1024;
+                ctx.set_var_int(raw, kb as i64);
+            }
+        }
+        b"touch" => {
+            if argc >= 2 {
+                let mut path = [0u8; 256];
+                let n = arg!(1);
+                let len = n.len().min(255);
+                path[..len].copy_from_slice(&n[..len]);
+                unsafe { avfs_create_file(path.as_ptr(), 0); }
+            }
         }
         b"print" => {
             let mut i = 1;
@@ -17006,7 +17386,7 @@ fn dispatch_cmd(
             let sub=arg!(1);
             if sub==b"set" && argc>=4{
                 let v=arg!(3);
-                ctx.set_var(arg!(2), if v==b"TRUE"||v==b"yes"{b"1"}else{b"0"});
+                ctx.set_var(arg!(2), if v.eq_ignore_ascii_case(b"true")||v.eq_ignore_ascii_case(b"yes")||v==b"1"{b"1"}else{b"0"});
             } else if sub==b"toggle" && argc>=3{
                 let cur=ctx.get_var(arg!(2)).unwrap_or(b"0");
                 ctx.set_var(arg!(2), if cur==b"1"{b"0"}else{b"1"});
@@ -17055,6 +17435,33 @@ fn dispatch_cmd(
                         return 0;
                     }
                 }
+            }
+
+            // Alias expansion (bounded depth to stop alias loops)
+            if let Some(k) = ctx.aliases.iter().position(|a| a.used && a.name.as_bytes() == cmd) {
+                if unsafe { ALIAS_DEPTH } < MAX_ALIAS_DEPTH {
+                    let mut nl = Line::new();
+                    nl.append(ctx.aliases[k].value.as_bytes());
+                    if argc >= 2 {
+                        nl.push(b' ');
+                        nl.append(&line[starts[1] as usize..]);
+                    }
+                    let mut s2 = [0u16; MAX_ARGS];
+                    let mut l2 = [0u16; MAX_ARGS];
+                    let n2 = tokenize_offsets(nl.as_bytes(), &mut s2, &mut l2);
+                    if n2 > 0 {
+                        let c2 = &nl.as_bytes()[s2[0] as usize..(s2[0] + l2[0]) as usize];
+                        unsafe { ALIAS_DEPTH += 1; }
+                        let r = dispatch_cmd(c2, n2, nl.as_bytes(), &s2, &l2, ctx);
+                        unsafe { ALIAS_DEPTH -= 1; }
+                        return r;
+                    }
+                    return 0;
+                }
+                rust_print(b"Error: alias recursion too deep: ");
+                rust_print(cmd);
+                rust_print(b"\n");
+                return -1;
             }
 
             rust_print(b"Unknown command: ");
@@ -17246,6 +17653,17 @@ unsafe fn ctx_from_ptr<'a>(ctx: *mut u8) -> &'a mut ScriptCtx {
 }
 
 // ── Per-context C interface ───────────────────────────────────────────────────
+
+/// Upper bound the C plugin pool (RSH_CTX_SIZE_BYTES in rshplugin.c) is sized for.
+/// Keep both in sync; growing ScriptCtx past this fails to compile.
+pub const RSH_CTX_MAX_BYTES: usize = 360448;
+const _: () = assert!(core::mem::size_of::<ScriptCtx>() <= RSH_CTX_MAX_BYTES);
+
+/// Authoritative ScriptCtx size, checked by the C plugin loader.
+#[no_mangle]
+pub extern "C" fn rsh_ctx_size() -> usize {
+    core::mem::size_of::<ScriptCtx>()
+}
 
 /// Zero-initialise a caller-owned ScriptCtx buffer.
 /// Must be the first call made on any buffer before using any other ctx API.

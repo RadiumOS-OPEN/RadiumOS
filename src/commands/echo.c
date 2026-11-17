@@ -1,4 +1,9 @@
 // echo.c
+// Author: scp_2801
+//
+// Fixed: write path uses avfs_save_file (atomic create-or-overwrite) so
+// /disk/* files are written correctly without the create+write double-alloc.
+
 #include "../terminal/terminal.h"
 #include "../Avfs/Avfs.h"
 #include "../utility/utility.h"
@@ -21,8 +26,7 @@ static void echo_str_copy(char* dst, const char* src, int max) {
 }
 
 static void echo_str_cat(char* dst, const char* src, int max) {
-    int i = 0;
-    while (dst[i]) i++;
+    int i = 0; while (dst[i]) i++;
     int j = 0;
     while (src[j] && i < max - 1) { dst[i++] = src[j++]; }
     dst[i] = 0;
@@ -30,29 +34,21 @@ static void echo_str_cat(char* dst, const char* src, int max) {
 
 /* ── Path resolver ────────────────────────────────────────────────── */
 /*
-   ABSOLUTE (requires /~/ or ~/):
-     /~/filename          -> /filename
-     /~/dir/filename      -> /dir/filename
-     ~/filename           -> /filename
-     ~/dir/filename       -> /dir/filename
-
-   RELATIVE (bare name, no /~/ or ~/):
-     filename             -> CWD/filename
-
-   Returns 2 if absolute syntax was used.
-   Returns 1 if relative (CWD) was used.
+   Absolute  (/~/ or ~/):        resolved to /<rest>   → returns 2
+   Relative  (bare name, no /):  resolved to CWD/name  → returns 1
    Returns 0 on error.
+
+   When cwd is /disk or /disk/subdir, relative names naturally resolve
+   to /disk/... which Avfs.c routes to FAT32 transparently.
 */
 static int echo_resolve_path(const char* arg, char* out, int out_sz) {
     if (!arg || !arg[0]) return 0;
 
-    /* /~/ alone = root (absolute) */
+    /* /~/ alone = root */
     if (arg[0] == '/' && arg[1] == '~' && arg[2] == '/' && arg[3] == 0) {
-        out[0] = '/'; out[1] = 0;
-        return 2;
+        out[0] = '/'; out[1] = 0; return 2;
     }
-
-    /* /~/path (absolute) */
+    /* /~/path */
     if (arg[0] == '/' && arg[1] == '~' && arg[2] == '/') {
         const char* inner = arg + 3;
         int len = echo_str_len(inner);
@@ -61,17 +57,13 @@ static int echo_resolve_path(const char* arg, char* out, int out_sz) {
         if (len + 2 > out_sz) return 0;
         out[0] = '/';
         for (int i = 0; i < len; i++) out[i + 1] = inner[i];
-        out[len + 1] = 0;
-        return 2;
+        out[len + 1] = 0; return 2;
     }
-
-    /* ~/ alone = root (absolute) */
+    /* ~/ alone = root */
     if (arg[0] == '~' && arg[1] == '/' && arg[2] == 0) {
-        out[0] = '/'; out[1] = 0;
-        return 2;
+        out[0] = '/'; out[1] = 0; return 2;
     }
-
-    /* ~/path (absolute) */
+    /* ~/path */
     if (arg[0] == '~' && arg[1] == '/') {
         const char* inner = arg + 2;
         int len = echo_str_len(inner);
@@ -80,11 +72,18 @@ static int echo_resolve_path(const char* arg, char* out, int out_sz) {
         if (len + 2 > out_sz) return 0;
         out[0] = '/';
         for (int i = 0; i < len; i++) out[i + 1] = inner[i];
-        out[len + 1] = 0;
+        out[len + 1] = 0; return 2;
+    }
+
+    /* Absolute path starting with / (e.g. /disk/file.txt) — pass through */
+    if (arg[0] == '/') {
+        int len = echo_str_len(arg);
+        if (len >= out_sz) return 0;
+        for (int i = 0; i <= len; i++) out[i] = arg[i];
         return 2;
     }
 
-    /* bare name — relative to CWD (returns 1, not 2) */
+    /* Bare name — relative to CWD */
     {
         const char* cwd = avfs_get_cwd();
         int cwd_len = echo_str_len(cwd);
@@ -121,9 +120,7 @@ static void echo_process_escapes(const char* src, char* dst, int dst_sz) {
                 case 'a':  dst[j++] = '\a'; break;
                 case 'b':  dst[j++] = '\b'; break;
                 case '\\': dst[j++] = '\\'; break;
-                case '0':
-                    dst[j] = 0;
-                    return;
+                case '0':  dst[j] = 0; return;
                 default:
                     dst[j++] = '\\';
                     if (j < dst_sz - 1) dst[j++] = src[i];
@@ -138,40 +135,38 @@ static void echo_process_escapes(const char* src, char* dst, int dst_sz) {
 }
 
 /* ── Write to file helper ─────────────────────────────────────────── */
-static void echo_write_file(const char* path, const char* content,
-                            int append) {
+/*
+   Uses avfs_save_file for create/overwrite (atomic, works for both RAM
+   and /disk FAT32) and avfs_append_file for >>.  Both are already
+   disk-aware in Avfs.c — no extra logic needed here.
+*/
+static void echo_write_file(const char* path, const char* content, int append) {
     int content_len = echo_str_len(content);
 
-    if (append && avfs_file_exists(path)) {
-        char newline = '\n';
-        avfs_append_file(path, &newline, 1);
-        int r = avfs_append_file(path, content, content_len);
-        if (r != 0) {
-            print("echo: failed to append to '");
-            print(path);
-            print("'\n");
+    if (append) {
+        /* append_file handles both existing and new files transparently */
+        if (avfs_file_exists(path)) {
+            char newline = '\n';
+            avfs_append_file(path, &newline, 1);
+            int r = avfs_append_file(path, content, (uint32_t)content_len);
+            if (r != 0) {
+                print("echo: failed to append to '"); print(path); print("'\n");
+            }
+        } else {
+            /* file doesn't exist yet — create it via save_file */
+            int r = avfs_save_file(path, content, (uint32_t)content_len, false);
+            if (r != 0) {
+                print("echo: failed to create '"); print(path); print("'\n");
+            }
         }
         return;
     }
 
-    if (avfs_file_exists(path)) {
-        avfs_remove_file(path);
-    }
-
-    int r = avfs_create_file(path, content_len);
+    /* Overwrite / create — avfs_save_file is atomic:
+       it creates+writes in one step for new files, and replaces for existing. */
+    int r = avfs_save_file(path, content, (uint32_t)content_len, true);
     if (r != 0) {
-        print("echo: failed to create '");
-        print(path);
-        print("'\n");
-        return;
-    }
-
-    r = avfs_write_file(path, content, content_len, 0);
-    if (r != 0) {
-        print("echo: failed to write to '");
-        print(path);
-        print("'\n");
-        avfs_remove_file(path);
+        print("echo: failed to write to '"); print(path); print("'\n");
     }
 }
 
@@ -179,10 +174,7 @@ static void echo_write_file(const char* path, const char* content,
 #define ECHO_BUF 4096
 
 void echo_command(int argc, char* argv[]) {
-    if (argc < 2) {
-        print("\n");
-        return;
-    }
+    if (argc < 2) { print("\n"); return; }
 
     /* ── parse flags ─────────────────────────────────────────────── */
     int escape     = 0;
@@ -193,14 +185,13 @@ void echo_command(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
         if (a[0] != '-' || !a[1]) break;
-
         int is_flag = 1;
         for (int k = 1; a[k]; k++) {
             switch (a[k]) {
-                case 'e': escape     = 1; no_escape = 0; break;
-                case 'E': no_escape  = 1; escape    = 0; break;
-                case 'n': no_newline = 1;                break;
-                default:  is_flag    = 0;                break;
+                case 'e': escape    = 1; no_escape = 0; break;
+                case 'E': no_escape = 1; escape    = 0; break;
+                case 'n': no_newline = 1;               break;
+                default:  is_flag   = 0;                break;
             }
         }
         if (!is_flag) break;
@@ -212,46 +203,27 @@ void echo_command(int argc, char* argv[]) {
     int append_mode    = 0;
 
     for (int i = arg_start; i < argc; i++) {
-        if (echo_str_eq(argv[i], ">>")) {
-            redirect_index = i;
-            append_mode    = 1;
-            break;
-        }
-        if (echo_str_eq(argv[i], ">")) {
-            redirect_index = i;
-            append_mode    = 0;
-            break;
-        }
+        if (echo_str_eq(argv[i], ">>")) { redirect_index = i; append_mode = 1; break; }
+        if (echo_str_eq(argv[i], ">"))  { redirect_index = i; append_mode = 0; break; }
     }
 
     /* ── build output text ───────────────────────────────────────── */
-    char raw[ECHO_BUF];
-    raw[0] = 0;
+    char raw[ECHO_BUF]; raw[0] = 0;
     int pos = 0;
-
     int end_index = (redirect_index != -1) ? redirect_index : argc;
 
     for (int i = arg_start; i < end_index; i++) {
         int arg_len = echo_str_len(argv[i]);
-        if (pos + arg_len + 2 >= ECHO_BUF) {
-            print("echo: text too long\n");
-            return;
-        }
+        if (pos + arg_len + 2 >= ECHO_BUF) { print("echo: text too long\n"); return; }
         echo_str_cat(raw, argv[i], ECHO_BUF);
         pos += arg_len;
-        if (i < end_index - 1) {
-            raw[pos++] = ' ';
-            raw[pos]   = 0;
-        }
+        if (i < end_index - 1) { raw[pos++] = ' '; raw[pos] = 0; }
     }
 
     /* ── process escape sequences ────────────────────────────────── */
     char processed[ECHO_BUF];
-    if (escape && !no_escape) {
-        echo_process_escapes(raw, processed, ECHO_BUF);
-    } else {
-        echo_str_copy(processed, raw, ECHO_BUF);
-    }
+    if (escape && !no_escape) echo_process_escapes(raw, processed, ECHO_BUF);
+    else                      echo_str_copy(processed, raw, ECHO_BUF);
 
     /* ── handle redirection ──────────────────────────────────────── */
     if (redirect_index != -1) {
@@ -267,32 +239,34 @@ void echo_command(int argc, char* argv[]) {
         int resolved = echo_resolve_path(raw_path, path, sizeof(path));
 
         if (!resolved) {
-            print("echo: invalid path '");
-            print(raw_path);
-            print("'\n");
+            print("echo: invalid path '"); print(raw_path); print("'\n");
             return;
         }
 
-        /* enforce /~/ or ~/ for absolute paths outside CWD */
+        /* For relative bare names (resolved == 1), block subdirectory
+           separators to prevent accidental absolute path construction
+           without the ~/ guard — UNLESS the cwd is already /disk/* in
+           which case a slash in the name would be a FAT subpath, which
+           we also allow now. */
         if (resolved == 1) {
-            /* relative path — only allowed if no directory separator */
-            /* i.e. bare filename only, not subdir/file */
-            int has_slash = 0;
-            for (int i = 0; raw_path[i]; i++) {
-                if (raw_path[i] == '/') { has_slash = 1; break; }
-            }
-            if (has_slash) {
-                print("echo: use /~/ or ~/ for absolute paths\n");
-                print("  e.g.  echo text > /~/dir/file.txt\n");
-                print("        echo text > ~/dir/file.txt\n");
-                return;
+            const char* cwd = avfs_get_cwd();
+            /* check if cwd starts with /disk */
+            int cwd_is_disk = (cwd[0]=='/' && cwd[1]=='d' && cwd[2]=='i' &&
+                               cwd[3]=='s' && cwd[4]=='k' &&
+                               (cwd[5]=='\0' || cwd[5]=='/'));
+            if (!cwd_is_disk) {
+                for (int i = 0; raw_path[i]; i++) {
+                    if (raw_path[i] == '/') {
+                        print("echo: use /~/ or ~/ for absolute paths\n");
+                        print("  e.g.  echo text > /~/dir/file.txt\n");
+                        return;
+                    }
+                }
             }
         }
 
         if (avfs_is_directory(path)) {
-            print("echo: '");
-            print(path);
-            print("' is a directory\n");
+            print("echo: '"); print(path); print("' is a directory\n");
             return;
         }
 
