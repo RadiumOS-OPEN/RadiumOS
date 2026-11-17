@@ -34,6 +34,12 @@ extern int rbrowse_http(const uint8_t *url, const uint8_t *body, int body_len,
                         const uint8_t *content_type, int same_origin,
                         uint8_t *out, int cap, uint8_t *final_url, int final_cap);
 extern int rbrowse_cookie_get(const uint8_t *url, uint8_t *out, int cap);
+/* Who causes the next requests (SameSite): the page's URL (NULL: the user)
+   and whether they are top-level navigations. */
+extern void rbrowse_http_context(const uint8_t *initiator, int top_level);
+static void req_ctx(const char *page, int top) {
+    rbrowse_http_context((const uint8_t *)(page && page[0] ? page : 0), top);
+}
 extern int rbrowse_cookie_set(const uint8_t *url, const uint8_t *text);
 extern void rbrowse_cookie_clear(void);
 extern bool rust_fetch_active(void);
@@ -741,6 +747,7 @@ static void js_console(const char *s, int len) {
 
 /* fetch()/XHR from scripts. */
 static int js_fetch(const char *url, char *out, int cap, int same_origin) {
+    req_ctx(g_current, 0);
     fg_watchdog_pause();
     int n = same_origin ? rbrowse_http_get_same_origin((const uint8_t *)url, (uint8_t *)out, cap)
                         : rbrowse_http_get((const uint8_t *)url, (uint8_t *)out, cap);
@@ -750,6 +757,7 @@ static int js_fetch(const char *url, char *out, int cap, int same_origin) {
 
 /* fetch()/XHR POST: the reply is read by the page, so same-origin. */
 static int js_post(const char *url, const char *body, int len, const char *ctype, char *out, int cap) {
+    req_ctx(g_current, 0);
     fg_watchdog_pause();
     int n = rbrowse_http((const uint8_t *)url, (const uint8_t *)body, len, (const uint8_t *)ctype, 1,
                          (uint8_t *)out, cap, 0, 0);
@@ -782,6 +790,7 @@ static int load_script(const char *page, const char *src, char *url, int ucap) {
     if (!rb_resolve(page, src, url, ucap)) return -1;
     int page_remote = starts(page, "http://") || starts(page, "https://");
     if (starts(url, "http://") || starts(url, "https://")) {
+        req_ctx(page, 0);
         fg_watchdog_pause();
         int n = rbrowse_http_get((const uint8_t *)url, (uint8_t *)g_script, (int)sizeof(g_script));
         fg_watchdog_resume();
@@ -957,6 +966,7 @@ static void load_styles(const char *base) {
         msg[w] = 0;
         set_status(msg);
         paint();
+        req_ctx(base, 0);
         fg_watchdog_pause();
         int n = rbrowse_http_get((const uint8_t *)url, (uint8_t *)g_css, (int)sizeof(g_css));
         fg_watchdog_resume();
@@ -1056,6 +1066,7 @@ static int img_pick(int node, char *out, int cap) {
 static int img_fetch(const char *url, uint8_t *buf, int cap) {
     if (starts(url, "data:")) return rb_image_data_url(url, buf, cap);
     if (starts(url, "http://") || starts(url, "https://")) {
+        req_ctx(g_current, 0);
         fg_watchdog_pause();
         int n = rbrowse_http_get((const uint8_t *)url, buf, cap);
         fg_watchdog_resume();
@@ -1320,11 +1331,16 @@ static void follow(const char *href, int push, int user) {
         set_status("blocked: a form can only POST to http(s)");
         return;
     }
+    /* SameSite: a page's own link, form or script navigation is made by that
+       page; the address bar, the command line and history are the user's */
+    char initiator[384];
+    copy_str(initiator, (int)sizeof(initiator), (push && !user && base_remote) ? g_current : "");
     if (push) hist_push(resolved);
     char cur[384];
     copy_str(cur, (int)sizeof(cur), resolved);
     for (int hop = 0; hop < 4; hop++) {
         char final[384];
+        req_ctx(initiator, 1);
         load_canonical(cur, post, final, (int)sizeof(final));
         /* History holds where the page ended up, so a reload or Back after a
            POST + redirect GETs the result page instead of posting again. */

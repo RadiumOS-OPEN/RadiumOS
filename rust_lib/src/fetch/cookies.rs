@@ -48,10 +48,55 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
+    pub same_site: SameSite,
     /// Unix seconds; None = session cookie (lives until the jar is cleared).
     pub expires: Option<u64>,
     /// Insertion order, kept across replacements (RFC 6265 creation-time).
     created: u64,
+}
+
+/// SameSite (RFC 6265bis). A cookie that does not say is Lax, as in
+/// current browsers: a page on another site cannot send it along with a
+/// form POST, an image or a script request, only with a link it is opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameSite {
+    Strict,
+    Lax,
+    None,
+}
+
+/// How a request relates to the page that caused it.
+#[derive(Debug, Clone, Copy)]
+pub struct Context {
+    /// The request goes to another site than the page's (see `site`).
+    pub cross_site: bool,
+    /// A top-level navigation with a safe method (a link, a GET form): Lax
+    /// cookies go along even cross-site.
+    pub lax_ok: bool,
+}
+
+impl Context {
+    /// The user's own navigation (address bar, Back) or a page's same-site
+    /// request: every cookie may go.
+    pub const SAME_SITE: Context = Context { cross_site: false, lax_ok: true };
+}
+
+/// The registrable domain ("site") of a host: its last two labels, or three
+/// under one of the two-label public suffixes above; an IP address or a
+/// single label is its own site.
+pub fn site(host: &str) -> &str {
+    if is_ip(host) {
+        return host;
+    }
+    let dots: alloc::vec::Vec<usize> = host.match_indices('.').map(|(i, _)| i).collect();
+    if dots.len() < 2 {
+        return host;
+    }
+    let two = &host[dots[dots.len() - 2] + 1..];
+    if PUBLIC_SUFFIXES.contains(&two) {
+        return if dots.len() >= 3 { &host[dots[dots.len() - 3] + 1..] } else { host };
+    }
+    two
 }
 
 /// Where a cookie operation happens: the request (or page) URL's parts.
@@ -239,6 +284,7 @@ impl Jar {
         let mut path_attr: Option<&str> = None;
         let mut secure = false;
         let mut http_only = false;
+        let mut same_site = SameSite::Lax;
         let mut max_age: Option<i64> = None;
         let mut expires_attr: Option<u64> = None;
         for attribute in parts {
@@ -271,9 +317,21 @@ impl Jar {
                 secure = true;
             } else if key.eq_ignore_ascii_case("httponly") {
                 http_only = true;
+            } else if key.eq_ignore_ascii_case("samesite") {
+                same_site = if val.eq_ignore_ascii_case("strict") {
+                    SameSite::Strict
+                } else if val.eq_ignore_ascii_case("none") {
+                    SameSite::None
+                } else {
+                    SameSite::Lax
+                };
             }
         }
         if script && http_only {
+            return false;
+        }
+        // SameSite=None must be Secure (RFC 6265bis): browsers refuse it otherwise.
+        if same_site == SameSite::None && !secure {
             return false;
         }
         // Only a secure origin may set a Secure cookie (RFC 6265bis).
@@ -377,6 +435,7 @@ impl Jar {
             path,
             secure,
             http_only,
+            same_site,
             expires,
             created,
         };
@@ -433,6 +492,13 @@ impl Jar {
     /// The "a=1; b=2" string for a request to `at` (script: what
     /// document.cookie shows, which leaves HttpOnly cookies out).
     pub fn header(&mut self, at: Origin<'_>, now: Option<u64>, script: bool) -> String {
+        self.header_in(at, now, script, Context::SAME_SITE)
+    }
+
+    /// `header` for a request made in `ctx`: a cross-site request carries
+    /// only SameSite=None cookies, and Lax ones too when it is a top-level
+    /// safe navigation.
+    pub fn header_in(&mut self, at: Origin<'_>, now: Option<u64>, script: bool, ctx: Context) -> String {
         self.purge(now);
         let mut matching: Vec<&Cookie> = self
             .list
@@ -442,6 +508,9 @@ impl Jar {
                     && path_match(at.path, &c.path)
                     && (!c.secure || at.https)
                     && !(script && c.http_only)
+                    && (!ctx.cross_site
+                        || c.same_site == SameSite::None
+                        || (c.same_site == SameSite::Lax && ctx.lax_ok))
             })
             .collect();
         matching.sort_by(|a, b| b.path.len().cmp(&a.path.len()).then(a.created.cmp(&b.created)));
@@ -634,5 +703,33 @@ mod tests {
         assert_eq!(jar.header(at("www.google.com", "/search?q=x", true), NOW, false), "SOCS=CAESNQ; AEC=Aaa9");
         assert_eq!(jar.header(at("www.google.com", "/search?q=x", true), NOW, true), "SOCS=CAESNQ");
         assert_eq!(jar.header(at("www.google.com", "/", false), NOW, false), "");
+    }
+
+    #[test]
+    fn same_site() {
+        let mut jar = Jar::new();
+        assert!(jar.set(HTTPS, "lax=1", NOW, false));
+        assert!(jar.set(HTTPS, "strict=1; SameSite=Strict", NOW, false));
+        assert!(jar.set(HTTPS, "none=1; SameSite=None; Secure", NOW, false));
+        assert!(!jar.set(HTTPS, "insecure_none=1; SameSite=None", NOW, false));
+        let same = jar.header_in(HTTPS, NOW, false, Context::SAME_SITE);
+        assert!(same.contains("lax=1") && same.contains("strict=1") && same.contains("none=1"));
+        // another site's form POST, image or script: only None
+        let sub = jar.header_in(HTTPS, NOW, false, Context { cross_site: true, lax_ok: false });
+        assert_eq!(sub, "none=1");
+        // another site's link: Lax as well, never Strict
+        let nav = jar.header_in(HTTPS, NOW, false, Context { cross_site: true, lax_ok: true });
+        assert!(nav.contains("lax=1") && nav.contains("none=1") && !nav.contains("strict"));
+    }
+
+    #[test]
+    fn sites() {
+        assert_eq!(site("www.google.com"), "google.com");
+        assert_eq!(site("consent.google.com"), "google.com");
+        assert_eq!(site("a.b.example.co.uk"), "example.co.uk");
+        assert_eq!(site("co.uk"), "co.uk");
+        assert_eq!(site("user.github.io"), "user.github.io");
+        assert_eq!(site("10.0.2.2"), "10.0.2.2");
+        assert_eq!(site("localhost"), "localhost");
     }
 }

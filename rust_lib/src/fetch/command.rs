@@ -394,6 +394,37 @@ fn jar_header(url: &Url, now: Option<u64>, script: bool) -> alloc::string::Strin
     critical_section::with(|cs| JAR.borrow_ref_mut(cs).header(origin(url), now, script))
 }
 
+/// Who asks for the browser's next requests (rbrowse_http_context): the
+/// site of the page that caused them, empty for the user's own navigation,
+/// and whether they are top-level navigations. SameSite is decided by it.
+static CONTEXT: Mutex<RefCell<(alloc::string::String, bool)>> =
+    Mutex::new(RefCell::new((alloc::string::String::new(), true)));
+
+/// The SameSite context of a request to `url` (GET when `get`).
+fn request_context(url: &Url, get: bool) -> cookies::Context {
+    critical_section::with(|cs| {
+        let ctx = CONTEXT.borrow_ref(cs);
+        if ctx.0.is_empty() {
+            return cookies::Context::SAME_SITE;
+        }
+        cookies::Context { cross_site: cookies::site(&url.host) != ctx.0.as_str(), lax_ok: ctx.1 && get }
+    })
+}
+
+/// Set who causes rbrowse's next requests: `initiator` is the URL of the page
+/// (NULL or not http(s): the user, from the address bar or history), and
+/// `top_level` 1 for a navigation, 0 for a script, image, style sheet or
+/// fetch the page loads. A request to another site than the page's carries
+/// only SameSite=None cookies, plus Lax ones for a top-level GET.
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_http_context(initiator: *const u8, top_level: i32) {
+    let site = c_text(initiator, 2048)
+        .and_then(|text| Url::parse(text).ok())
+        .map(|url| alloc::string::String::from(cookies::site(&url.host)))
+        .unwrap_or_default();
+    critical_section::with(|cs| *CONTEXT.borrow_ref_mut(cs) = (site, top_level != 0));
+}
+
 const POST_BODY_LIMIT: usize = 64 * 1024;
 
 /// GET (or POST `post` = (body, content type)) `url_text`, following up to
@@ -431,7 +462,9 @@ fn http_body(
         if remaining == 0 {
             return Err(Error::Message("fetch timed out"));
         }
-        let request = browser_request(&url, &jar_header(&url, now, false), post);
+        let ctx = request_context(&url, post.is_none());
+        let cookie = critical_section::with(|cs| JAR.borrow_ref_mut(cs).header_in(origin(&url), now, false, ctx));
+        let request = browser_request(&url, &cookie, post);
         let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;
         let response = if url.is_https {
             if config.is_none() {
