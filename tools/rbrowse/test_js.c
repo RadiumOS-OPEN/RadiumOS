@@ -65,6 +65,41 @@ static int fake_fetch(const char *url, char *out, int cap, int same_origin) {
     return -1;
 }
 
+/* A stand-in for the kernel's cookie jar and POST (RjsNet): remembers what
+   it was handed. Pages under file:/// have no jar, like local files in
+   rbrowse. One cookie, "srv=1", plays a cookie the server set. */
+static char g_jar[512] = "srv=1";
+static char g_post_url[256], g_post_body[512], g_post_type[128];
+static int net_cookie_get(const char *url, char *out, int cap) {
+    if (strncmp(url, "http", 4) != 0) return -1;
+    int n = (int)strlen(g_jar);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, g_jar, (size_t)n);
+    out[n] = 0;
+    return n;
+}
+static int net_cookie_set(const char *url, const char *text) {
+    if (strncmp(url, "http", 4) != 0) return -1;
+    if (strstr(text, "HttpOnly")) return 0;   /* the jar refuses these from scripts */
+    const char *semi = strchr(text, ';');
+    int n = semi ? (int)(semi - text) : (int)strlen(text);
+    int w = (int)strlen(g_jar);
+    if (w + 2 + n >= (int)sizeof(g_jar)) return 0;
+    memcpy(g_jar + w, "; ", 2);
+    memcpy(g_jar + w + 2, text, (size_t)n);
+    g_jar[w + 2 + n] = 0;
+    return 1;
+}
+static int net_post(const char *url, const char *body, int len, const char *ctype, char *out, int cap) {
+    snprintf(g_post_url, sizeof(g_post_url), "%s", url);
+    snprintf(g_post_body, sizeof(g_post_body), "%.*s", len, body);
+    snprintf(g_post_type, sizeof(g_post_type), "%s", ctype);
+    int n = snprintf(out, (size_t)cap, "posted %d", len);
+    return n;
+}
+static const RjsNet g_fake_net = {net_cookie_get, net_cookie_set, net_post};
+static const char *g_page_url = "http://example.com/dir/page.html";
+
 /* Open a page the way rbrowse does and run its scripts. */
 static void page(const char *html) {
     rb_set_scripting(1);
@@ -73,7 +108,7 @@ static void page(const char *html) {
     g_console[0] = 0;
     rjs_set_output(capture);
     if (rjs_start() != RJS_OK) { printf("rjs_start failed\n"); exit(1); }
-    if (rjs_dom_install("http://example.com/dir/page.html", fake_fetch) != 0) {
+    if (rjs_dom_install(g_page_url, fake_fetch) != 0) {
         printf("prelude failed:\n%s\n", g_console);
         exit(1);
     }
@@ -437,6 +472,78 @@ int main(void) {
         g_fail++;
     } else g_pass++;
     EXPECT("n", "1");
+
+    /* document.cookie without a host jar: a per-page jar. */
+    page("<body><script>document.cookie = 'a=1; path=/'; document.cookie = 'b=2';</script></body>");
+    EXPECT("document.cookie", "a=1; b=2");
+    EXPECT("document.cookie = 'a=; max-age=0'; document.cookie", "b=2");
+    page("<body></body>");
+    EXPECT("document.cookie", "");
+    /* POST needs the host: without it fetch rejects. */
+    EXPECT("var pr; fetch('/p', {method: 'POST', body: 'x'}).catch(e => pr = 'rejected'); 0", "0");
+    tick(1);
+    EXPECT("pr", "rejected");
+
+    /* With the host's jar: reads and writes go through it, for this page. */
+    rjs_dom_set_net(&g_fake_net);
+    page("<body><script>document.cookie = 'js=2; path=/; secure';</script></body>");
+    EXPECT("document.cookie", "srv=1; js=2");
+    EXPECT("document.cookie = 'h=1; HttpOnly'; document.cookie", "srv=1; js=2");
+    /* ...and it outlives the page, as the session jar does. */
+    page("<body></body>");
+    EXPECT("document.cookie", "srv=1; js=2");
+    /* A local file has no jar: back to the per-page one. */
+    g_page_url = "/home/user/page.html";
+    page("<body></body>");
+    EXPECT("document.cookie = 'loc=1'; document.cookie", "loc=1");
+    g_page_url = "http://example.com/dir/page.html";
+
+    /* fetch / XHR POST: same origin only, body and type passed through. */
+    page("<body></body>");
+    EXPECT("var pr; fetch('/api?x=1', {method: 'post', body: 'a b', headers: {'Content-Type': 'application/json'}})"
+           ".then(r => r.text()).then(t => pr = t); 0", "0");
+    tick(1);
+    EXPECT("pr", "posted 3");
+    if (strcmp(g_post_url, "http://example.com/api?x=1") || strcmp(g_post_body, "a b") ||
+        strcmp(g_post_type, "application/json")) {
+        printf("FAIL: fetch POST passed %s / %s / %s\n", g_post_url, g_post_body, g_post_type);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("var pr; fetch('/f', {method: 'POST', body: new URLSearchParams({q: 'x y', n: '1'})}).then(r => r.text()).then(t => pr = t); 0", "0");
+    tick(1);
+    EXPECT("pr", "posted 9");
+    if (strcmp(g_post_body, "q=x+y&n=1")) {
+        printf("FAIL: URLSearchParams body %s\n", g_post_body);
+        g_fail++;
+    } else g_pass++;
+    if (strncmp(g_post_type, "application/x-www-form-urlencoded", 33)) {
+        printf("FAIL: URLSearchParams type %s\n", g_post_type);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("var pr; fetch('http://other.example/p', {method: 'POST', body: 'x'}).catch(e => pr = 'blocked'); 0", "0");
+    tick(1);
+    EXPECT("pr", "blocked");
+    EXPECT("var xr; var x = new XMLHttpRequest(); x.open('POST', 'p2'); x.setRequestHeader('Content-Type', 'text/x');"
+           "x.onload = () => xr = x.responseText; x.send('hello'); 0", "0");
+    tick(1);
+    EXPECT("xr", "posted 5");
+    if (strcmp(g_post_url, "http://example.com/dir/p2") || strcmp(g_post_type, "text/x")) {
+        printf("FAIL: XHR POST passed %s / %s\n", g_post_url, g_post_type);
+        g_fail++;
+    } else g_pass++;
+    rjs_dom_set_net(0);
+
+    /* form.submit() on a POST form queues the action and the body. */
+    page("<body><form id=f method=post action=/save><input type=hidden name=k value='v w'></form></body>");
+    {
+        char nav[256], body[256];
+        js("document.getElementById('f').submit()");
+        if (!rb_take_nav(nav, sizeof(nav)) || strcmp(nav, "/save") != 0 ||
+            rb_nav_body(body, sizeof(body)) != 7 || strcmp(body, "k=v%20w") != 0) {
+            printf("FAIL: form.submit() POST (%s)\n", nav);
+            g_fail++;
+        } else g_pass++;
+    }
 
     printf("%d passed, %d failed\n", g_pass, g_fail);
     if (!g_fail) printf("rbrowse js checks passed\n");

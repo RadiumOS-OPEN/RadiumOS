@@ -624,11 +624,12 @@ pub unsafe extern "C" fn rbrowse_cookie_get(url: *const u8, out: *mut u8, cap: i
 }
 
 /// document.cookie = text for the page at `url`. Scripts can neither see nor
-/// set HttpOnly cookies. Returns 1 when the jar changed, else 0.
+/// set HttpOnly cookies. Returns 1 when the jar changed, 0 when it refused
+/// the cookie, -1 when the URL is not http/https (no jar).
 #[no_mangle]
 pub unsafe extern "C" fn rbrowse_cookie_set(url: *const u8, text: *const u8) -> i32 {
     let Some(url) = c_text(url, 4096).and_then(|text| Url::parse(text).ok()) else {
-        return 0;
+        return -1;
     };
     let Some(text) = c_text(text, cookies::MAX_LINE) else {
         return 0;

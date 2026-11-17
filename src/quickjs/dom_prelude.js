@@ -2005,8 +2005,14 @@ class Document extends Node {
   get compatMode() { return 'CSS1Compat'; }
   get hidden() { return false; }
   get visibilityState() { return 'visible'; }
-  get cookie() { return [...cookieJar].map(([k, v]) => k + '=' + v).join('; '); }
+  /* The host's session jar (shared with HTTP, HttpOnly hidden) when it has
+     one for this page; otherwise a jar that lives as long as the page. */
+  get cookie() {
+    const c = rb.cookie();
+    return c !== undefined ? c : [...cookieJar].map(([k, v]) => k + '=' + v).join('; ');
+  }
   set cookie(s) {
+    if (rb.setCookie(String(s))) return;
     const first = String(s).split(';')[0];
     const i = first.indexOf('=');
     if (i <= 0) return;
@@ -2386,21 +2392,42 @@ class Response {
   blob() { return Promise.reject(new TypeError('blob is not supported')); }
 }
 
-/* GET only: the OS's HTTP client has no request bodies for scripts yet.
-   The transfer blocks the browser, then settles asynchronously. */
+/* GET, or POST with a string-like body. The transfer blocks the browser,
+   then settles asynchronously. */
 function httpGet(url) {
   const abs = rb.resolve(String(url));
   if (!abs) return null;
   return {abs, body: rb.fetch(abs)};
 }
 
+/* A request body as [text, default Content-Type]; null for unsupported
+   kinds (Blob, ArrayBuffer, streams). */
+function bodyText(b) {
+  if (b == null) return ['', 'text/plain;charset=UTF-8'];
+  if (typeof b === 'string') return [b, 'text/plain;charset=UTF-8'];
+  if (b instanceof URLSearchParams) return [b.toString(), 'application/x-www-form-urlencoded;charset=UTF-8'];
+  if (b && Array.isArray(b.__p) && typeof b.append === 'function')   /* FormData: sent urlencoded */
+    return [new URLSearchParams(b.__p.map(([k, v]) => [k, String(v)])).toString(), 'application/x-www-form-urlencoded;charset=UTF-8'];
+  return null;
+}
+
+function httpPost(url, body, ctype) {
+  const abs = rb.resolve(String(url));
+  if (!abs) return null;
+  const t = bodyText(body);
+  if (!t) return null;
+  return {abs, body: rb.post(abs, t[0], ctype || t[1])};
+}
+
 global.fetch = function (input, init) {
   const url = typeof input === 'string' ? input : (input && input.url) || String(input);
-  const method = String((init && init.method) || 'GET').toUpperCase();
+  const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
   return new Promise((resolve, reject) => {
     setTimeout(() => {
-      if (method !== 'GET') { reject(new TypeError('fetch: only GET is supported')); return; }
-      const r = httpGet(url);
+      if (method !== 'GET' && method !== 'POST') { reject(new TypeError('fetch: only GET and POST are supported')); return; }
+      const r = method === 'POST'
+        ? httpPost(url, init && init.body, init && init.headers ? new Headers(init.headers).get('content-type') : null)
+        : httpGet(url);
       if (!r || r.body === null) reject(new TypeError('Failed to fetch ' + url));
       else resolve(new Response(r.body, {status: 200, url: r.abs}));
     }, 0);
@@ -2415,8 +2442,8 @@ class XMLHttpRequest extends EventTarget {
     this.withCredentials = false; this.upload = {addEventListener() {}};
     this.__l = new Map();
   }
-  open(method, url, async) { this.__m = String(method).toUpperCase(); this.__u = url; this.__async = async !== false; this.readyState = 1; }
-  setRequestHeader() {}
+  open(method, url, async) { this.__m = String(method).toUpperCase(); this.__u = url; this.__async = async !== false; this.readyState = 1; this.__ct = null; }
+  setRequestHeader(k, v) { if (/^content-type$/i.test(k)) this.__ct = String(v); }
   getResponseHeader(n) { return /content-type/i.test(n) ? 'text/plain' : null; }
   getAllResponseHeaders() { return ''; }
   overrideMimeType() {}
@@ -2429,10 +2456,10 @@ class XMLHttpRequest extends EventTarget {
     if (typeof this['on' + t] === 'function') try { this['on' + t](ev); } catch (e) { reportError(e); }
     for (const fn of (this.__l.get(t) || []).slice()) try { fn.call(this, ev); } catch (e) { reportError(e); }
   }
-  send() {
+  send(body) {
     const run = () => {
       if (this.__aborted) return;
-      const r = this.__m === 'GET' ? httpGet(this.__u) : null;
+      const r = this.__m === 'GET' ? httpGet(this.__u) : this.__m === 'POST' ? httpPost(this.__u, body, this.__ct) : null;
       this.readyState = 4;
       if (r && r.body !== null) {
         this.status = 200; this.statusText = 'OK'; this.responseURL = r.abs;

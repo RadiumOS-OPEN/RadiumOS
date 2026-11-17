@@ -18,6 +18,25 @@
    redirect must stay on url's origin, or the fetch fails. */
 typedef int (*RjsFetch)(const char *url, char *out, int cap, int same_origin);
 
+/* What the host adds beyond GET; any member may be 0, and the whole thing
+   is optional (host tests run without it). Kept across pages.
+   cookie_get: document.cookie for url (script-visible cookies only) into
+     out, NUL-terminated; returns the length, or -1 when url has no jar (a
+     local file: the page then keeps a per-page jar of its own).
+   cookie_set: document.cookie = text for url; returns 1 stored, 0 refused
+     (HttpOnly, foreign domain...), -1 no jar for url.
+   post: POST len bytes of body with Content-Type ctype to url, redirects
+     kept on url's origin like RjsFetch with same_origin = 1; the reply into
+     out; returns its length or -1. */
+typedef struct {
+    int (*cookie_get)(const char *url, char *out, int cap);
+    int (*cookie_set)(const char *url, const char *text);
+    int (*post)(const char *url, const char *body, int len, const char *ctype, char *out, int cap);
+} RjsNet;
+
+/* Set (or with 0, remove) the host's RjsNet; the struct is copied. */
+void rjs_dom_set_net(const RjsNet *net);
+
 /* Install natives + prelude on the running context for the page at url.
    0 on success. */
 int rjs_dom_install(const char *url, RjsFetch fetch);

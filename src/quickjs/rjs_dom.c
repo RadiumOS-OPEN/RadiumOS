@@ -20,6 +20,7 @@ void rjs_canvas_install(JSContext *ctx, JSValueConst rb);   /* rjs_canvas.c */
 static char g_scratch[SCRATCH];
 static char g_url[1024];
 static RjsFetch g_fetch;
+static RjsNet g_net;
 static int g_dirty;
 static int g_stale;
 static int g_next_due = -1;     /* ms timestamp of the earliest timer, -1 none */
@@ -542,6 +543,50 @@ FN(n_fetch) {
     return JS_NewStringLen(ctx, g_fetch_buf, (size_t)n);
 }
 
+/* post(absoluteUrl, body, contentType): fetch() / XHR with method POST.
+   Same-origin only, like fetch. The reply as a string, or null. */
+FN(n_post) {
+    UNUSED;
+    if (argc < 3) return JS_NULL;
+    const char *u = JS_ToCString(ctx, argv[0]);
+    if (!u) return JS_EXCEPTION;
+    int blen = 0;
+    const char *body = arg_str(ctx, argv[1], &blen);
+    const char *ctype = JS_ToCString(ctx, argv[2]);
+    int n = -1;
+    if (body && ctype && g_net.post && same_origin(u, g_url))
+        n = g_net.post(u, body, blen, ctype, g_fetch_buf, FETCH_MAX);
+    JS_FreeCString(ctx, u);
+    if (body) JS_FreeCString(ctx, body);
+    if (ctype) JS_FreeCString(ctx, ctype);
+    if (n < 0) return JS_NULL;
+    return JS_NewStringLen(ctx, g_fetch_buf, (size_t)n);
+}
+
+/* cookie(): document.cookie from the host's jar for this page, or undefined
+   when the host has none (the prelude then keeps a per-page jar). */
+FN(n_cookie) {
+    UNUSED;
+    if (!g_net.cookie_get) return JS_UNDEFINED;
+    int n = g_net.cookie_get(g_url, g_scratch, SCRATCH);
+    if (n < 0) return JS_UNDEFINED;   /* no jar for this URL (a local file) */
+    if (n >= SCRATCH) n = SCRATCH - 1;
+    return JS_NewStringLen(ctx, g_scratch, (size_t)n);
+}
+
+/* setCookie(text): true when the host's jar took the assignment (whether or
+   not it stored it: HttpOnly, bad domains...), false when there is no jar
+   for this page. */
+FN(n_set_cookie) {
+    UNUSED;
+    if (!g_net.cookie_set) return JS_FALSE;
+    const char *t = JS_ToCString(ctx, argv[0]);
+    if (!t) return JS_EXCEPTION;
+    int r = g_net.cookie_set(g_url, t);
+    JS_FreeCString(ctx, t);
+    return JS_NewBool(ctx, r >= 0);
+}
+
 /* loadScript(absoluteUrl): source of a script a page inserted, or null.
    Like <script src>, any http(s) origin may serve it (it runs as the page's
    own code, nothing is read back cross-origin); never local files. */
@@ -667,6 +712,9 @@ static const JSCFunctionListEntry g_natives[] = {
     JS_CFUNC_DEF("paintCost", 0, n_paint_cost),
     JS_CFUNC_DEF("fetch", 1, n_fetch),
     JS_CFUNC_DEF("loadScript", 1, n_load_script),
+    JS_CFUNC_DEF("post", 3, n_post),
+    JS_CFUNC_DEF("cookie", 0, n_cookie),
+    JS_CFUNC_DEF("setCookie", 1, n_set_cookie),
 };
 
 /* ---- host API ---- */
@@ -693,6 +741,15 @@ static int call_global(const char *fn, int argc, JSValue *argv, int budget_ms) {
     if (rjs_run_jobs() == RJS_EXCEPTION) rc = -1;
     rjs_leave();
     return rc;
+}
+
+void rjs_dom_set_net(const RjsNet *net) {
+    if (net) g_net = *net;
+    else {
+        g_net.cookie_get = 0;
+        g_net.cookie_set = 0;
+        g_net.post = 0;
+    }
 }
 
 int rjs_dom_install(const char *url, RjsFetch fetch) {
