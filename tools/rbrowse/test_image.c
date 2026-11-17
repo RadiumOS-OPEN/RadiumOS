@@ -258,6 +258,10 @@ static void test_scale(void) {
     /* a box too big for the cache gets the stored copy to sample */
     CHECK(rb_image_view(s, 4000, 3000, &v2) && v2.w == 96 && v2.h == 64);
     CHECK(!rb_image_view(s, 0, 10, &v2));
+    /* wider than the scaler handles but small enough for the cache: the
+       stored copy, not an unwritten block of the cache */
+    CHECK(rb_image_view(s, 20000, 20, &v2) && v2.w == 96 && v2.h == 64);
+    CHECK(rb_image_view(s, 20, 20000, &v2) && v2.w == 96 && v2.h == 64);
     free(b);
     rb_image_reset();
 }

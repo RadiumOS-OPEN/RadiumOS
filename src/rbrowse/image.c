@@ -346,7 +346,9 @@ int rb_image_view(int slot, int w, int h, RbImageView *out) {
         return 1;
     }
     size_t need = (size_t)w * h + (size_t)w * e->mh;     /* result + row-pass temporary */
-    if (need > RB_IMAGE_SCALED_ARENA / 4) {
+    /* rb_image_scale does nothing past 16384 on a side: a wide, flat box
+       (20000 x 20) fits the arena but would be handed out unwritten */
+    if (need > RB_IMAGE_SCALED_ARENA / 4 || w > 16384 || h > 16384) {
         /* too big to cache: hand out the stored copy, the painter samples it */
         out->px = e->px; out->w = e->mw; out->h = e->mh; out->stride = e->mw;
         return 1;
