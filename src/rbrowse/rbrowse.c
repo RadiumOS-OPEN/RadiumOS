@@ -434,10 +434,11 @@ static void mouse_init(void) {
 }
 
 static void mouse_off(void) {
-    uint8_t ack = 0;
     if (g_mouse_ok) mouse_write(0xF5);
-    (void)ack;
-    while (inb(0x64) & 1) inb(0x60);
+    /* Bounded like every other read of the controller: a machine without
+       one answers 0xFF (output buffer "full") for ever, and this runs on the
+       way out, after the fault guard is disarmed. */
+    for (int i = 0; i < 64 && (inb(0x64) & 1); i++) inb(0x60);
 }
 
 static void clamp_mouse(void) {
