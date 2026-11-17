@@ -27,14 +27,10 @@ jobs:
         run: rustup toolchain install nightly --profile minimal -c rust-src
       - name: Check source discovery
         run: make verify-sources
-      - name: Check C sources
-        run: |
-          fail=0
-          while IFS= read -r f; do
-            clang -target i686-none-elf -ffreestanding -mno-sse -Wall -Wextra \
-              -Werror=implicit-function-declaration -fsyntax-only "$f" || fail=1
-          done < <(find src -name '*.c')
-          exit $fail
+      - name: Compile C sources
+        # Build every object through make so per-file flags (Doom's -I src/dglibc, update.o's
+        # RADIUM_VERSION, ...) stay in sync with the makefile. No link, so lld is not needed.
+        run: make -k -j"$(nproc)" $(find src -name '*.c' | sed 's/\.c$/.o/')
       - name: Check assembly
         run: |
           nasm -f elf32 src/boot/boot.asm -o /dev/null
