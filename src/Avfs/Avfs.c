@@ -1603,6 +1603,30 @@ int avfs_list_directory(const char* path, DirectoryEntry* entries, int max_entri
     return count;
 }
 
+// Move a RAM file to a new contiguous run of new_blocks blocks, keeping its
+// first old_size bytes. Allocate the new run before freeing the old one so the
+// copy never lands on blocks it still has to read. Only when no run fits
+// alongside the old one do we free it and retry, using memmove for the overlap.
+static int s_ram_relocate(avfs_file_entry_t* f, int old_blocks, int new_blocks, uint32_t old_size) {
+    uint32_t old_start = f->start_block;
+    int ns = avfs_find_free_blocks(new_blocks);
+    if (ns >= 0) {
+        memcpy(&avfs.data[ns * AVFS_BLOCK_SIZE], &avfs.data[old_start * AVFS_BLOCK_SIZE], old_size);
+        for (int i = (int)old_start; i < (int)old_start + old_blocks; i++) avfs.block_bitmap[i] = 0;
+    } else {
+        for (int i = (int)old_start; i < (int)old_start + old_blocks; i++) avfs.block_bitmap[i] = 0;
+        ns = avfs_find_free_blocks(new_blocks);
+        if (ns < 0) {
+            for (int i = (int)old_start; i < (int)old_start + old_blocks; i++) avfs.block_bitmap[i] = 1;
+            return -1;
+        }
+        memmove(&avfs.data[ns * AVFS_BLOCK_SIZE], &avfs.data[old_start * AVFS_BLOCK_SIZE], old_size);
+    }
+    for (int i = ns; i < ns + new_blocks; i++) avfs.block_bitmap[i] = 1;
+    f->start_block = (uint32_t)ns;
+    return 0;
+}
+
 int avfs_append_file(const char* name, const void* buffer, uint32_t size) {
     CTRLC_SCOPE;
     char resolved[AVFS_PATH_MAX];
@@ -1630,15 +1654,7 @@ int avfs_append_file(const char* name, const void* buffer, uint32_t size) {
     if (old_blocks == 0) old_blocks = 1;
     if (new_blocks == 0) new_blocks = 1;
     if (new_blocks > old_blocks) {
-        for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++) avfs.block_bitmap[i] = 0;
-        int ns = avfs_find_free_blocks(new_blocks);
-        if (ns < 0) {
-            for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++) avfs.block_bitmap[i] = 1;
-            return -2;
-        }
-        memcpy(&avfs.data[ns * AVFS_BLOCK_SIZE], &avfs.data[f->start_block * AVFS_BLOCK_SIZE], old_size);
-        for (int i = ns; i < ns + new_blocks; i++) avfs.block_bitmap[i] = 1;
-        f->start_block = (uint32_t)ns;
+        if (s_ram_relocate(f, old_blocks, new_blocks, old_size) != 0) return -2;
     }
     memcpy(&avfs.data[f->start_block * AVFS_BLOCK_SIZE + old_size], buffer, size);
     f->size = new_size;
@@ -1690,15 +1706,7 @@ int avfs_truncate(const char* name, int newsize) {
         if (can) {
             for (int i = (int)f->start_block + old_blocks; i < (int)f->start_block + new_blocks; i++) avfs.block_bitmap[i] = 1;
         } else {
-            for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++) avfs.block_bitmap[i] = 0;
-            int ns = avfs_find_free_blocks(new_blocks);
-            if (ns < 0) {
-                for (int i = (int)f->start_block; i < (int)f->start_block + old_blocks; i++) avfs.block_bitmap[i] = 1;
-                return -2;
-            }
-            memcpy(&avfs.data[ns * AVFS_BLOCK_SIZE], &avfs.data[f->start_block * AVFS_BLOCK_SIZE], old_size);
-            for (int i = ns; i < ns + new_blocks; i++) avfs.block_bitmap[i] = 1;
-            f->start_block = (uint32_t)ns;
+            if (s_ram_relocate(f, old_blocks, new_blocks, old_size) != 0) return -2;
         }
         memset(&avfs.data[f->start_block * AVFS_BLOCK_SIZE + old_size], 0, new_size - old_size);
     }
