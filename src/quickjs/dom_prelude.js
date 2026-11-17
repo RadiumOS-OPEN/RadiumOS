@@ -2524,6 +2524,81 @@ class AbortController {
    screen, 304x400 in the 320x200 fallback. @media width adds the scrollbar. */
 const viewW = rb.view(0), viewH = rb.view(1);
 
+/* Messaging within the page: MessageChannel ports, BroadcastChannel and
+   window.postMessage deliver asynchronously (a timer turn later), as in
+   browsers. There are no other windows or frames to talk to. */
+class MessageEvent extends Event {
+  constructor(type, init) {
+    super(type, init);
+    init = init || {};
+    this.data = init.data === undefined ? null : init.data;
+    this.origin = init.origin || '';
+    this.lastEventId = init.lastEventId || '';
+    this.source = init.source || null;
+    this.ports = init.ports || [];
+  }
+}
+/* a plain event target (not a node): listeners and an on<type> property */
+class Emitter {
+  constructor() { Object.defineProperty(this, '__l', {value: new Map()}); }
+  addEventListener(type, fn) {
+    if (!fn) return;
+    let a = this.__l.get(type);
+    if (!a) this.__l.set(type, a = []);
+    if (!a.includes(fn)) a.push(fn);
+  }
+  removeEventListener(type, fn) {
+    const a = this.__l.get(type);
+    const i = a ? a.indexOf(fn) : -1;
+    if (i >= 0) a.splice(i, 1);
+  }
+  dispatchEvent(ev) {
+    ev.target = ev.currentTarget = this;
+    for (const fn of (this.__l.get(ev.type) || []).slice()) {
+      try { typeof fn === 'function' ? fn.call(this, ev) : fn.handleEvent(ev); } catch (e) { reportError(e); }
+    }
+    const on = this['on' + ev.type];
+    if (typeof on === 'function') { try { on.call(this, ev); } catch (e) { reportError(e); } }
+    return !ev.defaultPrevented;
+  }
+}
+class MessagePort extends Emitter {
+  constructor() { super(); this.__peer = null; this.__closed = false; this.onmessage = null; }
+  postMessage(data) {
+    const peer = this.__peer;
+    if (!peer || this.__closed) return;
+    setTimeout(() => { if (!peer.__closed) peer.dispatchEvent(new MessageEvent('message', {data})); }, 0);
+  }
+  start() {}
+  close() { this.__closed = true; }
+}
+class MessageChannel {
+  constructor() {
+    this.port1 = new MessagePort();
+    this.port2 = new MessagePort();
+    this.port1.__peer = this.port2;
+    this.port2.__peer = this.port1;
+  }
+}
+const broadcastChannels = new Set();
+class BroadcastChannel extends Emitter {
+  constructor(name) { super(); this.name = String(name); this.onmessage = null; broadcastChannels.add(this); }
+  postMessage(data) {
+    for (const c of broadcastChannels)
+      if (c !== this && c.name === this.name) setTimeout(() => { if (broadcastChannels.has(c)) c.dispatchEvent(new MessageEvent('message', {data})); }, 0);
+  }
+  close() { broadcastChannels.delete(this); }
+}
+function windowPostMessage(data, target) {
+  const origin = location.origin;
+  if (typeof target === 'string' && target !== '*' && target !== '/' && target !== origin) return;
+  setTimeout(() => {
+    const ev = new MessageEvent('message', {data, origin, source: global});
+    ev.target = global;
+    invoke(global, ev, false);
+  }, 0);
+}
+
 function matchMedia(q) {
   const w = viewW + 16;
   const s = String(q);
@@ -2641,7 +2716,8 @@ Object.assign(global, {
   confirm(msg) { console.log('[confirm] ' + msg); return false; },
   prompt(msg) { console.log('[prompt] ' + msg); return null; },
   open() { return null; }, close() {}, stop() {}, focus() {}, blur() {}, print() {},
-  postMessage() {}, scroll() {}, scrollTo() {}, scrollBy() {},
+  postMessage: windowPostMessage, MessageChannel, MessagePort, MessageEvent, BroadcastChannel,
+  scroll() {}, scrollTo() {}, scrollBy() {},
   getSelection: () => document.getSelection(),
   innerWidth: viewW, innerHeight: viewH, outerWidth: viewW + 16, outerHeight: viewH + 56,
   devicePixelRatio: 1, scrollX: 0, scrollY: 0, pageXOffset: 0, pageYOffset: 0,

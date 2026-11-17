@@ -364,6 +364,15 @@ int main(void) {
     rb_dispatch(rb_find_id("bt599"), RB_EV_CLICK);
     EXPECT("lastHit", "599");
 
+    /* messaging within the page: asynchronous, as in browsers */
+    EXPECT("var got = []; var mc = new MessageChannel(); mc.port2.onmessage = e => got.push('p:' + e.data);"
+           "mc.port1.postMessage('hi'); window.addEventListener('message', e => got.push('w:' + e.data + ':' + (e.source === window)));"
+           "window.postMessage('yo', '*'); var b1 = new BroadcastChannel('c'), b2 = new BroadcastChannel('c');"
+           "b2.addEventListener('message', e => got.push('b:' + e.data)); b1.postMessage('all'); got.length", "0");
+    tick(1);
+    EXPECT("got.sort().join()", "b:all,p:hi,w:yo:true");
+    EXPECT("window.postMessage('x', 'https://elsewhere.example'); new MessageEvent('message', {data: 5}).data", "5");
+
     /* querySelectorAll returns every match, past the old 4096 cap */
     EXPECT("var qa = document.createElement('div'); document.body.appendChild(qa); qa.innerHTML = '<i></i>'.repeat(5000);"
            "var n5 = qa.querySelectorAll('i').length; qa.remove(); qa = null; n5", "5000");
