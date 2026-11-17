@@ -767,6 +767,9 @@ mod tests {
         assert_eq!(site("10.0.2.2.nip.io"), "nip.io");   // not on the list: one label above "io"
         assert!(is_public_suffix("co.uk") && is_public_suffix("com") && is_public_suffix("github.io"));
         assert!(!is_public_suffix("example.co.uk") && !is_public_suffix("google.com"));
+        // Unicode rules are on the list in their IDNA form (公司.cn = xn--55qx5d.cn)
+        assert_eq!(site("a.b.xn--55qx5d.cn"), "b.xn--55qx5d.cn");
+        assert!(is_public_suffix("xn--55qx5d.cn"));
         assert_eq!(site("10.0.2.2"), "10.0.2.2");
         assert_eq!(site("localhost"), "localhost");
     }
