@@ -400,15 +400,42 @@ fn jar_header(url: &Url, now: Option<u64>, script: bool) -> alloc::string::Strin
 static CONTEXT: Mutex<RefCell<(alloc::string::String, bool)>> =
     Mutex::new(RefCell::new((alloc::string::String::new(), true)));
 
-/// The SameSite context of a request to `url` (GET when `get`).
-fn request_context(url: &Url, get: bool) -> cookies::Context {
-    critical_section::with(|cs| {
-        let ctx = CONTEXT.borrow_ref(cs);
-        if ctx.0.is_empty() {
-            return cookies::Context::SAME_SITE;
+/// SameSite along one redirect chain. The reference site is the page that
+/// caused the request, or for the user's own navigation the first hop's
+/// site. A hop to another site makes the chain cross-site for good, so a
+/// detour through another site cannot come back with Strict or Lax cookies.
+struct ChainSite {
+    reference: Option<alloc::string::String>,
+    top_level: bool,
+    crossed: bool,
+}
+
+impl ChainSite {
+    fn start() -> Self {
+        critical_section::with(|cs| {
+            let ctx = CONTEXT.borrow_ref(cs);
+            ChainSite {
+                reference: if ctx.0.is_empty() { None } else { Some(ctx.0.clone()) },
+                top_level: ctx.1,
+                crossed: false,
+            }
+        })
+    }
+
+    /// The context of the next hop, to `url`, with a safe method when `get`.
+    fn hop(&mut self, url: &Url, get: bool) -> cookies::Context {
+        let site = cookies::site(&url.host);
+        match &self.reference {
+            None => {
+                self.reference = Some(alloc::string::String::from(site));
+                cookies::Context::SAME_SITE
+            }
+            Some(reference) => {
+                self.crossed |= site != reference.as_str();
+                cookies::Context { cross_site: self.crossed, lax_ok: self.top_level && get }
+            }
         }
-        cookies::Context { cross_site: cookies::site(&url.host) != ctx.0.as_str(), lax_ok: ctx.1 && get }
-    })
+    }
 }
 
 /// Set who causes rbrowse's next requests: `initiator` is the URL of the page
@@ -457,12 +484,13 @@ fn http_body(
     let mut config = None;
     let mut redirects = 0u32;
     let now = clock();
+    let mut chain = ChainSite::start();
     let response = loop {
         let remaining = timeout.saturating_sub(unsafe { crate::get_ticks() }.wrapping_sub(started));
         if remaining == 0 {
             return Err(Error::Message("fetch timed out"));
         }
-        let ctx = request_context(&url, post.is_none());
+        let ctx = chain.hop(&url, post.is_none());
         let cookie = critical_section::with(|cs| JAR.borrow_ref_mut(cs).header_in(origin(&url), now, false, ctx));
         let request = browser_request(&url, &cookie, post);
         let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;

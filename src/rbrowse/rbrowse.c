@@ -1353,6 +1353,10 @@ static void follow(const char *href, int push, int user) {
         if (!take_nav(next, (int)sizeof(next))) break;
         post = g_post_len;
         g_post_len = -1;
+        /* this navigation comes from the page just loaded (its script or an
+           auto-submitted form), not from whoever opened that page */
+        copy_str(initiator, (int)sizeof(initiator),
+                 (starts(cur, "http://") || starts(cur, "https://")) ? cur : "");
         if (post >= 0 && next[0] == '#') copy_str(step, (int)sizeof(step), cur);
         else if (!rb_resolve(cur, next, step, (int)sizeof(step))) break;
         if (post >= 0 && !starts(step, "http://") && !starts(step, "https://")) {

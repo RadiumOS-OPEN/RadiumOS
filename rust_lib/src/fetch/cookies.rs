@@ -24,19 +24,53 @@ pub const MAX_HEADER: usize = 8192;
 /// A Set-Cookie line longer than this is ignored outright.
 pub const MAX_LINE: usize = 8192;
 
-/// Two-label registrable suffixes under which nobody may set a Domain cookie
-/// for the whole suffix (a tiny stand-in for the Public Suffix List; any
-/// single-label domain such as "com" is refused as well).
-const PUBLIC_SUFFIXES: &[&str] = &[
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk",
-    "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "org.nz", "co.jp",
-    "ne.jp", "or.jp", "ac.jp", "co.kr", "or.kr", "com.br", "com.cn", "net.cn",
-    "org.cn", "com.tw", "com.hk", "com.mx", "com.ar", "com.tr", "co.in", "co.za",
-    "com.pl", "net.pl", "org.pl", "com.sg", "com.my", "co.id", "com.ua", "co.il",
-    "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev",
-    "workers.dev", "herokuapp.com", "appspot.com", "blogspot.com",
-    "cloudfront.net", "azurewebsites.net", "firebaseapp.com", "web.app",
-];
+/// The Public Suffix List (see public_suffix_list.NOTICE): one rule per
+/// line, ASCII, sorted by byte value, so it is searched in place.
+const PSL: &str = include_str!("public_suffix_list.txt");
+
+/// Is `rule` a line of the list? A binary search over the text: probe a
+/// byte, back up to its line, compare.
+fn psl_has(rule: &str) -> bool {
+    let text = PSL.as_bytes();
+    let (mut lo, mut hi) = (0usize, text.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let mut start = mid;
+        while start > lo && text[start - 1] != b'\n' {
+            start -= 1;
+        }
+        let end = text[start..].iter().position(|&b| b == b'\n').map_or(text.len(), |i| start + i);
+        match text[start..end].cmp(rule.as_bytes()) {
+            core::cmp::Ordering::Equal => return true,
+            core::cmp::Ordering::Less => lo = end + 1,
+            core::cmp::Ordering::Greater => hi = start,
+        }
+    }
+    false
+}
+
+/// How many trailing labels of `host` form its public suffix, by the list's
+/// algorithm: an exception rule wins, else the matching rule with the most
+/// labels, else the last label alone ("*").
+fn suffix_labels(host: &str) -> usize {
+    let labels: Vec<&str> = host.split('.').collect();
+    let n = labels.len();
+    let mut best = 1;
+    for i in 0..n {
+        let tail = labels[i..].join(".");
+        let count = n - i;
+        if psl_has(&alloc::format!("!{tail}")) {
+            return count - 1;
+        }
+        if count > best && psl_has(&tail) {
+            best = count;
+        }
+        if i + 1 < n && count > best && psl_has(&alloc::format!("*.{}", labels[i + 1..].join("."))) {
+            best = count;
+        }
+    }
+    best
+}
 
 #[derive(Debug, Clone)]
 pub struct Cookie {
@@ -81,22 +115,19 @@ impl Context {
     pub const SAME_SITE: Context = Context { cross_site: false, lax_ok: true };
 }
 
-/// The registrable domain ("site") of a host: its last two labels, or three
-/// under one of the two-label public suffixes above; an IP address or a
-/// single label is its own site.
+/// The registrable domain ("site") of a host: its public suffix (Public
+/// Suffix List) plus one label. An IP address, a single label, or a host
+/// that is itself a public suffix is its own site.
 pub fn site(host: &str) -> &str {
-    if is_ip(host) {
+    if is_ip(host) || !host.contains('.') {
         return host;
     }
-    let dots: alloc::vec::Vec<usize> = host.match_indices('.').map(|(i, _)| i).collect();
-    if dots.len() < 2 {
+    let keep = suffix_labels(host) + 1;
+    let dots: Vec<usize> = host.match_indices('.').map(|(i, _)| i).collect();
+    if keep > dots.len() {
         return host;
     }
-    let two = &host[dots[dots.len() - 2] + 1..];
-    if PUBLIC_SUFFIXES.contains(&two) {
-        return if dots.len() >= 3 { &host[dots[dots.len() - 3] + 1..] } else { host };
-    }
-    two
+    &host[dots[dots.len() - keep] + 1..]
 }
 
 /// Where a cookie operation happens: the request (or page) URL's parts.
@@ -159,7 +190,7 @@ pub fn path_match(request_path: &str, cookie_path: &str) -> bool {
 }
 
 fn is_public_suffix(domain: &str) -> bool {
-    !domain.contains('.') || PUBLIC_SUFFIXES.contains(&domain)
+    !domain.contains('.') || suffix_labels(domain) >= domain.split('.').count()
 }
 
 fn bad_chars(text: &str) -> bool {
@@ -729,6 +760,13 @@ mod tests {
         assert_eq!(site("a.b.example.co.uk"), "example.co.uk");
         assert_eq!(site("co.uk"), "co.uk");
         assert_eq!(site("user.github.io"), "user.github.io");
+        assert_eq!(site("a.b.foo.s3.amazonaws.com"), "foo.s3.amazonaws.com");
+        assert_eq!(site("x.waw.pl"), "x.waw.pl");
+        assert_eq!(site("deep.www.ck"), "www.ck");      // exception rule !www.ck under *.ck
+        assert_eq!(site("a.b.c.ck"), "b.c.ck");         // wildcard *.ck
+        assert_eq!(site("10.0.2.2.nip.io"), "nip.io");   // not on the list: one label above "io"
+        assert!(is_public_suffix("co.uk") && is_public_suffix("com") && is_public_suffix("github.io"));
+        assert!(!is_public_suffix("example.co.uk") && !is_public_suffix("google.com"));
         assert_eq!(site("10.0.2.2"), "10.0.2.2");
         assert_eq!(site("localhost"), "localhost");
     }
