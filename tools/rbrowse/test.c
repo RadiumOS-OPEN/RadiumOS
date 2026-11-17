@@ -1158,6 +1158,90 @@ static void test_dom_set_text_no_oom(void) {
     CHECK(rb_oom() == 0);
 }
 
+/* Text a DOM update replaces is reclaimed: the 1 MB pool is compacted when
+   it fills, and every string still referenced (attributes of every kind, a
+   custom tag name, a pending stylesheet's href, layout box text, the source
+   of an update that itself lies in the pool) survives the move. */
+static int attr_is(int node, const char *name, const char *want) {
+    char b[64];
+    return rb_dom_get_attr(node, name, (int)strlen(name), b, (int)sizeof(b)) && strcmp(b, want) == 0;
+}
+
+static void test_pool_compaction(void) {
+    const char *html = "<!doctype html><html><head><link rel=stylesheet href=\"/s.css\"><title>P</title></head><body>"
+        "<p id=a class=\"k1 k2\" style=\"color:red\" title=\"tt\">alpha</p><my-tag id=m>custom</my-tag>"
+        "<form id=fm action=\"/go\"><input id=f name=q value=v0></form><a id=l href=\"/x\" onclick=\"y()\">link</a>"
+        "<p id=t>t</p><p id=u>u</p></body></html>";
+    static const char xs[] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    rb_open_web(html, -1);
+    CHECK(!rb_oom());
+    int t = rb_find_id("t"), u = rb_find_id("u"), a = rb_find_id("a");
+    int c0 = rb_debug_stat(14);
+    char want[128], got[160];
+    int bad = -1;
+    for (int i = 0; i < 300000 && bad < 0; i++) {
+        int n = snprintf(want, sizeof(want), "%d:%.*s", i, i % 71, xs);
+        if (!rb_dom_set_text(t, want, n)) bad = i;
+        if (i % 3 == 0 && !rb_dom_set_attr(u, "data-v", 6, want, n)) bad = i;
+        if (i % 5 == 0 && !rb_dom_set_id(u, want + 1, n - 1)) bad = i;
+        if (i % 4093 == 0) {
+            rb_relayout();
+            if (rb_dom_get_text(t, got, (int)sizeof(got)) != n || strcmp(got, want) != 0) bad = i;
+        }
+    }
+    CHECK(bad == -1);
+    CHECK(!rb_oom());
+    CHECK(rb_debug_stat(14) > c0);
+    /* strings no update touched */
+    CHECK(attr_is(a, "class", "k1 k2"));
+    CHECK(attr_is(a, "style", "color:red"));
+    CHECK(attr_is(a, "title", "tt"));
+    CHECK(attr_is(rb_find_id("l"), "href", "/x"));
+    CHECK(attr_is(rb_find_id("l"), "onclick", "y()"));
+    CHECK(attr_is(rb_find_id("f"), "name", "q"));
+    CHECK(attr_is(rb_find_id("fm"), "action", "/go"));
+    CHECK(rb_dom_tag_name(rb_find_id("m"), got, (int)sizeof(got)) == 6 && strcmp(got, "my-tag") == 0);
+    CHECK(rb_css_pending() == 1 && rb_css_href(0, got, (int)sizeof(got)) > 0 && strcmp(got, "/s.css") == 0);
+    CHECK(rb_dom_get_text(a, got, (int)sizeof(got)) == 5 && strcmp(got, "alpha") == 0);
+    CHECK(rb_dom_get_text(rb_find_id("m"), got, (int)sizeof(got)) == 6 && strcmp(got, "custom") == 0);
+    CHECK(rb_find_id("t") == t && rb_find_id("u") == 0);
+    CHECK(rb_title(got, (int)sizeof(got)) >= 1 && strcmp(got, "P") == 0);
+    rb_relayout();
+    int x, y, w, h;
+    CHECK(find_text("alpha", &x, &y, &w, &h));
+    CHECK(find_text("custom", &x, &y, &w, &h));
+
+    /* the source of an update is layout box text, i.e. in the pool itself,
+       while that very update compacts the pool (a box's text pointer is
+       only good until the next update, so it is fetched again each time) */
+    c0 = rb_debug_stat(14);
+    bad = -1;
+    for (int r = 0; r < 4 && bad < 0; r++) {
+        int n = snprintf(want, sizeof(want), "s%d-%.*s", r, 10 + r, xs);   /* one line: a single box */
+        if (!rb_dom_set_text(t, want, n)) { bad = r; break; }
+        rb_relayout();
+        int bi = -1;
+        for (int b = 0; b < rb_box_count() && bi < 0; b++) {
+            int l;
+            const char *bt = rb_box_text(b, &l);
+            if (l == n && memcmp(bt, want, (size_t)n) == 0) bi = b;
+        }
+        if (bi < 0) { bad = r; break; }
+        for (int i = 0; i < 60000 && bad < 0; i++) {   /* > 1 MB of copies a round */
+            int sl, k = i % 3;
+            /* short then long: the long copy never fits the short slot */
+            if (!rb_dom_set_text(u, rb_box_text(bi, &sl), 1)) bad = r;
+            if (!rb_dom_set_text(u, rb_box_text(bi, &sl), sl - k)) bad = r;
+            if (rb_dom_get_text(u, got, (int)sizeof(got)) != sl - k || memcmp(got, want, (size_t)(sl - k)) != 0) bad = r;
+            if (i % 2 && !rb_dom_set_attr(u, "data-w", 6, rb_box_text(bi, &sl), sl - k)) bad = r;
+        }
+        if (!rb_dom_get_attr(u, "data-w", 6, got, (int)sizeof(got)) || strncmp(got, want, 5) != 0) bad = r;
+    }
+    CHECK(bad == -1);
+    CHECK(!rb_oom());
+    CHECK(rb_debug_stat(14) > c0);
+}
+
 /* ==================== Part 2: events + focus ==================== */
 
 static int ev_log_type[16], ev_log_target[16], ev_log_current[16], ev_log_user[16];
@@ -4252,6 +4336,7 @@ int main(void) {
     test_dom_class_ops();
     test_dom_rect();
     test_dom_set_text_no_oom();
+    test_pool_compaction();
     test_ev_registration();
     test_ev_bubble_order();
     test_ev_capture_order();

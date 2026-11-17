@@ -530,9 +530,33 @@ typedef struct {
 } TextState;
 static TextState g_ts = { TW_NORMAL, TD_NONE, TT_NONE, WS_NORMAL, 0, 0 };
 
+/* The text pool is bump-allocated, so text that a DOM update or a relayout
+   replaces stays behind as a hole. When an allocation does not fit, the pool
+   is compacted (pool_compact): every live string slides down and every
+   offset that names one is rewritten. That is only safe when no caller up
+   the stack keeps a pool offset or pointer of its own in a local. Layout
+   (rollback marks, boxes being filled) and the HTML parser do, so they run
+   with g_pool_busy raised and simply append; the DOM setters do not, and an
+   allocation's own source string may itself lie in the pool (it is kept and
+   followed). Offset 0 always holds an empty string. */
+static int g_pool_busy;      /* >0: layout or the parser is running, nothing may move */
+static int g_pool_live;      /* g_pool_n right after the last compaction */
+static int g_pool_compactions;
+static void pool_compact(const char **root, int root_n);
+
+/* Is there room for `need` more bytes? Compacts first when that can help: at
+   least POOL_MAX/64 bytes were appended since the last compaction, which
+   bounds the work to O(64) per appended byte when the pool is nearly all
+   live text. `root`, when it points into the pool, is kept and updated. */
+static int pool_room(int need, const char **root, int root_n) {
+    if (g_pool_n + need < POOL_MAX) return 1;
+    if (!g_pool_busy && g_pool_n - g_pool_live >= POOL_MAX / 64) pool_compact(root, root_n);
+    return g_pool_n + need < POOL_MAX;
+}
+
 static int pool_add(const char *s, int n) {
     if (n < 0) n = 0;
-    if (g_pool_n + n + 1 >= POOL_MAX) { SET_OOM(); return -1; }
+    if (!pool_room(n + 1, &s, n)) { SET_OOM(); return -1; }
     int off = g_pool_n;
     if (n > 0 && s) memcpy(g_pool + off, s, (size_t)n);
     g_pool[off + n] = 0;
@@ -3234,7 +3258,18 @@ static void ev_prune_active(void);
    layout appended, unless something else was appended since (a DOM edit),
    in which case the earlier layout's text stays as a hole. Without this every
    relayout leaked the whole page's text and ~1000 of them set rb_oom. */
+static void do_layout_body(void);
 static void do_layout(void) {
+    /* The old boxes are about to be replaced, so their text is not live: a
+       pool mostly made of holes is compacted before layout appends more. */
+    g_box_n = 0;
+    if (!g_pool_busy && g_pool_n > POOL_MAX / 2 && g_pool_n - g_pool_live >= POOL_MAX / 16) pool_compact(0, 0);
+    g_pool_busy++;
+    do_layout_body();
+    g_pool_busy--;
+}
+
+static void do_layout_body(void) {
     if (g_rules_dirty) { rules_index(); g_rules_dirty = 0; g_pseudo_dirty = 1; }
     for (int i = 0; i < MAX_NODES; i++) g_style_cache[i].valid = 0;
     g_style_hits = 0;
@@ -3610,6 +3645,109 @@ static void css_add_sheet(const char *s, int n) {
 
 static int run_script(const char *s, int n);
 #include "html_parse.inc"
+
+/* ---- text pool compaction ------------------------------------------------------ */
+
+/* Mark-compact over 4-byte granules: mark every granule a live string covers
+   (and its NUL), then slide each run of marked granules down. A granule keeps
+   its bytes' offsets mod 4, so a string never straddles a gap and strings
+   that share or overlap storage (a pending stylesheet's href and its <link>'s,
+   an in-place shortened value) stay consistent. pg_base[w] counts the live
+   granules before bitmap word w, so an offset maps in O(1). */
+#define PG_SHIFT 2
+#define PG_WORDS ((POOL_MAX >> PG_SHIFT) / 32 + 1)
+static uint32_t g_pg_mark[PG_WORDS];
+static uint32_t g_pg_base[PG_WORDS];
+
+static uint32_t popcount32(uint32_t v) {   /* no libgcc in the kernel */
+    v = v - ((v >> 1) & 0x55555555u);
+    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+    return (((v + (v >> 4)) & 0x0F0F0F0Fu) * 0x01010101u) >> 24;
+}
+
+static void pg_mark(uint32_t off, uint32_t len) {
+    uint32_t n = (uint32_t)g_pool_n;
+    if (off >= n) return;
+    uint32_t end = len >= n - off ? n : off + len + 1;   /* the string and its NUL */
+    uint32_t g = off >> PG_SHIFT, last = (end - 1) >> PG_SHIFT;
+    while (g <= last) {
+        if ((g & 31) == 0 && last - g >= 31) { g_pg_mark[g >> 5] = 0xFFFFFFFFu; g += 32; }
+        else { g_pg_mark[g >> 5] |= 1u << (g & 31); g++; }
+    }
+}
+
+static uint32_t pg_map(uint32_t off) {
+    uint32_t g = off >> PG_SHIFT, w = g >> 5, b = g & 31;
+    uint32_t below = g_pg_base[w] + (b ? popcount32(g_pg_mark[w] & ((1u << b) - 1u)) : 0);
+    return (below << PG_SHIFT) | (off & ((1u << PG_SHIFT) - 1u));
+}
+
+/* Every holder of a pool offset: mark its string (remap 0) or rewrite the
+   offset (remap 1). An empty node field is pointed at offset 0. Boxes only
+   own text when tlen > 0 (an image or canvas box keeps a node in toff). */
+static void pool_refs(int remap) {
+#define PREF(o, l) do { if (!(l)) (o) = 0; else if (remap) (o) = pg_map(o); else pg_mark((o), (l)); } while (0)
+    for (int i = 1; i < g_node_n; i++) {
+        Node *nd = &g_nodes[i];
+        PREF(nd->text_off, nd->text_len);
+        PREF(nd->id_off, nd->id_len);
+        PREF(nd->class_off, nd->class_len);
+        PREF(nd->href_off, nd->href_len);
+        PREF(nd->click_off, nd->click_len);
+        PREF(nd->style_off, nd->style_len);
+        PREF(nd->name_off, nd->name_len);
+        PREF(nd->attr_off, nd->attr_len);
+        PREF(nd->action_off, nd->action_len);
+    }
+    for (int i = 0; i < g_tn_n; i++) PREF(g_tn[i].off, g_tn[i].len);
+    for (int i = 0; i < g_pcss_n; i++)
+        if (!g_pcss[i].interned) PREF(g_pcss[i].href_off, g_pcss[i].href_len);
+#undef PREF
+    for (int i = 0; i < g_box_n; i++) {
+        if (!g_box[i].tlen || g_box[i].kind == RB_BOX_IMAGE || g_box[i].kind == RB_BOX_CANVAS) continue;
+        if (remap) g_box[i].toff = pg_map(g_box[i].toff);
+        else pg_mark(g_box[i].toff, g_box[i].tlen);
+    }
+}
+
+/* Squeeze the holes out of g_pool. *root (root_n bytes), when it points into
+   the pool, is kept alive and moved with it. Never called while g_pool_busy. */
+static void pool_compact(const char **root, int root_n) {
+    uint32_t n = (uint32_t)g_pool_n;
+    uint32_t ng = (n + (1u << PG_SHIFT) - 1) >> PG_SHIFT;   /* granules in use */
+    uint32_t words = (ng + 31) >> 5;
+    if (!words) return;
+    memset(g_pg_mark, 0, words * sizeof(uint32_t));
+    /* slots on the free list are zeroed when reused; their text is dead */
+    for (int k = 0; k < g_free_n; k++) {
+        Node *nd = &g_nodes[g_free[k]];
+        nd->text_len = nd->id_len = nd->class_len = nd->href_len = nd->click_len = 0;
+        nd->style_len = nd->name_len = nd->attr_len = nd->action_len = 0;
+    }
+    pg_mark(0, 0);
+    pool_refs(0);
+    int has_root = root && *root && root_n >= 0 && *root >= g_pool && *root < g_pool + n;
+    uint32_t roff = has_root ? (uint32_t)(*root - g_pool) : 0;
+    if (has_root) pg_mark(roff, (uint32_t)root_n);
+    uint32_t live = 0;
+    for (uint32_t w = 0; w < words; w++) { g_pg_base[w] = live; live += popcount32(g_pg_mark[w]); }
+    for (uint32_t g = 0; g < ng;) {
+        uint32_t m = g_pg_mark[g >> 5];
+        if (!m && (g & 31) == 0) { g += 32; continue; }
+        if (!(m & (1u << (g & 31)))) { g++; continue; }
+        uint32_t st = g;
+        while (g < ng && (g_pg_mark[g >> 5] & (1u << (g & 31)))) g++;
+        uint32_t src = st << PG_SHIFT, dst = pg_map(src);
+        if (dst != src) memmove(g_pool + dst, g_pool + src, (size_t)((g - st) << PG_SHIFT));
+    }
+    pool_refs(1);
+    if (has_root) *root = g_pool + pg_map(roff);
+    g_pool_n = (int)(live << PG_SHIFT);
+    g_pool_live = g_pool_n;
+    g_lay_pool_hi = -1;          /* the last layout's text is no longer the pool's tail */
+    g_pool_compactions++;
+}
+
 static void queue_imports_fwd(int mark, int parent, int importer_ord) { queue_imports(mark, parent, importer_ord); }
 
 /* Part 2 forward declaration: listeners and focus are per-document state. */
@@ -3625,8 +3763,11 @@ static void reset_doc(void) {
     else css_doc_reset();
     g_rules_dirty = 1;
     g_focus_n = 0;
-    g_pool_n = 0;
-    g_lay_pool_lo = 0;
+    g_pool[0] = 0;               /* offset 0: the empty string (see pool_compact) */
+    g_pool_n = 1;
+    g_pool_live = 1;
+    g_pool_busy = 0;             /* a recovered fault may have left a layout unfinished */
+    g_lay_pool_lo = 1;
     g_lay_pool_hi = -1;
     g_nav_len = 0;
     g_nav[0] = 0;
@@ -3971,6 +4112,7 @@ int rb_debug_stat(int which) {
     case 8: return g_work;
     case 10: return g_var_n;
     case 13: return g_node_n - g_free_n;   /* live nodes */
+    case 14: return g_pool_compactions;
 #ifdef RBROWSE_HOST
     case 11: {                       /* the node that was laid out the most times */
         int best = 0;
@@ -5770,7 +5912,7 @@ int rb_dom_closest(int node, const char *sel, int len) {
 static int frag_parse(int ctx, const char *html, int len) {
     if (len < 0) len = html ? (int)strlen(html) : 0;
     if (len > 0 && !html) return 0;
-    if (len > 0 && g_pool_n + 3 * len + 1024 >= POOL_MAX) { SET_OOM(); return 0; }
+    if (len > 0 && !pool_room(3 * len + 1024, &html, len)) { SET_OOM(); return 0; }
     int tmp = new_node();
     if (!tmp) return 0;
     g_nodes[tmp].tag = g_nodes[ctx].tag;
@@ -6676,4 +6818,5 @@ void rb_crash_reset(void) {
     g_fit = 0;
     g_in_layer = 0;
     g_stop = 0;
+    g_pool_busy = 0;   /* the layout or parse that was cut short no longer holds pool offsets */
 }

@@ -934,7 +934,9 @@ static void parse_html(const char *html, int len) {
     g_pcss_n = 0;
     g_quirks = 1;             /* until a <!doctype> says otherwise */
     g_frag = 0;
+    g_pool_busy++;
     parse_loop(html, len);
+    g_pool_busy--;
     g_sp = 0;
 }
 
@@ -944,7 +946,9 @@ static void parse_fragment(const char *html, int len, int root) {
     g_sp = 0;
     g_stk[0] = root;
     g_frag = 1;
+    g_pool_busy++;
     parse_loop(html, len);
+    g_pool_busy--;
     g_frag = 0;
     g_sp = 0;
 }

@@ -334,6 +334,62 @@ int main(void) {
            "live.replaceChildren(nu, keepI); live.innerHTML", "<s></s><i>2</i>");
     EXPECT("live.replaceChildren(); live.childNodes.length", "0");
 
+    /* ...and the text a content update replaces goes back to the engine's
+       text pool (1 MB). Strings of varying length, so most updates cannot
+       reuse the old slot in place: hundreds of times the pool's size in all. */
+    {
+        int oom0 = rb_oom();
+        int cmp[5];
+        cmp[0] = rb_debug_stat(14);   /* compactions so far */
+        EXPECT("var tx = document.createElement('p'); document.body.appendChild(tx); var bad = -1;"
+               "for (var i = 0; i < 400000 && bad < 0; i++) { var s = 'v' + i + '-'.repeat(i % 61); tx.textContent = s;"
+               "  if (i % 1009 == 0 && tx.textContent !== s) bad = i; } bad + ',' + tx.textContent.length", "-1,29");
+        cmp[1] = rb_debug_stat(14);
+        EXPECT("var bad = -1; for (var i = 0; i < 40000 && bad < 0; i++) {"
+               "  var h = '<span class=\"c' + i + '\" title=\"' + 't'.repeat(i % 37) + '\">n' + '.'.repeat(i % 29) + '</span>';"
+               "  tx.innerHTML = h; if (i % 997 == 0 && tx.innerHTML !== h) bad = i; } bad", "-1");
+        cmp[2] = rb_debug_stat(14);
+        EXPECT("var bad = -1; for (var i = 0; i < 100000 && bad < 0; i++) { var v = 'a'.repeat(i % 53) + i;"
+               "  tx.setAttribute('data-x', v); tx.id = 'id' + v; tx.className = 'k' + (i % 7 ? v : '');"
+               "  if (i % 1013 == 0 && (tx.getAttribute('data-x') !== v || tx.id !== 'id' + v)) bad = i; } bad", "-1");
+        cmp[3] = rb_debug_stat(14);
+        /* one more update, so the probe below checks text written after a compaction */
+        EXPECT("tx.textContent = 'still here'; tx.id = 'tx'; document.getElementById('tx') === tx", "true");
+        /* relayout between updates: each layout's box text (here ~6 KB of
+           filler) is reclaimed too, although an update lands after it */
+        EXPECT("var fill = document.createElement('div'); document.body.appendChild(fill);"
+               "for (var i = 0; i < 100; i++) { var q = document.createElement('p'); q.textContent = 'filler line ' + i + ' ' + 'w'.repeat(48); fill.appendChild(q); }"
+               "fill.children.length", "100");
+        char src[160], want[96];
+        int lay_bad = -1;
+        for (int k = 0; k < 4000 && lay_bad < 0; k++) {
+            snprintf(src, sizeof(src), "tx.textContent = 'frame-%d' + '#'.repeat(%d); tx.textContent.length", k, k % 67);
+            snprintf(want, sizeof(want), "%d", (int)strlen("frame-") + snprintf(0, 0, "%d", k) + k % 67);
+            if (strcmp(js(src), want) != 0) lay_bad = k;
+            rb_relayout();
+            if (k % 250 == 0) {
+                int found = 0;
+                snprintf(want, sizeof(want), "frame-%d", k);
+                for (int b = 0; b < rb_box_count() && !found; b++) {
+                    int tl;
+                    const char *t = rb_box_text(b, &tl);
+                    if (tl >= (int)strlen(want) && memcmp(t, want, strlen(want)) == 0) found = 1;
+                }
+                if (!found) lay_bad = k;
+            }
+        }
+        cmp[4] = rb_debug_stat(14);
+        int phases_ok = 1;
+        for (int k = 1; k < 5; k++) if (cmp[k] <= cmp[k - 1]) phases_ok = 0;   /* each phase had to compact */
+        if (lay_bad >= 0 || (!oom0 && rb_oom()) || !phases_ok) {
+            printf("FAIL: text pool: relayout loop broke at %d, rb_oom %d (was %d), pool %d, compactions %d %d %d %d %d\n",
+                   lay_bad, rb_oom(), oom0, rb_debug_stat(2), cmp[0], cmp[1], cmp[2], cmp[3], cmp[4]);
+            g_fail++;
+        } else g_pass++;
+        /* strings no update touched moved with the compaction intact */
+        EXPECT("document.getElementById('sa').textContent + '|' + document.getElementById('go').getAttribute('onclick') + '|' + document.getElementById('go').id", "p|render()|go");
+    }
+
     /* Nodes a script made or held and then dropped are given back to the
        engine (wrappers of detached trees are weak; their trees are released
        when collected), while held detached trees keep their listeners and

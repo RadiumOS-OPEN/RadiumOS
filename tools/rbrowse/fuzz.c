@@ -220,6 +220,127 @@ static void exercise_dom(void) {
     }
 }
 
+/* --- text pool compaction --------------------------------------------------
+   The fuzzer's page, then a storm of updates whose text adds up to several
+   times the 1 MB text pool, so it is compacted mid-storm (by the setters and
+   at layout start). A shadow copy of every value of a few tracked nodes is
+   compared now and then: a string a compaction lost or moved wrongly is a
+   mismatch, a bad offset an ASan report. Some updates copy layout box text,
+   i.e. a source that lies in the pool itself. */
+#define PT_N 8
+#define PT_ATTRS 9
+#define PT_MAX 96
+static const char *const pt_names[PT_ATTRS] = { "id", "class", "style", "href", "name", "action", "onclick", "title", "data-k" };
+static struct { int node; char text[PT_MAX + 1]; char attr[PT_ATTRS][PT_MAX + 1]; } g_pt[PT_N];
+
+static int pt_rand_str(char *out) {
+    static const char cs[] = "abcdefghijxyz0123456789-_:;.,!";
+    int n = (int)(rnd() % (PT_MAX + 1));
+    if (rnd() % 4 == 0) n = (int)(rnd() % 6);
+    for (int i = 0; i < n; i++) out[i] = cs[rnd() % (sizeof(cs) - 1)];
+    out[n] = 0;
+    return n;
+}
+
+static void pt_verify(const char *when) {
+    char got[PT_MAX + 32];
+    for (int k = 0; k < PT_N; k++) {
+        if (!g_pt[k].node) continue;
+        rb_dom_get_text(g_pt[k].node, got, (int)sizeof(got));
+        if (strcmp(got, g_pt[k].text) != 0) {
+            printf("pool fuzz (%s): node %d text [%s] want [%s]\n", when, g_pt[k].node, got, g_pt[k].text);
+            fflush(stdout); __builtin_trap();
+        }
+        for (int a = 0; a < PT_ATTRS; a++) {
+            rb_dom_get_attr(g_pt[k].node, pt_names[a], (int)strlen(pt_names[a]), got, (int)sizeof(got));
+            if (strcmp(got, g_pt[k].attr[a]) != 0) {
+                printf("pool fuzz (%s): node %d %s [%s] want [%s]\n", when, g_pt[k].node, pt_names[a], got, g_pt[k].attr[a]);
+                fflush(stdout); __builtin_trap();
+            }
+        }
+    }
+}
+
+static void exercise_pool(const char *page, int plen) {
+    if (rnd() & 1) rb_open_web(page, plen);
+    else rb_open(page, plen);
+    int oom0 = rb_oom();
+    int roomy = rb_debug_stat(2) < 256 * 1024;       /* the page leaves room to work in */
+    int nodes[256], gens[256];
+    int nn = 0;
+    dom_gather(1, nodes, &nn, 256, 0);
+    for (int i = 0; i < nn; i++) gens[i] = rb_dom_generation(nodes[i]);
+    memset(g_pt, 0, sizeof(g_pt));
+    for (int k = 0; k < PT_N; k++) {
+        int n = rb_dom_create_element(RB_TAG_A);
+        if (!n) break;
+        rb_dom_append_child(1, n);
+        g_pt[k].node = n;
+    }
+    int scratch = rb_dom_create_element(RB_TAG_DIV);
+    rb_dom_append_child(1, scratch);
+    int c0 = rb_debug_stat(14);
+    long bytes = 0;
+    char v[PT_MAX + 1];
+    for (int op = 0; bytes < 4L * 1024 * 1024 && op < 400000; op++) {
+        int k = (int)(rnd() % PT_N);
+        int r = (int)(rnd() % 16);
+        if (!g_pt[k].node) continue;
+        if (r < 4) {
+            int n = pt_rand_str(v);
+            if (rb_dom_set_text(g_pt[k].node, v, n)) memcpy(g_pt[k].text, v, (size_t)n + 1);
+            bytes += n;
+        } else if (r < 10) {
+            int a = (int)(rnd() % PT_ATTRS);
+            int n = pt_rand_str(v);
+            if (rb_dom_set_attr(g_pt[k].node, pt_names[a], (int)strlen(pt_names[a]), v, n)) memcpy(g_pt[k].attr[a], v, (size_t)n + 1);
+            bytes += n;
+        } else if (r == 10 && rb_box_count() > 0) {
+            int b = (int)(rnd() % (unsigned)rb_box_count()), l;
+            const char *t = rb_box_text(b, &l);
+            if (l > PT_MAX) l = PT_MAX;
+            int clean = 1;            /* get_text collapses white space: copy only plain text */
+            for (int i = 0; i < l; i++) if (t[i] == ' ' || t[i] == '\n' || t[i] == '\t' || t[i] == '\r' || !t[i]) clean = 0;
+            if (clean && l > 0) {
+                memcpy(v, t, (size_t)l);
+                v[l] = 0;
+                if (rb_dom_set_text(g_pt[k].node, t, l)) memcpy(g_pt[k].text, v, (size_t)l + 1);
+                bytes += l;
+            }
+        } else if (r == 11 && nn > 1) {
+            int i = 1 + (int)(rnd() % (unsigned)(nn - 1));
+            int n = nodes[i];
+            /* an update can recycle a gathered node and a tracked node reuse
+               its slot: a stale handle must not reach it */
+            if (rb_dom_generation(n) != gens[i]) continue;
+            int len = pt_rand_str(v);
+            if (rnd() & 1) rb_dom_set_text(n, v, len);
+            else if (rnd() & 1) rb_dom_add_class(n, v, len);
+            else rb_dom_set_attr(n, "title", 5, v, len);
+            bytes += len;
+        } else if (r == 12) {
+            char h[2 * PT_MAX + 64];
+            int a = pt_rand_str(v);
+            int hl = snprintf(h, sizeof(h), "<p class=\"%s\">%s<b>%d</b></p>", v, v, a);
+            rb_dom_set_inner_html(scratch, h, hl);
+            bytes += hl;
+        } else if (r == 13) {
+            if (rnd() % 64 == 0) rb_relayout();
+        } else {
+            int n = pt_rand_str(v);
+            int t = rb_dom_create_text(v, n);
+            if (t && !rb_dom_append_child(scratch, t)) rb_dom_release(t);
+            if (rnd() % 4 == 0) rb_dom_set_text(scratch, "", 0);
+            bytes += n;
+        }
+        if (op % 4096 == 0) pt_verify("storm");
+    }
+    rb_relayout();
+    pt_verify("end");
+    if (!oom0 && roomy && rb_oom()) { printf("pool fuzz: rb_oom after %ld bytes of updates\n", bytes); fflush(stdout); __builtin_trap(); }
+    if (roomy && !rb_oom() && rb_debug_stat(14) == c0) { printf("pool fuzz: no compaction\n"); fflush(stdout); __builtin_trap(); }
+}
+
 /* --- event + focus fuzz ---------------------------------------------------
    Listeners that log, stop (immediately), prevent, re-enter the dispatcher and
    remove nodes mid-event. Run under ASan/UBSan: re-entrancy, capture/bubble
@@ -768,6 +889,7 @@ int main(int argc, char **argv) {
         if ((it % 2) == 1) exercise_c2();
         if ((it % 50) == 0) exercise_resolve();
         if ((it % 25) == 0) exercise_compact(buf, n);
+        if ((it % 40) == 7) exercise_pool(buf, n);
     }
     printf("fuzz done\n");
     return 0;
