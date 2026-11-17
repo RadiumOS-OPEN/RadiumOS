@@ -76,8 +76,13 @@ int remap_pic() {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0x00);
-    outb(0xA1, 0x00);
+    /* Unmask IRQ0 (PIT) only. The keyboard (ports 0x64/0x60) and the
+     * RTL8139 rx path are polled, so IRQ1 and the NIC IRQ are masked to
+     * avoid needless interrupts, and an unhandled level-triggered IRQ11.
+     * IRQ2 (cascade) is masked too, so all slave IRQs are unavailable until
+     * the mask is changed, e.g. 0xFA master / 0xF7 slave for IRQ11. */
+    outb(0x21, 0xFE);
+    outb(0xA1, 0xFF);
     
     return 1;
 }
