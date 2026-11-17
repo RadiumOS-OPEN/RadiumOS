@@ -144,7 +144,9 @@ const KEY_NAMES = {8: 'Backspace', 9: 'Tab', 10: 'Enter', 13: 'Enter', 27: 'Esca
 function nativeEvent(type, target) {
   const [key, x, y, button, buttons, mods, prevented] = rb.evInfo();
   const init = {bubbles: !/^(focus|blur|load|scroll|mouseenter|mouseleave)$/.test(type), cancelable: true,
-                clientX: x, clientY: y, button: button < 0 ? 0 : button, buttons,
+                /* the engine's y counts screen rows; CSS px are half a row
+                   (as in getBoundingClientRect) */
+                clientX: x, clientY: y * 2, button: button < 0 ? 0 : button, buttons,
                 shiftKey: !!(mods & 1), ctrlKey: !!(mods & 2), altKey: !!(mods & 4)};
   let ev;
   if (/^key/.test(type)) {
@@ -153,6 +155,15 @@ function nativeEvent(type, target) {
       code: k.length === 1 && /[a-z]/i.test(k) ? 'Key' + k.toUpperCase() : k}));
   } else if (/^(click|mouse|dblclick|contextmenu)/.test(type)) {
     ev = new MouseEvent(type, init);
+    /* offsetX/Y: from the target's box. Images and canvases show one pixel
+       per screen row (they are not halved vertically), so on them offsetY
+       counts rows: e.offsetX/e.offsetY are canvas pixels at the natural size. */
+    const r = target && target.__h > 1 ? rb.rect(target.__h) : null;
+    if (r) {
+      const tag = rb.tag(target.__h);
+      ev.offsetX = x - r[0];
+      ev.offsetY = tag === 'canvas' || tag === 'img' ? y - r[1] : (y - r[1]) * 2;
+    }
   } else if (type === 'focus' || type === 'blur') {
     ev = new FocusEvent(type, init);
   } else if (type === 'input') {

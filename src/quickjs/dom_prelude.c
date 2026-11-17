@@ -146,7 +146,9 @@ const char rjs_dom_prelude[] =
     "function nativeEvent(type, target) {\n"
     "  const [key, x, y, button, buttons, mods, prevented] = rb.evInfo();\n"
     "  const init = {bubbles: !/^(focus|blur|load|scroll|mouseenter|mouseleave)$/.test(type), cancelable: true,\n"
-    "                clientX: x, clientY: y, button: button < 0 \077 0 : button, buttons,\n"
+    "                /* the engine's y counts screen rows; CSS px are half a row\n"
+    "                   (as in getBoundingClientRect) */\n"
+    "                clientX: x, clientY: y * 2, button: button < 0 \077 0 : button, buttons,\n"
     "                shiftKey: !!(mods & 1), ctrlKey: !!(mods & 2), altKey: !!(mods & 4)};\n"
     "  let ev;\n"
     "  if (/^key/.test(type)) {\n"
@@ -155,6 +157,15 @@ const char rjs_dom_prelude[] =
     "      code: k.length === 1 && /[a-z]/i.test(k) \077 'Key' + k.toUpperCase() : k}));\n"
     "  } else if (/^(click|mouse|dblclick|contextmenu)/.test(type)) {\n"
     "    ev = new MouseEvent(type, init);\n"
+    "    /* offsetX/Y: from the target's box. Images and canvases show one pixel\n"
+    "       per screen row (they are not halved vertically), so on them offsetY\n"
+    "       counts rows: e.offsetX/e.offsetY are canvas pixels at the natural size. */\n"
+    "    const r = target && target.__h > 1 \077 rb.rect(target.__h) : null;\n"
+    "    if (r) {\n"
+    "      const tag = rb.tag(target.__h);\n"
+    "      ev.offsetX = x - r[0];\n"
+    "      ev.offsetY = tag === 'canvas' || tag === 'img' \077 y - r[1] : (y - r[1]) * 2;\n"
+    "    }\n"
     "  } else if (type === 'focus' || type === 'blur') {\n"
     "    ev = new FocusEvent(type, init);\n"
     "  } else if (type === 'input') {\n"
@@ -2450,4 +2461,4 @@ const char rjs_dom_prelude[] =
     "};\n"
     "\n"
     "})(globalThis);\n";
-const int rjs_dom_prelude_len = 103461;
+const int rjs_dom_prelude_len = 104063;

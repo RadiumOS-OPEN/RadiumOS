@@ -407,6 +407,19 @@ int main(void) {
            "cs.push(e.getContext('2d')); } cs[39].fillRect(0, 0, 8, 8); cs[39].getImageData(0, 0, 1, 1).data[3]", "0");
     EXPECT("1 + 1", "2");
 
+    /* mouse coordinates on a canvas: offsetX/offsetY are canvas pixels, and
+       clientY - rect.top scaled by height / rect.height lands on the same one */
+    page("<body style='margin:0'><p>x</p><canvas id=c width=100 height=50></canvas></body>");
+    EXPECT("var cv = document.getElementById('c'), got = ''; cv.addEventListener('click', e => {"
+           "var r = cv.getBoundingClientRect(); got = [e.offsetX, e.offsetY,"
+           "Math.round((e.clientY - r.top) * cv.height / r.height)].join(); }); 1", "1");
+    {
+        int x, y, w, h;
+        CHECK(rb_dom_rect(rb_find_id("c"), &x, &y, &w, &h) && h == 50);
+        rb_dispatch_ex(rb_find_id("c"), RB_EV_CLICK, 0, x + 30, y + 20, 0, 1, 0);
+    }
+    EXPECT("got", "30,20,20");
+
     /* a script-drawn page: the draw happens during load, the host sees dirty pixels */
     page("<canvas id=c width=64 height=64></canvas><script>"
          "var x = document.getElementById('c').getContext('2d');"
