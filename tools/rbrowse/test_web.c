@@ -1402,6 +1402,30 @@ static void test_nav_and_forms(void) {
     CHECK(rb_dom_get_checked(cb) == 1);
 }
 
+/* The space between two words of a link belongs to the link: each word is
+   its own box, and a click exactly on the boundary used to fall through. */
+static void test_link_word_gap(void) {
+    web("<p>Go: <a id=l href=next.html>Next page here</a> end <a id=m href=o.html>other</a></p>");
+    int link = rb_find_id("l"), first = -1, second = -1, last = -1;
+    for (int i = 0; i < rb_box_count(); i++) {
+        const RbBox *b = rb_box(i);
+        if (b->kind != RB_BOX_TEXT || b->node != link) continue;
+        if (first < 0) first = i; else if (second < 0) second = i;
+        last = i;
+    }
+    CHECK(first >= 0 && second >= 0 && last > second);
+    if (first < 0 || second < 0) return;
+    const RbBox *a = rb_box(first), *b = rb_box(second), *z = rb_box(last);
+    CHECK(b->x > a->x + a->w);                              /* there is a gap */
+    CHECK(rb_hit(a->x + a->w - 1, a->y + 1) == link);       /* last pixel of "Next" */
+    CHECK(rb_hit(a->x + a->w, a->y + 1) == link);           /* the boundary itself */
+    CHECK(rb_hit(b->x - 1, a->y + a->h - 1) == link);
+    CHECK(rb_hit(a->x - 1, a->y + 1) != link);              /* before the link: "Go:" is not it */
+    CHECK(rb_hit(z->x + z->w, z->y + 1) != link);           /* after it: the gap to "end" */
+    CHECK(rb_hit(a->x + a->w, a->y - 1) != link && rb_hit(a->x + a->w, a->y + a->h) != link);
+    CHECK(rb_hit(rb_view_width() - 2, a->y + 1) != link);   /* far right of the row */
+}
+
 static void test_text_content(void) {
     char v[128];
     web("<div id=d>a<b>b<i>c</i></b><script id=s></script><style id=st></style>d</div><p id=e></p>");
@@ -1551,6 +1575,7 @@ int main(void) {
     test_detach_and_move();
     test_nav_and_forms();
     test_text_content();
+    test_link_word_gap();
     test_script_stress();
     if (fails) {
         printf("%d check(s) failed\n", fails);

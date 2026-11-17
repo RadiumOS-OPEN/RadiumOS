@@ -4092,6 +4092,36 @@ int rb_box_clip(int i, int *x, int *y, int *w, int *h) {
     return 1;
 }
 
+/* Each word of a line is its own text box, one space apart, and nothing
+   covers the space: a click exactly between two words of a link fell through
+   it. When no box is under the pointer, the nearest text box on its row to
+   the left and to the right decide: the same clickable element on both
+   sides, no more than two spaces apart, owns the gap. */
+static int hit_word_gap(int x, int y, int scroll) {
+    int l = -1, r = -1;
+    for (int i = 0; i < g_box_n; i++) {
+        const RbBox *b = &g_box[i];
+        if (b->kind != RB_BOX_TEXT || b->w <= 0 || b->h <= 0 || !clickable(b->node)) continue;
+        int py = (b->flags & RB_BOX_FIXED) ? y - scroll : y;
+        if (py < b->y || py >= b->y + b->h) continue;
+        if (b->clip && b->clip <= g_clip_n) {
+            ClipRect c = g_clip_tab[b->clip - 1];
+            if (x < c.x || py < c.y || x >= c.x + c.w || py >= c.y + c.h) continue;
+        }
+        if (b->x + b->w <= x) {
+            if (l < 0 || b->x + b->w > g_box[l].x + g_box[l].w) l = i;
+        } else if (b->x > x) {
+            if (r < 0 || b->x < g_box[r].x) r = i;
+        }
+    }
+    if (l < 0 || r < 0) return -1;
+    const RbBox *a = &g_box[l], *b = &g_box[r];
+    int space = 8 * (a->scale ? a->scale : 1) + a->ls;
+    if (a->node != b->node || a->y != b->y || ((a->flags ^ b->flags) & RB_BOX_FIXED)) return -1;
+    if (b->x - (a->x + a->w) > 2 * space) return -1;
+    return a->node;
+}
+
 /* Hit test. (x, y) is the pointer in document space for the given scroll
    offset, so a fixed box (stored in viewport space) is compared at y - scroll.
    Boxes are walked in paint order from the top; a clipped box only answers
@@ -4110,7 +4140,7 @@ int rb_hit_at(int x, int y, int scroll) {
         }
         return b->node;
     }
-    return -1;
+    return hit_word_gap(x, y, scroll);
 }
 
 int rb_hit(int x, int y) { return rb_hit_at(x, y, 0); }
