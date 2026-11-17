@@ -3,8 +3,9 @@
 // QEMU's -vga std (and Bochs, VirtualBox's VBoxVGA) expose a simple linear
 // framebuffer mode switch through two I/O ports (index 0x1CE, data 0x1CF).
 // The framebuffer itself is PCI BAR0 of the display device (1234:1111 on
-// QEMU), normally 0xFD000000. Paging is off in this kernel, so the physical
-// address is usable as is.
+// QEMU), normally 0xFD000000. The kernel's page tables identity-map only
+// 0xFD000000 + 16 MiB of that area (boot.asm), so bga_set_mode refuses a
+// framebuffer anywhere else.
 //
 // Text mode state lives in the same VRAM the LFB covers, so callers enter
 // through vga_gfx_set_mode13h() first (it snapshots registers, font, text
@@ -24,8 +25,8 @@ uint32_t bga_lfb_address(void);
 
 // Switch to width x height x bpp with the linear framebuffer enabled.
 // Returns 0 and fills *lfb and *pitch (bytes per row) on success; on any
-// failure (no DISPI, mode rejected, LFB not answering) DISPI is left
-// disabled and -1 is returned.
+// failure (no DISPI, mode rejected, LFB outside the mapped window or not
+// answering) DISPI is left disabled and -1 is returned.
 int bga_set_mode(int width, int height, int bpp, uint8_t **lfb, int *pitch);
 
 // Turn DISPI off again (VGA registers then drive the display).

@@ -22,6 +22,11 @@
 #define DISPI_LFB_ENABLED 0x40
 
 #define BGA_LFB_FALLBACK  0xFD000000u
+/* boot.asm identity-maps 0xFD000000 + 16 MiB for the framebuffer (as
+   fbcon.c's FB_MAP_END). The rest of virtual 3-4 GiB is RAM remapped from
+   physical 4-5 GiB, so a framebuffer BAR anywhere else is not reachable. */
+#define BGA_MAP_BASE      0xFD000000u
+#define BGA_MAP_END       0xFE000000u
 
 static void dispi_write(uint16_t index, uint16_t value) {
     outw(DISPI_INDEX_PORT, index);
@@ -67,6 +72,12 @@ int bga_set_mode(int width, int height, int bpp, uint8_t **lfb, int *pitch) {
     if (width <= 0 || height <= 0 || width > 1920 || height > 1200) return -1;
     if (bpp != 8 && bpp != 15 && bpp != 16 && bpp != 24 && bpp != 32) return -1;
     uint32_t base = bga_lfb_address();
+    int bytes = (bpp + 7) / 8;
+    /* Outside the mapped window the address would name remapped RAM: the
+       probe below would pass on it and every frame would be written over
+       someone's memory (VBoxVGA puts its framebuffer at 0xE0000000). */
+    if (base < BGA_MAP_BASE || base >= BGA_MAP_END ||
+        (uint32_t)width * (uint32_t)height * (uint32_t)bytes > BGA_MAP_END - base) return -1;
 
     dispi_write(DISPI_ENABLE, DISPI_DISABLED);
     dispi_write(DISPI_XRES, (uint16_t)width);
@@ -86,10 +97,13 @@ int bga_set_mode(int width, int height, int bpp, uint8_t **lfb, int *pitch) {
     }
     int vw = dispi_read(DISPI_VIRT_WIDTH);
     if (vw < width) vw = width;
-    int bytes = (bpp + 7) / 8;
+    if ((uint32_t)vw * (uint32_t)height * (uint32_t)bytes > BGA_MAP_END - base) {
+        bga_disable();
+        return -1;
+    }
 
-    /* The LFB must answer like memory. Paging is off, so a wrong guess reads
-       back open bus (0xFFFFFFFF) instead of faulting. */
+    /* The LFB must answer like memory: a wrong guess inside the window reads
+       back open bus (0xFFFFFFFF). */
     volatile uint32_t *probe = (volatile uint32_t *)(uintptr_t)base;
     uint32_t keep = probe[0];
     probe[0] = 0x5AA5C33Cu;
