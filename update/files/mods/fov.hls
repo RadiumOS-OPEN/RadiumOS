@@ -1,0 +1,27 @@
+// mod: FOV changer: hold X wider, C narrower
+include "/disk/mods/doom.hls";
+include "/disk/mods/gfx.hls";
+
+// state: [0] field of view in degrees (0 = not set yet)
+fn main() {
+    let s = mod_state();
+    if mod_frame() < 0 {
+        out_set(OUT_FOV, 0);
+    } else {
+        if rd(s) == 0 { wr(s, 110); }
+        let mut f = rd(s);
+        if mod_frame() % 2 == 0 {
+            if key_down(1) == 1 { f = f + 1; }
+            if key_down(2) == 1 { f = f - 1; }
+        }
+        if f < 60 { f = 60; }
+        if f > 120 { f = 120; }
+        wr(s, f);
+        out_set(OUT_FOV, f);
+        if key_down(1) == 1 || key_down(2) == 1 {
+            let txt = "FOV " + itos(f);
+            gfx_text(mod_screen(), mod_font(), 121, 141, txt, 0x000000);
+            gfx_text(mod_screen(), mod_font(), 120, 140, txt, 0xFFFFFF);
+        }
+    }
+}

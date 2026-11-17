@@ -1,0 +1,11 @@
+// acmod: God mode: health and armour never drop
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() >= 0 {
+        if in_game() == 1 {
+            out_set(OUT_HEALTH, 100);
+            out_set(OUT_ARMOUR, 100);
+        }
+    }
+}

@@ -1006,3 +1006,16 @@ pub extern "C" fn rust_render_test_png() -> i32 {
         rust_draw_png_from_memory(TEST_PNG_BUFFER.as_ptr(), required_size, 40, 20)
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn rust_png_fetch_and_render(url: *const u8, x: i32, y: i32) -> i32 {
+    if url.is_null() {
+        rust_print(b"ERROR: PNG URL is null\n");
+        return -1;
+    }
+    let filename = b"/tmp/cat.png\0";
+    if crate::fetch::command::rust_fetch_to_file(url, filename.as_ptr()) != 0 {
+        return -1;
+    }
+    rust_load_and_render_png(filename.as_ptr(), x, y)
+}
