@@ -5873,8 +5873,12 @@ int rb_dom_set_value(int node, const char *s, int len) {
             int grp = g_nodes[c].kind == 0 && g_nodes[c].tag == RB_TAG_OPTGROUP;
             for (int o = grp ? g_nodes[c].first : c; o; o = grp ? g_nodes[o].next : 0) {
                 if (g_nodes[o].kind != 0 || g_nodes[o].tag != RB_TAG_OPTION || g_nodes[o].dead) continue;
+                /* opt_value returns the full length but copies what fits:
+                   a value that did not fit cannot be compared (and is not
+                   matched), or memcmp would run off the end of vbuf */
                 int vn = opt_value(o, vbuf, (int)sizeof(vbuf));
-                int hit = !match && vn == len && (len == 0 || memcmp(vbuf, s, (size_t)len) == 0);
+                int hit = !match && vn == len && vn < (int)sizeof(vbuf) &&
+                          (len == 0 || memcmp(vbuf, s, (size_t)len) == 0);
                 if (hit) { match = o; blob_edit(o, "selected", 8, "", 0, 0); }
                 else blob_edit(o, "selected", 8, 0, 0, 1);
                 style_touch(o);

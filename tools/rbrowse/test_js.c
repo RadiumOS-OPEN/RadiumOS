@@ -279,6 +279,12 @@ int main(void) {
            "live.replaceChildren(nu, keepI); live.innerHTML", "<s></s><i>2</i>");
     EXPECT("live.replaceChildren(); live.childNodes.length", "0");
 
+    /* select.value against an option whose value is longer than the
+       engine's compare buffer (it used to memcmp past the buffer) */
+    EXPECT("live.innerHTML = '<select id=sl><option>short</option><option id=lo>x</option></select>';"
+           "var sl = document.getElementById('sl'), longv = 'v'.repeat(3000); document.getElementById('lo').value = longv;"
+           "sl.value = longv; sl.value = 'short'; sl.value", "short");
+
     /* detached documents never touch the page */
     EXPECT("var before = document.body.children.length; var d2 = document.implementation.createHTMLDocument('');"
            "d2.body.innerHTML = '<form></form><form></form>'; d2.body.childNodes.length + ',' + (document.body.children.length === before)", "2,true");
