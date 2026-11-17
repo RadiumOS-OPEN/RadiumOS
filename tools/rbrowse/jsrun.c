@@ -66,9 +66,9 @@ static int http_get(const char *url, char *out, int cap, int same_origin) {
             for (const char *q = loc; *q; q++) if (*q == '\'' || *q == '\\') return -1;
             snprintf(cur, sizeof(cur), "%s", loc);
         }
-        snprintf(cmd, sizeof(cmd), "curl -s --max-time 20 -A 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3' '%s'", cur);
+        snprintf(cmd, sizeof(cmd), "curl -s --max-time 20 -A 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0' -H 'Accept-Language: en-US,en;q=0.5' '%s'", cur);
     } else {
-        snprintf(cmd, sizeof(cmd), "curl -sL --max-time 20 -A 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3' '%s'", url);
+        snprintf(cmd, sizeof(cmd), "curl -sL --max-time 20 -A 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0' -H 'Accept-Language: en-US,en;q=0.5' '%s'", url);
     }
     FILE *p = popen(cmd, "r");
     if (!p) return -1;

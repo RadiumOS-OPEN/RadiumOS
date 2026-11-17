@@ -432,6 +432,11 @@ int main(void) {
     EXPECT("got.sort().join()", "b:all,p:hi,w:yo:true");
     EXPECT("window.postMessage('x', 'https://elsewhere.example'); new MessageEvent('message', {data: 5}).data", "5");
 
+    /* the user agent is Firefox's, consistently (the HTTP header is the same
+       string: BROWSER_UA in rust_lib/src/fetch/mod.rs) */
+    EXPECT("[navigator.userAgent, navigator.platform, navigator.vendor === '', 'userAgentData' in navigator].join('|')",
+           "Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0|Linux i686|true|false");
+
     /* querySelectorAll returns every match, past the old 4096 cap */
     EXPECT("var qa = document.createElement('div'); document.body.appendChild(qa); qa.innerHTML = '<i></i>'.repeat(5000);"
            "var n5 = qa.querySelectorAll('i').length; qa.remove(); qa = null; n5", "5000");

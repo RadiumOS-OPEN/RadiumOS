@@ -303,25 +303,37 @@ fn request(url: &Url, head: bool, range: Option<(u64, u64)>) -> String {
 /// A browser request: GET, or POST with `body` of type `content_type`, with
 /// the jar's Cookie header (empty: none). Values were validated by the
 /// caller (cookies hold no control characters, the type is checked).
+/// rbrowse's user agent: Firefox ESR on 32-bit Linux, the closest common
+/// browser to what rbrowse is (many sites serve an "unsupported browser"
+/// page or a harder check to anything they do not recognise). It must stay
+/// the same as navigator.userAgent in src/quickjs/dom_prelude.js: checks
+/// compare the two.
+pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0";
+
+/// rbrowse's request, headers in the order Firefox sends them. No
+/// compression is offered: bodies are read as they come.
 pub(crate) fn browser_request(url: &Url, cookie: &str, post: Option<(&[u8], &str)>) -> Vec<u8> {
     let mut text = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RadiumOS-fetch/1.0\r\nAccept: */*\r\nAccept-Encoding: identity\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {BROWSER_UA}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+         Accept-Language: en-US,en;q=0.5\r\nAccept-Encoding: identity\r\n",
         if post.is_some() { "POST" } else { "GET" },
         url.path,
         url.authority()
     );
-    if !cookie.is_empty() {
-        text.push_str("Cookie: ");
-        text.push_str(cookie);
-        text.push_str("\r\n");
-    }
     if let Some((body, content_type)) = post {
         text.push_str(&format!(
             "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
             body.len()
         ));
     }
-    text.push_str("Connection: close\r\n\r\n");
+    text.push_str("Connection: close\r\n");
+    if !cookie.is_empty() {
+        text.push_str("Cookie: ");
+        text.push_str(cookie);
+        text.push_str("\r\n");
+    }
+    text.push_str("\r\n");
     let mut bytes = text.into_bytes();
     if let Some((body, _)) = post {
         bytes.extend_from_slice(body);

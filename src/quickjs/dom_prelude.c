@@ -2251,11 +2251,16 @@ const char rjs_dom_prelude[] =
     "  back() {}, forward() {}, go() {},\n"
     "};\n"
     "\n"
+    "/* Firefox ESR on 32-bit Linux, as in every HTTP request (BROWSER_UA in\n"
+    "   rust_lib/src/fetch/mod.rs: keep the two the same, checks compare them),\n"
+    "   with the navigator fields Firefox has to match (no userAgentData, which\n"
+    "   is Chrome's). */\n"
     "const navigator = {\n"
-    "  userAgent: 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3 QuickJS',\n"
-    "  appName: 'Netscape', appVersion: '5.0 (RadiumOS)', appCodeName: 'Mozilla', product: 'Gecko',\n"
-    "  platform: 'RadiumOS i686', vendor: 'RadiumOS', language: 'en-US', languages: ['en-US', 'en'],\n"
-    "  onLine: true, cookieEnabled: true, doNotTrack: '1', hardwareConcurrency: 1, maxTouchPoints: 0,\n"
+    "  userAgent: 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0',\n"
+    "  appName: 'Netscape', appVersion: '5.0 (X11)', appCodeName: 'Mozilla', product: 'Gecko',\n"
+    "  productSub: '20100101', buildID: '20181001000000', oscpu: 'Linux i686',\n"
+    "  platform: 'Linux i686', vendor: '', vendorSub: '', language: 'en-US', languages: ['en-US', 'en'],\n"
+    "  onLine: true, cookieEnabled: true, doNotTrack: 'unspecified', hardwareConcurrency: 1, maxTouchPoints: 0,\n"
     "  webdriver: false, pdfViewerEnabled: false,\n"
     "  sendBeacon() { return true; },\n"
     "  javaEnabled() { return false; },\n"
@@ -2799,4 +2804,4 @@ const char rjs_dom_prelude[] =
     "};\n"
     "\n"
     "})(globalThis);\n";
-const int rjs_dom_prelude_len = 117568;
+const int rjs_dom_prelude_len = 117913;

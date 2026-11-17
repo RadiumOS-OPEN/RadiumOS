@@ -2249,11 +2249,16 @@ const history = {
   back() {}, forward() {}, go() {},
 };
 
+/* Firefox ESR on 32-bit Linux, as in every HTTP request (BROWSER_UA in
+   rust_lib/src/fetch/mod.rs: keep the two the same, checks compare them),
+   with the navigator fields Firefox has to match (no userAgentData, which
+   is Chrome's). */
 const navigator = {
-  userAgent: 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3 QuickJS',
-  appName: 'Netscape', appVersion: '5.0 (RadiumOS)', appCodeName: 'Mozilla', product: 'Gecko',
-  platform: 'RadiumOS i686', vendor: 'RadiumOS', language: 'en-US', languages: ['en-US', 'en'],
-  onLine: true, cookieEnabled: true, doNotTrack: '1', hardwareConcurrency: 1, maxTouchPoints: 0,
+  userAgent: 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0',
+  appName: 'Netscape', appVersion: '5.0 (X11)', appCodeName: 'Mozilla', product: 'Gecko',
+  productSub: '20100101', buildID: '20181001000000', oscpu: 'Linux i686',
+  platform: 'Linux i686', vendor: '', vendorSub: '', language: 'en-US', languages: ['en-US', 'en'],
+  onLine: true, cookieEnabled: true, doNotTrack: 'unspecified', hardwareConcurrency: 1, maxTouchPoints: 0,
   webdriver: false, pdfViewerEnabled: false,
   sendBeacon() { return true; },
   javaEnabled() { return false; },
