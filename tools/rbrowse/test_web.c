@@ -1426,6 +1426,34 @@ static void test_link_word_gap(void) {
     CHECK(rb_hit(rb_view_width() - 2, a->y + 1) != link);   /* far right of the row */
 }
 
+/* Frames are not rendered inside the page: an iframe with an address is a
+   labelled box that opens it as the page, like a link; one without is inert */
+static void test_iframe_opens(void) {
+    web("<p>before</p><iframe id=f src=\" https://www.google.com/recaptcha/api2/anchor?k=1 \" width=300 height=60></iframe>"
+        "<iframe id=g></iframe><iframe id=j src=\"javascript:void 0\"></iframe><iframe id=b src=about:blank></iframe>");
+    int f = rb_find_id("f"), g = rb_find_id("g"), j = rb_find_id("j"), b = rb_find_id("b");
+    CHECK(rb_dom_is_focusable(f) && !rb_dom_is_focusable(g) && !rb_dom_is_focusable(j) && !rb_dom_is_focusable(b));
+    char href[256];
+    CHECK(rb_node_href(f, href, (int)sizeof(href)) && strcmp(href, "https://www.google.com/recaptcha/api2/anchor?k=1") == 0);
+    CHECK(!rb_node_href(g, href, (int)sizeof(href)));
+    int label = 0, x = 0, y = 0;
+    for (int i = 0; i < rb_box_count(); i++) {
+        const RbBox *bx = rb_box(i);
+        int len = 0;
+        const char *t = bx->kind == RB_BOX_TEXT ? rb_box_text(i, &len) : 0;
+        if (t && len > 13 && memcmp(t, "[open frame: ", 13) == 0 && memcmp(t + 13, "www.google.com/", 15) == 0) {
+            label = 1;
+            x = bx->x + 2;
+            y = bx->y + 2;
+        }
+    }
+    CHECK(label);
+    CHECK(rb_hit(x, y) == f);
+    CHECK(rb_dispatch(f, RB_EV_CLICK) == 2 && rb_take_nav(href, (int)sizeof(href)) > 0 &&
+          strcmp(href, "https://www.google.com/recaptcha/api2/anchor?k=1") == 0);
+    CHECK(rb_dispatch(g, RB_EV_CLICK) != 2 && rb_take_nav(href, (int)sizeof(href)) == 0);
+}
+
 static void test_text_content(void) {
     char v[128];
     web("<div id=d>a<b>b<i>c</i></b><script id=s></script><style id=st></style>d</div><p id=e></p>");
@@ -1576,6 +1604,7 @@ int main(void) {
     test_nav_and_forms();
     test_text_content();
     test_link_word_gap();
+    test_iframe_opens();
     test_script_stress();
     if (fails) {
         printf("%d check(s) failed\n", fails);

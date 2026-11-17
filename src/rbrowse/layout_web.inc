@@ -385,6 +385,18 @@ static void emit_replaced(int node, int hot, const Style *st, int x, int y, int 
         n = (int)g_nodes[node].text_len;
         if (n > 60) n = 60;
         memcpy(label, g_pool + g_nodes[node].text_off, (size_t)n);
+    } else if (big && tag == RB_TAG_IFRAME && frame_src(node, g_frame_buf, (int)sizeof(g_frame_buf)) > 0) {
+        /* "[open frame: example.com/path]": click or Enter opens it as the page */
+        const char *src = g_frame_buf;
+        const char *p = src;
+        for (const char *q = src; *q; q++)
+            if (q[0] == '/' && q[1] == '/') { p = q + 2; break; }
+        static const char pre[] = "[open frame: ";
+        n = 0;
+        for (int k = 0; pre[k] && n < 60; k++) label[n++] = pre[k];
+        for (; *p && n < 61; p++) label[n++] = *p;
+        if (n > 61) n = 61;
+        label[n++] = ']';
     } else if (big && tag != RB_TAG_IMG) {
         const char *nm = tag == RB_TAG_IFRAME ? "[iframe]" : tag == RB_TAG_VIDEO ? "[video]" :
                          tag == RB_TAG_CANVAS ? "[canvas]" : tag == RB_TAG_SVG ? "" : "[embed]";

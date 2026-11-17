@@ -1364,6 +1364,12 @@ static int st_len_px(int stored, int avail);
 static int tag_is_void(int tag);
 static int raw_kind(int tag);
 static int g_hot_in;       /* link node enclosing the block being laid out */
+/* Frames are not rendered inside the page: an <iframe> with an address is a
+   box that opens that address as the page when clicked or activated (like
+   a link; Back returns). Writes the address and returns its length, or 0
+   for an inert frame (no src, about:, javascript:, data:). */
+static char g_frame_buf[1024];
+static int frame_src(int node, char *out, int cap);
 #include "layout_web.inc"
 #include "layout_table.inc"
 
@@ -3167,6 +3173,7 @@ static int is_focusable(int node) {
     int tag = g_nodes[node].tag;
     if (g_nodes[node].disabled && tag != RB_TAG_A) return 0;
     if (tag == RB_TAG_A) return g_nodes[node].href_len > 0;
+    if (tag == RB_TAG_IFRAME) return frame_src(node, g_frame_buf, (int)sizeof(g_frame_buf)) > 0;
     if (tag == RB_TAG_BUTTON) return 1;
     if (tag == RB_TAG_TEXTAREA) return 1;
     if (tag == RB_TAG_INPUT) return 1;
@@ -4012,8 +4019,29 @@ int rb_node_color(int node) {
     return g_nodes[node].color;
 }
 
+static int prefix_lc(const char *s, int n, const char *lit) {
+    int i = 0;
+    for (; lit[i]; i++)
+        if (i >= n || lower_ch((unsigned char)s[i]) != lit[i]) return 0;
+    return 1;
+}
+
+static int frame_src(int node, char *out, int cap) {
+    if (node <= 0 || node >= g_node_n || g_nodes[node].dead || g_nodes[node].tag != RB_TAG_IFRAME || cap < 2) return 0;
+    if (!rb_dom_get_attr(node, "src", 3, out, cap)) return 0;
+    int n = (int)strlen(out), a = 0;
+    while (a < n && (out[a] == ' ' || out[a] == '\t' || out[a] == '\n' || out[a] == '\r')) a++;
+    while (n > a && (out[n - 1] == ' ' || out[n - 1] == '\t' || out[n - 1] == '\n' || out[n - 1] == '\r')) n--;
+    if (a) memmove(out, out + a, (size_t)(n - a));
+    n -= a;
+    out[n] = 0;
+    if (n <= 0 || prefix_lc(out, n, "about:") || prefix_lc(out, n, "javascript:") || prefix_lc(out, n, "data:")) return 0;
+    return n;
+}
+
 int rb_node_href(int node, char *out, int cap) {
     if (!out || cap <= 0 || node <= 0 || node >= g_node_n || g_nodes[node].dead) return 0;
+    if (g_nodes[node].tag == RB_TAG_IFRAME) return frame_src(node, out, cap) > 0;
     if (g_nodes[node].tag != RB_TAG_A || g_nodes[node].href_len == 0) return 0;
     int n = g_nodes[node].href_len;
     if (n >= cap) n = cap - 1;
@@ -4081,6 +4109,7 @@ static int clickable(int node) {
     if (node <= 0 || node >= g_node_n) return 0;
     int tag = g_nodes[node].tag;
     if (tag == RB_TAG_A && g_nodes[node].href_len) return 1;
+    if (tag == RB_TAG_IFRAME) return frame_src(node, g_frame_buf, (int)sizeof(g_frame_buf)) > 0;
     if (tag == RB_TAG_BUTTON || tag == RB_TAG_INPUT || tag == RB_TAG_TEXTAREA) return 1;
     return 0;
 }
@@ -6430,6 +6459,14 @@ static int ev_default_action(int target, int type, int enter, int carried) {
     if (n->tag == RB_TAG_A && n->href_len) {
         set_nav(g_pool + n->href_off, n->href_len);
         if (r < 2) r = 2;
+        return r;
+    }
+    if (n->tag == RB_TAG_IFRAME) {
+        int fl = frame_src(target, g_frame_buf, (int)sizeof(g_frame_buf));
+        if (fl > 0) {
+            set_nav(g_frame_buf, fl);
+            if (r < 2) r = 2;
+        }
         return r;
     }
 
