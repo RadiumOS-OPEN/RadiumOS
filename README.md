@@ -123,7 +123,7 @@ Run `make help` for the full list. Highlights:
 
 - `src/` — Kernel and core OS code (C)
 - `rust_lib/` — Rust standard library components (With Rust SRC) and vendored crates
-- `packages/` — RSH scripts and modules
+- `packages/` — sample files, images and Helios (`.hls`) mods; runtime RSH scripts are created in AVFS by `src/kernel/createFiles.c`
 - `tools/` — Build, signing, disk-install and asset-generation scripts
 - `update/` — Update package payload
 - `port/` — Ported applications (AssaultCube, musl runtime)
