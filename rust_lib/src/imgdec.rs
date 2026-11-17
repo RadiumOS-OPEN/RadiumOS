@@ -213,7 +213,7 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 const MAX_SOURCE_PIXELS: u64 = 8_000_000;
 
-fn decode_png(data: &[u8]) -> Result<(usize, usize, Vec<u32>), &'static str> {
+pub(crate) fn decode_png(data: &[u8]) -> Result<(usize, usize, Vec<u32>), &'static str> {
     if data.len() < 33 || data[..8] != [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
         return Err("not a PNG");
     }
@@ -329,7 +329,7 @@ fn decode_png(data: &[u8]) -> Result<(usize, usize, Vec<u32>), &'static str> {
 }
 
 /// Box-filter shrink to nw x nh, weighting colour by alpha.
-fn shrink(src: &[u32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u32> {
+pub(crate) fn shrink(src: &[u32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u32> {
     let mut out = vec![0u32; nw * nh];
     for dy in 0..nh {
         let y0 = dy * h / nh;

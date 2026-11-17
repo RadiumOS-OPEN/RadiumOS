@@ -24,7 +24,7 @@ endif
 # Flags
 NASMFLAGS = -f elf32
 CFLAGS = -c -target i686-none-elf -ffreestanding -mno-sse -O2 -fno-strict-aliasing -fwrapv -fstack-protector-strong -Wall -Wextra -Werror=implicit-function-declaration -MMD -MP
-LDFLAGS = -T linker.ld -static -nostdlib --unresolved-symbols=ignore-all --fatal-warnings
+LDFLAGS = -T linker.ld -static -nostdlib --fatal-warnings
 
 # Directories
 SRC_DIR = src
