@@ -47,6 +47,25 @@ extern void rust_fetch_abort(void);
 extern int rust_tcp_force_reset(void);
 extern void watchdog_hud_force_redraw(void);
 
+/* AVFS with the fault guard armed: /disk paths go through FAT32 over ATA PIO,
+   and a hang recovery that abandoned one mid-command would leave the drive
+   and the sector cache torn for the rest of the system. fg_crit makes the
+   watchdog wait for the call to return (and leaves a fault inside it to the
+   kernel). */
+static int fs_size(const char *path) {
+    fg_crit_enter();
+    int n = avfs_get_filesize(path);
+    fg_crit_exit();
+    return n;
+}
+
+static int fs_read(const char *path, void *buf, int size) {
+    fg_crit_enter();
+    int r = avfs_read_file(path, buf, (uint32_t)size, 0);
+    fg_crit_exit();
+    return r;
+}
+
 /* The back buffer every frame is painted into (rb_ui.w x rb_ui.h used). */
 static uint32_t g_fb[RB_FB_MAX_W * RB_FB_MAX_H];
 /* Mode 13h fallback: the quantized frame. */
@@ -797,9 +816,9 @@ static int load_script(const char *page, const char *src, char *url, int ucap) {
         return n;
     }
     if (page_remote || url[0] != '/') return -1;   /* a web page never reads local files */
-    int size = avfs_get_filesize(url);
+    int size = fs_size(url);
     if (size < 0 || size >= (int)sizeof(g_script)) return -1;
-    if (avfs_read_file(url, g_script, (uint32_t)size, 0) != 0) return -1;
+    if (fs_read(url, g_script, size) != 0) return -1;
     return size;
 }
 
@@ -1074,9 +1093,9 @@ static int img_fetch(const char *url, uint8_t *buf, int cap) {
     }
     int page_remote = starts(g_current, "http://") || starts(g_current, "https://");
     if (page_remote || url[0] != '/') return -1;    /* a web page never reads local files */
-    int size = avfs_get_filesize(url);
+    int size = fs_size(url);
     if (size <= 0 || size > cap) return -1;
-    if (avfs_read_file(url, buf, (uint32_t)size, 0) != 0) return -1;
+    if (fs_read(url, buf, size) != 0) return -1;
     return size;
 }
 
@@ -1269,13 +1288,13 @@ static int load_canonical(const char *canonical, int post_len, char *final, int 
         open_fetched(final[0] ? final : canonical, n);
         return 0;
     }
-    int size = avfs_get_filesize(canonical);
+    int size = fs_size(canonical);
     if (size < 0) {
         show_message(canonical, "Not found", canonical);
         return -1;
     }
     if (size >= (int)sizeof(g_fetch)) size = (int)sizeof(g_fetch) - 1;
-    if (avfs_read_file(canonical, g_fetch, (uint32_t)size, 0) != 0) {
+    if (fs_read(canonical, g_fetch, size) != 0) {
         show_message(canonical, "Read error", canonical);
         return -1;
     }
@@ -1464,7 +1483,7 @@ static int try_local_probe(const char *in, char *out, int cap) {
         out[w++] = g_current[i];
     }
     append_str(out, cap, &w, in);
-    return avfs_get_filesize(out) >= 0;
+    return fs_size(out) >= 0;
 }
 
 static void go_url(void) {
@@ -1998,8 +2017,10 @@ static int recover_from_crash(void) {
        fetch is running" (the shell does the same after Ctrl+C). Before the
        give-up test, so a browser that closes does not leave it set either. */
     if (rust_fetch_active()) {
+        fg_crit_enter();          /* network state: never left half reset */
         rust_fetch_abort();
         rust_tcp_force_reset();
+        fg_crit_exit();
     }
     if (g_crash_n > RB_CRASH_BURST) return 0;
     rb_crash_reset();

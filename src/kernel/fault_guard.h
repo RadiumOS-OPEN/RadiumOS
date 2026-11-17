@@ -11,6 +11,10 @@
 //
 // Only state the guarded program owns can be trusted afterwards; it must
 // reset its own globals (the browser re-opens its engine from scratch).
+// Kernel state is not the program's: while it calls into the kernel (AVFS,
+// the FAT32/ATA driver, the network stack) it brackets the call with
+// fg_crit_enter/fg_crit_exit, so a redirect never abandons a kernel routine
+// half way with its drive command, sector cache or connection table torn.
 // All 4 GiB of virtual space is mapped (boot.asm, NULL included), so stray
 // pointer writes do not fault: the guard catches #DE/#UD/#GP/#SS and
 // friends, and hangs via the timer, not wild stores.
@@ -47,6 +51,20 @@ void fg_pet(void);
 // (network transfers). Calls nest.
 void fg_watchdog_pause(void);
 void fg_watchdog_resume(void);
+// Critical section around a kernel call made with the guard armed. Calls
+// nest. Inside one:
+//  - the watchdog never redirects, and the time spent inside does not count
+//    against the limit (a slow disk read is not the program hanging), so a
+//    program that loops on its own code, kernel calls or not, is still
+//    caught once it has used up the limit outside them; a kernel call that
+//    never returns is not recoverable;
+//  - a CPU exception is not redirected either: it was raised by kernel code
+//    whose locks and state the program does not own, so it takes the
+//    kernel's normal exception path, as any other kernel fault does.
+// Spinlocks (src/network/spinlock.c) need nothing: they run with interrupts
+// off, so the timer never sees one held.
+void fg_crit_enter(void);
+void fg_crit_exit(void);
 
 // Details of the last recovery.
 const FgReport *fg_last_report(void);

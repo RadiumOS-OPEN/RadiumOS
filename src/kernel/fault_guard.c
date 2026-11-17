@@ -9,6 +9,9 @@ static FgJmp *volatile g_jb;      // armed resume point, 0 when disarmed
 static volatile uint32_t g_limit_ms;
 static volatile uint32_t g_last_pet;
 static volatile int g_paused;
+// fg_crit_enter depth: the program is inside a kernel call (since g_crit_t0).
+static volatile int g_crit;
+static uint32_t g_crit_t0;
 // IRQ nesting depth. The guarded program runs at depth 0; anything at a
 // deeper level is an interrupt handler or a scheduler task running on top of
 // it, and its faults are not ours to unwind.
@@ -60,6 +63,7 @@ void fg_arm(FgJmp *jb, uint32_t limit_ms) {
     g_limit_ms = limit_ms;
     g_last_pet = ticks;
     g_paused = 0;
+    g_crit = 0;
     g_armed_depth = g_irq_depth;
     g_jb = jb;
 }
@@ -79,6 +83,25 @@ void fg_watchdog_pause(void) {
 void fg_watchdog_resume(void) {
     if (g_paused > 0) g_paused--;
     g_last_pet = ticks;
+}
+
+void fg_crit_enter(void) {
+    if (g_crit++ == 0) g_crit_t0 = ticks;
+}
+
+// The outermost exit gives the watchdog back the time spent inside: the
+// last pet moves forward by it, never past now. With interrupts off, since
+// a paused watchdog's tick rewrites g_last_pet too.
+void fg_crit_exit(void) {
+    if (g_crit <= 0) return;
+    if (--g_crit > 0) return;
+    uint32_t flags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) : : "memory");
+    uint32_t now = ticks;
+    uint32_t inside = now - g_crit_t0;
+    if (inside >= now - g_last_pet) g_last_pet = now;
+    else g_last_pet += inside;
+    if (flags & 0x200) __asm__ volatile("sti" : : : "memory");
 }
 
 const FgReport *fg_last_report(void) {
@@ -113,6 +136,8 @@ int fg_on_exception(void *trap_frame) {
     if (!g_jb || g_irq_depth != g_armed_depth || (regs->cs & 3) != 0) return 0;
     // NMI and debug/breakpoint traps are not the program's errors.
     if (regs->interrupt == 1 || regs->interrupt == 2 || regs->interrupt == 3) return 0;
+    // Raised inside a kernel call (fg_crit_enter): kernel code, kernel state.
+    if (g_crit) return 0;
     g_report.kind = FG_KIND_FAULT;
     g_report.vector = regs->interrupt;
     g_report.error = regs->error;
@@ -134,6 +159,8 @@ int fg_on_timer(void *trap_frame) {
     }
     uint32_t stuck = now - g_last_pet;
     if (stuck < g_limit_ms) return 0;
+    // Inside a kernel call: let it finish (fg_crit_exit discounts its time).
+    if (g_crit) return 0;
     g_report.kind = FG_KIND_HANG;
     g_report.vector = 0;
     g_report.error = 0;
