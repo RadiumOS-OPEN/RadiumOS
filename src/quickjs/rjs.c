@@ -22,6 +22,12 @@ static uint32_t g_eval_budget;
 static uint32_t g_checks;
 static uint32_t g_check_cap;
 static int (*g_cancel)(void);
+/* How many rjs_enter()s are open. A native called from a script can re-enter
+   JS (el.click() runs the engine's dispatch, whose listener is JS again):
+   only the outermost entry anchors the stack check and owns the budget, so
+   leaving the inner one neither disarms the script that is still running
+   nor moves its stack limit. */
+static int g_depth;
 
 void rjs_set_cancel(int (*fn)(void)) {
     g_cancel = fn;
@@ -80,11 +86,15 @@ void rjs_stop(void) {
     if (g_rt) JS_FreeRuntime(g_rt);
     g_ctx = 0;
     g_rt = 0;
+    g_depth = 0;
+    g_eval_budget = 0;
 }
 
 void rjs_abandon(void) {
     g_ctx = 0;
     g_rt = 0;
+    g_depth = 0;        /* thrown away mid-call: the open entries went with it */
+    g_eval_budget = 0;
     qjs_alloc_reset();
 }
 
@@ -93,6 +103,8 @@ int rjs_start(void) {
        large, and nothing else lives in the arena): start from a clean one. */
     g_ctx = 0;
     g_rt = 0;
+    g_depth = 0;
+    g_eval_budget = 0;
     qjs_alloc_reset();
     g_rt = JS_NewRuntime();
     if (!g_rt) return RJS_NO_MEMORY;
@@ -170,11 +182,13 @@ static void arm_budget(int timeout_ms) {
 }
 
 void rjs_enter(int timeout_ms) {
+    if (g_depth++ > 0) return;      /* nested: the outer entry's budget and stack anchor stand */
     JS_UpdateStackTop(g_rt);
     arm_budget(timeout_ms);
 }
 
 void rjs_leave(void) {
+    if (g_depth > 0 && --g_depth > 0) return;
     g_eval_budget = 0;
 }
 
@@ -205,9 +219,8 @@ int rjs_eval(const char *src, int len, const char *filename, int timeout_ms, cha
     memcpy(copy, src, (size_t)len);
     copy[len] = 0;
     /* The caller may be on a different stack than at rjs_start (the
-       browser's layout stack): re-anchor the overflow check here. */
-    JS_UpdateStackTop(g_rt);
-    arm_budget(timeout_ms);
+       browser's layout stack): rjs_enter re-anchors the overflow check. */
+    rjs_enter(timeout_ms);
     JSValue v = JS_Eval(g_ctx, copy, (size_t)len, filename ? filename : "<eval>", JS_EVAL_TYPE_GLOBAL);
     js_free(g_ctx, copy);
     int rc = RJS_OK;
@@ -225,7 +238,7 @@ int rjs_eval(const char *src, int len, const char *filename, int timeout_ms, cha
     }
     JS_FreeValue(g_ctx, v);
     if (rjs_run_jobs() == RJS_EXCEPTION && rc == RJS_OK) rc = RJS_EXCEPTION;
-    g_eval_budget = 0;
+    rjs_leave();
     return rc;
 }
 

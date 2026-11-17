@@ -336,6 +336,16 @@ int main(void) {
         g_fail++;
     } else g_pass++;
     EXPECT("1 + 1", "2");
+    /* ...also after a native re-entered JS: el.click() runs the engine's
+       dispatch and its JS listener inside the script. Leaving that inner
+       entry used to disarm the outer script's time budget for good. */
+    page("<body><button id=b>x</button><script>var b = document.getElementById('b'), n = 0;"
+         "b.addEventListener('click', () => n++);</script></body>");
+    if (strncmp(js("b.click(); while (true) {}"), "!InternalError: interrupted", 27) != 0) {
+        printf("FAIL: runaway loop after a nested dispatch not interrupted: %s\n", g_out);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("n", "1");
 
     printf("%d passed, %d failed\n", g_pass, g_fail);
     if (!g_fail) printf("rbrowse js checks passed\n");
