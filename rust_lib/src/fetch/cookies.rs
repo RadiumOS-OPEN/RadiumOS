@@ -406,28 +406,26 @@ impl Jar {
         true
     }
 
-    /// Feeds every Set-Cookie line of a raw HTTP response head.
+    /// Feeds every Set-Cookie line of a raw HTTP response head. Lines end
+    /// in CRLF exactly as the response parser splits them: a bare LF (which
+    /// that parser lets through only inside the status line) must not start
+    /// a header of its own.
     pub fn take_headers(&mut self, at: Origin<'_>, head: &[u8], now: Option<u64>) {
-        let Ok(text) = core::str::from_utf8(head) else {
-            // Non-UTF-8 bytes elsewhere in the head must not drop the cookies:
-            // walk the lines one by one instead.
-            for line in head.split(|&b| b == b'\n') {
-                if let Ok(line) = core::str::from_utf8(line) {
-                    self.take_line(at, line, now);
-                }
+        let mut rest = head;
+        let mut first = true;
+        while !rest.is_empty() {
+            let end = rest.windows(2).position(|w| w == b"\r\n").unwrap_or(rest.len());
+            let line = &rest[..end];
+            rest = &rest[(end + 2).min(rest.len())..];
+            if core::mem::take(&mut first) {
+                continue; // the status line
             }
-            return;
-        };
-        for line in text.split('\n') {
-            self.take_line(at, line, now);
-        }
-    }
-
-    fn take_line(&mut self, at: Origin<'_>, line: &str, now: Option<u64>) {
-        let line = line.trim_end_matches('\r');
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("set-cookie") {
-                self.set(at, value.trim_matches([' ', '\t']), now, false);
+            // Non-UTF-8 bytes in another header must not drop the cookies.
+            let Ok(line) = core::str::from_utf8(line) else { continue };
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("set-cookie") {
+                    self.set(at, value.trim_matches([' ', '\t']), now, false);
+                }
             }
         }
     }
@@ -625,6 +623,11 @@ mod tests {
         jar.take_headers(at("example.com", "/x/y", false), head, NOW);
         assert_eq!(jar.header(at("example.com", "/x/z", false), NOW, false), "b=2; a=1");
         assert_eq!(jar.header(at("example.com", "/", false), NOW, false), "a=1");
+        // A bare LF does not start a header.
+        jar.clear();
+        let head = b"HTTP/1.1 200 OK\nSet-Cookie: evil=1\r\nX: y\nSet-Cookie: evil2=1\r\nSet-Cookie: ok=1\r\n\r\n";
+        jar.take_headers(at("example.com", "/", false), head, NOW);
+        assert_eq!(jar.header(at("example.com", "/", false), NOW, false), "ok=1");
         // Google's real headers.
         let head = b"HTTP/1.1 303 See Other\r\nset-cookie: SOCS=CAESNQ; Domain=.google.com; Expires=Fri, 17-Dec-2027 22:20:47 GMT; Path=/; Secure; SameSite=lax\r\nset-cookie: AEC=Aaa9; expires=Sun, 16-May-2027 22:20:36 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax\r\n\r\n";
         jar.take_headers(at("consent.google.com", "/save", true), head, NOW);
