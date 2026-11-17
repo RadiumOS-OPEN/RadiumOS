@@ -14,8 +14,12 @@ ifeq ($(filter -j%,$(MAKEFLAGS)),)
 MAKEFLAGS += -j$(shell nproc 2>/dev/null || echo 4)
 endif
 
-# Audio Backend Selection: defaults to 'pipewire'
+# Audio Backend Selection: defaults to 'coreaudio' on macOS, 'pipewire' elsewhere
+ifeq ($(shell uname -s),Darwin)
+AUDIO ?= coreaudio
+else
 AUDIO ?= pipewire
+endif
 
 # Flags
 NASMFLAGS = -f elf32
