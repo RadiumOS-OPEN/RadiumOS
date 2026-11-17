@@ -1,14 +1,18 @@
 use super::{
-    configuration, configuration_insecure, exchange_plain, exchange_tls, get, get_plain, get_plain_range, get_range,
+    browser_request, configuration, configuration_insecure,
+    cookies::{self, Jar, Origin},
+    exchange_plain, exchange_tls, get, get_plain, get_plain_range, get_range,
     native::{Rtc, Tcp},
     options::{Options, HELP},
     public_roots, Error, Url,
 };
 use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::{
+    cell::RefCell,
     slice, str,
     sync::atomic::{AtomicBool, Ordering},
 };
+use critical_section::Mutex;
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer},
     time_provider::TimeProvider,
@@ -372,22 +376,62 @@ fn execute(args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// GET `url_text` following up to five redirects. With `same_origin`, a
-/// redirect may not leave the first URL's origin (scheme, host, port): the
-/// page reads that reply, and a server must not be able to point the reader
-/// at another site or at the local network.
-fn http_body(url_text: &str, cap: usize, same_origin: bool) -> Result<Vec<u8>, Error> {
+/// rbrowse's cookie jar: one per browser session (rbrowse clears it when it
+/// starts and when it exits). Every browser request reads it, every
+/// response hop of a redirect chain writes it, and document.cookie goes
+/// through it as well. The `fetch` command and the JSON client never touch it.
+static JAR: Mutex<RefCell<Jar>> = Mutex::new(RefCell::new(Jar::new()));
+
+fn clock() -> Option<u64> {
+    Rtc.current_time().map(|time| time.as_secs())
+}
+
+fn origin(url: &Url) -> Origin<'_> {
+    Origin { host: &url.host, path: &url.path, https: url.is_https }
+}
+
+fn jar_header(url: &Url, now: Option<u64>, script: bool) -> alloc::string::String {
+    critical_section::with(|cs| JAR.borrow_ref_mut(cs).header(origin(url), now, script))
+}
+
+const POST_BODY_LIMIT: usize = 64 * 1024;
+
+/// GET (or POST `post` = (body, content type)) `url_text`, following up to
+/// five redirects, with cookies. 301/302/303 after a POST continue as GET;
+/// 307/308 repeat the POST. With `same_origin`, a redirect may not leave the
+/// first URL's origin (scheme, host, port): the page reads that reply, and a
+/// server must not be able to point the reader at another site or at the
+/// local network. Returns the body and the URL the chain ended on.
+fn http_body(
+    url_text: &str,
+    mut post: Option<(&[u8], &str)>,
+    cap: usize,
+    same_origin: bool,
+) -> Result<(Vec<u8>, Url), Error> {
     let mut url = Url::parse(url_text)?;
-    let origin = (url.is_https, url.host.clone(), url.port);
+    if let Some((body, content_type)) = post {
+        if body.len() > POST_BODY_LIMIT {
+            return Err(Error::Message("request body too large"));
+        }
+        if content_type.is_empty()
+            || content_type.len() > 256
+            || content_type.bytes().any(|b| b < 32 || b == 127)
+        {
+            return Err(Error::Message("invalid Content-Type"));
+        }
+    }
+    let origin_key = (url.is_https, url.host.clone(), url.port);
     let started = unsafe { crate::get_ticks() };
     let timeout = 20000u32;
     let mut config = None;
     let mut redirects = 0u32;
+    let now = clock();
     let response = loop {
         let remaining = timeout.saturating_sub(unsafe { crate::get_ticks() }.wrapping_sub(started));
         if remaining == 0 {
             return Err(Error::Message("fetch timed out"));
         }
+        let request = browser_request(&url, &jar_header(&url, now, false), post);
         let mut tcp = Tcp::connect(&url.host, url.port, remaining)?;
         let response = if url.is_https {
             if config.is_none() {
@@ -397,17 +441,16 @@ fn http_body(url_text: &str, cap: usize, same_origin: bool) -> Result<Vec<u8>, E
                     configuration(Arc::new(Rtc), public_roots())?
                 });
             }
-            get(
-                &mut tcp,
-                &url,
-                config.as_ref().unwrap().clone(),
-                false,
-                cap,
-            )?
+            exchange_tls(&mut tcp, &url, config.as_ref().unwrap().clone(), &request, false, cap)?
         } else {
-            get_plain(&mut tcp, &url, false, cap)?
+            exchange_plain(&mut tcp, &request, false, cap)?
         };
         drop(tcp);
+        // Cookies of every hop count, a redirect's included: the next hop
+        // (often the same site) expects them.
+        critical_section::with(|cs| {
+            JAR.borrow_ref_mut(cs).take_headers(origin(&url), &response.headers, now)
+        });
         if [301, 302, 303, 307, 308].contains(&response.status) {
             if redirects == 5 {
                 return Err(Error::Message("too many redirects"));
@@ -417,15 +460,21 @@ fn http_body(url_text: &str, cap: usize, same_origin: bool) -> Result<Vec<u8>, E
                 .as_deref()
                 .ok_or(Error::Message("redirect has no Location header"))?;
             url = url.redirect(location)?;
-            if same_origin && (url.is_https, url.host.as_str(), url.port) != (origin.0, origin.1.as_str(), origin.2) {
+            if same_origin
+                && (url.is_https, url.host.as_str(), url.port)
+                    != (origin_key.0, origin_key.1.as_str(), origin_key.2)
+            {
                 return Err(Error::Message("redirect to another origin refused"));
+            }
+            if matches!(response.status, 301 | 302 | 303) {
+                post = None;
             }
             redirects += 1;
             continue;
         }
         break response;
     };
-    Ok(response.body)
+    Ok((response.body, url))
 }
 
 fn write_out(out: *mut u8, cap: i32, text: &str) {
@@ -447,19 +496,41 @@ const NIC_UNAVAILABLE: &str = "HTTP needs the network stack. Check the URL, NIC,
 /// is valid; otherwise HTTPS proceeds without date checks.
 #[no_mangle]
 pub unsafe extern "C" fn rbrowse_http_get(url: *const u8, out: *mut u8, cap: i32) -> i32 {
-    browser_get(url, out, cap, false)
+    rbrowse_http(url, core::ptr::null(), -1, core::ptr::null(), 0, out, cap, core::ptr::null_mut(), 0)
 }
 
 /// rbrowse_http_get for a script's fetch(): redirects must stay on the
 /// URL's own origin (see http_body).
 #[no_mangle]
 pub unsafe extern "C" fn rbrowse_http_get_same_origin(url: *const u8, out: *mut u8, cap: i32) -> i32 {
-    browser_get(url, out, cap, true)
+    rbrowse_http(url, core::ptr::null(), -1, core::ptr::null(), 1, out, cap, core::ptr::null_mut(), 0)
 }
 
-unsafe fn browser_get(url: *const u8, out: *mut u8, cap: i32, same_origin: bool) -> i32 {
-    if url.is_null() || out.is_null() || cap < 2 {
+/// The browser's request: GET when `body_len` < 0, else POST of
+/// body[0..body_len) with Content-Type `content_type` (NULL:
+/// application/x-www-form-urlencoded). Cookies from the session jar go out
+/// and come back on every hop. `same_origin` as in http_body. Returns the
+/// response body length in `out` (truncated to cap - 1, NUL-terminated), or
+/// a negative error with the reason in `out`. When `final_url` is non-null
+/// it receives the URL the redirect chain ended on (NUL-terminated; empty if
+/// it does not fit).
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_http(
+    url: *const u8,
+    body: *const u8,
+    body_len: i32,
+    content_type: *const u8,
+    same_origin: i32,
+    out: *mut u8,
+    cap: i32,
+    final_url: *mut u8,
+    final_cap: i32,
+) -> i32 {
+    if url.is_null() || out.is_null() || cap < 2 || (body_len > 0 && body.is_null()) {
         return -1;
+    }
+    if !final_url.is_null() && final_cap > 0 {
+        *final_url = 0;
     }
     if !crate::nic_is_ready() {
         write_out(out, cap, NIC_UNAVAILABLE);
@@ -479,15 +550,37 @@ unsafe fn browser_get(url: *const u8, out: *mut u8, cap: i32, same_origin: bool)
     crate::FETCH_NETWORK_SILENT.store(true, Ordering::Relaxed);
     let result = (|| {
         let text = unsafe { argument(url) }?;
-        http_body(text, BROWSER_BODY_LIMIT, same_origin)
+        let post = if body_len < 0 {
+            None
+        } else {
+            let data: &[u8] = if body_len == 0 {
+                &[]
+            } else {
+                unsafe { slice::from_raw_parts(body, body_len as usize) }
+            };
+            let kind = if content_type.is_null() {
+                "application/x-www-form-urlencoded"
+            } else {
+                unsafe { argument(content_type) }?
+            };
+            Some((data, kind))
+        };
+        http_body(text, post, BROWSER_BODY_LIMIT, same_origin != 0)
     })();
     match result {
-        Ok(body) => {
+        Ok((body, end)) => {
             let n = body.len().min((cap as usize) - 1);
             if n > 0 {
                 core::ptr::copy_nonoverlapping(body.as_ptr(), out, n);
             }
             *out.add(n) = 0;
+            if !final_url.is_null() && final_cap > 0 {
+                let href = end.href();
+                if href.len() < final_cap as usize {
+                    core::ptr::copy_nonoverlapping(href.as_ptr(), final_url, href.len());
+                    *final_url.add(href.len()) = 0;
+                }
+            }
             n as i32
         }
         Err(error) => {
@@ -495,6 +588,59 @@ unsafe fn browser_get(url: *const u8, out: *mut u8, cap: i32, same_origin: bool)
             -2
         }
     }
+}
+
+/// A NUL-terminated string of at most `limit` bytes, or None.
+unsafe fn c_text<'a>(pointer: *const u8, limit: usize) -> Option<&'a str> {
+    if pointer.is_null() {
+        return None;
+    }
+    for len in 0..=limit {
+        if *pointer.add(len) == 0 {
+            return str::from_utf8(slice::from_raw_parts(pointer, len)).ok();
+        }
+    }
+    None
+}
+
+/// document.cookie for the page at `url`: the cookies a request to it would
+/// send, minus HttpOnly ones, into out (NUL-terminated, truncated to cap - 1).
+/// Returns the length, or -1 when the URL has no cookies (not http/https).
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_cookie_get(url: *const u8, out: *mut u8, cap: i32) -> i32 {
+    if out.is_null() || cap < 1 {
+        return -1;
+    }
+    *out = 0;
+    let Some(url) = c_text(url, 4096).and_then(|text| Url::parse(text).ok()) else {
+        return -1;
+    };
+    let text = jar_header(&url, clock(), true);
+    if cap < 2 {
+        return 0;
+    }
+    write_out(out, cap, &text);
+    text.len().min(cap as usize - 1) as i32
+}
+
+/// document.cookie = text for the page at `url`. Scripts can neither see nor
+/// set HttpOnly cookies. Returns 1 when the jar changed, else 0.
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_cookie_set(url: *const u8, text: *const u8) -> i32 {
+    let Some(url) = c_text(url, 4096).and_then(|text| Url::parse(text).ok()) else {
+        return 0;
+    };
+    let Some(text) = c_text(text, cookies::MAX_LINE) else {
+        return 0;
+    };
+    let now = clock();
+    critical_section::with(|cs| JAR.borrow_ref_mut(cs).set(origin(&url), text, now, true)) as i32
+}
+
+/// Forgets every cookie (rbrowse calls it when a session starts and ends).
+#[no_mangle]
+pub extern "C" fn rbrowse_cookie_clear() {
+    critical_section::with(|cs| JAR.borrow_ref_mut(cs).clear());
 }
 
 #[no_mangle]
