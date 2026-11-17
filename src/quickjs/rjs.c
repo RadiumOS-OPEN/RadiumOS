@@ -21,10 +21,16 @@ static uint32_t g_eval_start;
 static uint32_t g_eval_budget;
 static uint32_t g_checks;
 static uint32_t g_check_cap;
+static int (*g_cancel)(void);
+
+void rjs_set_cancel(int (*fn)(void)) {
+    g_cancel = fn;
+}
 
 static int interrupt_cb(JSRuntime *rt, void *opaque) {
     (void)rt;
     (void)opaque;
+    if (g_cancel && g_cancel()) return 1;
     if (!g_eval_budget) return 0;
     if (ticks - g_eval_start >= g_eval_budget) return 1;
     return ++g_checks > g_check_cap;

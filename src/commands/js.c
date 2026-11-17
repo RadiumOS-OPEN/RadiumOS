@@ -5,15 +5,18 @@
 //   js --test         engine self-test
 //   js --mem          JS heap usage
 //
-// Like rbrowse, this runs inside the timer interrupt with IRQs off; it turns
-// them on (holding the scheduler) so script time budgets and Date advance,
-// and runs under the fault guard so an engine crash returns to the shell.
+// The shell normally runs commands with IRQs on (Ctrl+C regime, ctrlc.c);
+// any other caller may still have them off, so this turns them on (holding
+// the scheduler) so script time budgets and Date advance either way. It runs
+// under the fault guard so an engine crash returns to the shell, and turns
+// Ctrl+C into a clean "interrupted" exception (see js_command).
 
 #include "../terminal/terminal.h"
 #include "../Avfs/Avfs.h"
 #include "../utility/utility.h"
 #include "../scheduler/task.h"
 #include "../kernel/fault_guard.h"
+#include "../kernel/ctrlc.h"
 #include "../quickjs/rjs.h"
 
 #define JS_FILE_MAX (512 * 1024)
@@ -201,7 +204,17 @@ static void js_body(int argc, char *argv[]) {
     rjs_stop();
 }
 
+static int js_cancelled(void) {
+    return ctrlc_pending();
+}
+
 void js_command(int argc, char *argv[]) {
+    /* Ctrl+C must not jump out of a live QuickJS runtime (or past the fault
+       guard's resume point). Hold it: the engine sees it at its next
+       interrupt check and throws "interrupted", and the abort takes effect at
+       ctrlc_release() below, once the runtime is gone and the guard is off. */
+    ctrlc_hold();
+    rjs_set_cancel(js_cancelled);
     uint32_t saved_flags;
     __asm__ volatile("pushf; pop %0" : "=r"(saved_flags));
     sched_hold_push();
@@ -218,6 +231,8 @@ void js_command(int argc, char *argv[]) {
         js_body(argc, argv);
     }
     fg_disarm();
+    rjs_set_cancel(0);
     if (!(saved_flags & 0x200)) __asm__ volatile("cli");
     sched_hold_pop();
+    ctrlc_release();
 }

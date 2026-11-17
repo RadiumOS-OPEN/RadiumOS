@@ -42,7 +42,7 @@ __asm__(
 // Full-screen programs and games read Ctrl+key themselves; prompts end on Ctrl+C by themselves.
 static const char *const EXEMPT[] = {
     "doom", "snake", "life", "matrix", "vkdemo", "desktop", "rde", "gfxtest", "rie", "png", "mp4", "ytm", "discord", "files",
-    "sysmon", "top", "gbrowser", "gb", "rchat", "help", "logout", "read", "text", "edit", "nano", "vi", "pong", "dshell",
+    "sysmon", "top", "gbrowser", "gb", "rbrowse", "rchat", "help", "logout", "read", "text", "edit", "nano", "vi", "pong", "dshell",
 };
 
 bool ctrlc_exempt(const char *line)
@@ -90,6 +90,8 @@ void ctrlc_disarm(void)
 }
 
 bool ctrlc_running(void) { return g_running; }
+
+bool ctrlc_pending(void) { return g_pending; }
 
 static void abort_now(void)
 {

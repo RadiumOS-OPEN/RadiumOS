@@ -184,6 +184,8 @@ void handle_interrupt(TrapFrame regs);
 // program that re-enables interrupts while it owns the CPU.
 void sched_hold_push(void);
 void sched_hold_pop(void);
+// Drop every hold (the shell after Ctrl+C abandoned a program that held it).
+void sched_hold_reset(void);
 
 // Task management functions
 int setup_tasks();

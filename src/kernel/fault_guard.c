@@ -13,7 +13,7 @@ static volatile int g_paused;
 // deeper level is an interrupt handler or a scheduler task running on top of
 // it, and its faults are not ours to unwind.
 static volatile int g_irq_depth;
-static int g_armed_depth;
+static volatile int g_armed_depth;
 static FgReport g_report;
 
 // fg_setjmp: save the callee-saved registers, the caller's stack pointer and

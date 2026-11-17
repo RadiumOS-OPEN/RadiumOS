@@ -12,6 +12,8 @@
 #include "../user/sudo.h"
 #include "../user/users.h"
 #include "../kernel/ctrlc.h"
+#include "../kernel/fault_guard.h"
+#include "../quickjs/rjs.h"
 #include "../network/udpsock.h"
 #include "../commands/apprun.h"
 #include "../shell/shsyntax.h"
@@ -1957,6 +1959,11 @@ static void shell_abort_cleanup(void) {
     sudo_reset_elevation();
     avfs_wipe_freed(false);
     app_abort_cleanup();
+    // A guarded program (js) thrown away mid-run: its fault-guard resume point and scheduler hold went with its stack,
+    // and its JS heap may be half-updated (the next rjs_start resets it too).
+    fg_disarm();
+    sched_hold_reset();
+    rjs_abandon();
     udpsock_close_all();
     g_net_quiet = 0;
     extern bool rust_fetch_active(void);

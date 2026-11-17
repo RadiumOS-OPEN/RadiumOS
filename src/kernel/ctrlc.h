@@ -25,6 +25,7 @@ void ctrlc_abort(void) __attribute__((noreturn));   // leave the running command
 // While held, Ctrl+C waits (a disk update must not be cut in half); it takes effect at the matching release.
 void ctrlc_hold(void);
 void ctrlc_release(void);
+bool ctrlc_pending(void);           // Ctrl+C was pressed while held: a program that can stop cleanly (js) may do so now
 
 typedef struct { char unused; } ctrlc_scope_t;
 static inline void ctrlc_scope_end(ctrlc_scope_t *s) { (void)s; ctrlc_release(); }

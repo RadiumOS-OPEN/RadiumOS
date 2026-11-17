@@ -126,6 +126,7 @@ static volatile int g_sched_hold;
 
 void sched_hold_push(void) { g_sched_hold++; }
 void sched_hold_pop(void) { if (g_sched_hold > 0) g_sched_hold--; }
+void sched_hold_reset(void) { g_sched_hold = 0; }
 
 void handle_interrupt(TrapFrame regs) {
     if (regs.interrupt > 255) {
@@ -172,8 +173,8 @@ void handle_interrupt(TrapFrame regs) {
             if (ctrlc_running()) {          // nested in a command: watch for Ctrl+C and run the kernel guards, never start another task
                 outb(0x20, 0x20);
                 rust_guard_tick();
+                fg_irq_exit();              // first: on Ctrl+C, ctrlc_tick leaves through kjmp_long and never returns here
                 ctrlc_tick();
-                fg_irq_exit();
                 return;
             }
             extern void fbcon_tick(void);

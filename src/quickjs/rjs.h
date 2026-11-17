@@ -32,6 +32,11 @@ int rjs_running(void);
 /* Where console output and uncaught-error reports go (NULL: terminal). */
 void rjs_set_output(RjsOutput fn);
 
+/* Polled at QuickJS's interrupt checks: nonzero ends the running eval with
+   "interrupted", like an exhausted time budget (js uses it for Ctrl+C).
+   NULL: none. */
+void rjs_set_cancel(int (*fn)(void));
+
 /* Run src as a global script, then any queued promise jobs. timeout_ms 0
    means the default (5 s). On RJS_OK, `out` (if given) gets the completion
    value as a string; on RJS_EXCEPTION it gets the error and stack, and the
