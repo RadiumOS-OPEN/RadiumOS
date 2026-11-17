@@ -16,10 +16,10 @@ typedef struct {
 extern bool shift_active;
 extern bool caps_lock_active;
 
-#define MAX_HISTORY 10 // Maximum number of commands to store in history
+#define MAX_HISTORY 50 // Maximum number of commands to store in history
 #define COMMAND_BUFFER_SIZE 2048 
-#define MAX_COMMANDS 100 // Maximum number of commands
-#define MAX_ARGUMENTS 10 // Maximum number of arguments per command
+#define MAX_COMMANDS 200 // Maximum number of commands
+#define MAX_ARGUMENTS 128 // Maximum number of arguments per command
 #define PRIVILEGE_PORT 0x60  // Example port for privilege management
 #define SUDO_LEVEL 0x01      // Privilege level for sudo/root
 #define USER_LEVEL 0x00      // Normal user privilege level
@@ -29,9 +29,23 @@ bool is_key_down(uint8_t scancode);
 // Function prototypes
 bool is_key_pressed();
 void execute_command(const char* command);
+void execute_command_no_history(const char *command);
+// Runs one pipeline (stages joined by |) or one command. Used by the shell syntax layer (src/shell/shsyntax.c).
+void shell_exec_pipeline(char *line);
+void shell_exec_stage(char *line);
+void shell_show_prompt(void);
+void which_command(int argc, char *argv[]);
+// File holding the data piped into the running command, or NULL when stdin is not a pipe.
+const char *shell_stdin_file(void);
+// Exit status of the last command (0 = success). A command can call shell_set_status(1) to report failure.
+void shell_set_status(int status);
+int  shell_last_status(void);
 void keyboard_handler();
+void keyboard_pause(bool on);
 void keyboard_task();
 void keyboard_await(const char* message, bool clear_screen);
+// Like keyboard_await, but carries on by itself after timeout_ms (usable before the PIT timer runs).
+void keyboard_await_timeout(const char *message, bool clear_screen, uint32_t timeout_ms);
 int register_command(const char* name, const char* description, void (*execute)(int, char*[]));
 int keyboard_input(char* userinput);
 void keyboard_input_secure(char* userinput);

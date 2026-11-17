@@ -1,0 +1,12 @@
+// mod: Berserk: fists hit 10x harder
+include "/disk/mods/doom.hls";
+
+fn main() {
+    if in_level() == 1 {
+        if mod_frame() < 0 {
+            set_power(1, 0);
+        } else {
+            set_power(1, 2000);   // a large value keeps the red berserk tint away
+        }
+    }
+}

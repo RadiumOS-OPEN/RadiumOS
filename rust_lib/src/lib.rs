@@ -4,12 +4,41 @@
 #![allow(unused_variables)]
 
 mod prp;
+mod guard;
 mod png;
+mod mp4;
+mod vulkan;
+mod disk_store;
 #[cfg(target_os = "none")]
 mod rchat;
 extern crate alloc;
+
+#[cfg(target_os = "none")]
+mod kernel_critical_section {
+    struct KernelCriticalSection;
+
+    critical_section::set_impl!(KernelCriticalSection);
+
+    unsafe impl critical_section::Impl for KernelCriticalSection {
+        unsafe fn acquire() -> critical_section::RawRestoreState {
+            let flags: u32;
+            core::arch::asm!("pushfd", "pop {0}", "cli", out(reg) flags);
+            flags & (1 << 9) != 0
+        }
+
+        unsafe fn release(restore_state: critical_section::RawRestoreState) {
+            if restore_state {
+                core::arch::asm!("sti");
+            }
+        }
+    }
+}
+
 mod fetch;
 mod heap;
+mod helios;
+mod imgdec;
+mod sniff;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 static FETCH_NETWORK_SILENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -592,6 +621,7 @@ pub extern "C" fn rust_rtl8139_send(packet: *const u8, packet_size: u32) -> i32 
         for i in 0..packet_size {
             *tx_buffer.add(i as usize) = *packet.add(i as usize);
         }
+        sniff::tap(core::slice::from_raw_parts(packet, packet_size as usize), true);
 
         outl(iobase + TSAD_ARRAY[tx_curr], device.tx_buff_physical[tx_curr]);
         outl(iobase + TSD_ARRAY[tx_curr], packet_size & 0x1FFF);
@@ -608,6 +638,40 @@ static mut RX_RESPONSE_LENGTH: u32 = 0;
 #[no_mangle]
 pub extern "C" fn rust_rtl8139_receive() -> i32 {
     rtl8139_receive(usize::MAX)
+}
+
+/// Copies the next received Ethernet frame (without the CRC) to `out`; returns its length, 0 if none waits, -1 without a card.
+/// Unlike rust_rtl8139_receive this keeps frames apart, for the C UDP stack (src/network/udpsock.c).
+#[no_mangle]
+pub extern "C" fn rust_rtl8139_poll_frame(out: *mut u8, cap: u32) -> i32 {
+    unsafe {
+        let device = match RTL8139_DEVICE.as_mut() {
+            Some(dev) => dev,
+            None => return -1,
+        };
+        let iobase = device.iobase;
+        if (inb(iobase + RTL8139_REG_CMD) & CMD_BUFFER_EMPTY) != 0 {
+            return 0;
+        }
+        let current_packet = device.current_packet as usize;
+        let buffer_ptr = device.rx_buff_virtual.add(current_packet) as *const u16;
+        let packet_status = read_volatile(buffer_ptr);
+        let packet_length = read_volatile(buffer_ptr.add(1));
+        if (packet_status & 0x01) == 0 || packet_length < 64 || packet_length > 1518 {
+            return 0;
+        }
+        let packet_data = buffer_ptr.add(2) as *const u8;
+        let frame_len = packet_length as usize - 4;
+        sniff::tap(core::slice::from_raw_parts(packet_data, frame_len), false);
+        let n = if frame_len > cap as usize { cap as usize } else { frame_len };
+        for i in 0..n {
+            *out.add(i) = *packet_data.add(i);
+        }
+        let new_position = (current_packet + packet_length as usize + 4 + 3) & !3;
+        device.current_packet = (new_position % RX_RING_SIZE) as u16;
+        outw(iobase + 0x38, device.current_packet.wrapping_sub(0x10));
+        n as i32
+    }
 }
 
 fn rtl8139_receive_one() -> i32 {
@@ -640,6 +704,9 @@ fn rtl8139_receive(limit: usize) -> i32 {
             }
 
             let packet_data = buffer_ptr.add(2) as *const u8;
+
+            // Frame length includes the 4-byte CRC
+            sniff::tap(core::slice::from_raw_parts(packet_data, packet_length as usize - 4), false);
 
             // Copy to response buffer
             if RX_RESPONSE_LENGTH == 0 || RX_RESPONSE_LENGTH + packet_length as u32 <= 4096 {
@@ -2774,8 +2841,8 @@ pub extern "C" fn graphics_draw_char_scaled(x: u32, y: u32, ch: u8, color: u32, 
 // BROWSER CONSTANTS
 // Firefox-style: tab bar → nav bar → bookmark bar → content → status bar
 // ─────────────────────────────────────────────────────────────────────────────
-const BW: u32 = 800;
-const BH: u32 = 600;
+const BW: u32 = 1280;
+const BH: u32 = 720;
 const TAB_BAR_H:    u32 = 30;
 const NAV_BAR_H:    u32 = 38;
 const BM_BAR_H:     u32 = 24;
@@ -10037,8 +10104,23 @@ unsafe fn map_framebuffer_region(fb_base: u32, size: u32) -> bool {
 // Graphics Initialization
 //-----------------------------------------------------------------------------
 
+extern "C" {
+    fn fbcon_suspend();
+    fn fbcon_resume();
+}
+
+// Takes the display from the 1280x720 text console; it comes back on graphics_shutdown or a failed init.
 #[no_mangle]
 pub extern "C" fn graphics_init(width: u32, height: u32, bpp: u32) -> i32 {
+    unsafe { fbcon_suspend(); }
+    let result = graphics_init_impl(width, height, bpp);
+    if result != 0 {
+        unsafe { fbcon_resume(); }
+    }
+    result
+}
+
+fn graphics_init_impl(width: u32, height: u32, bpp: u32) -> i32 {
     unsafe {
         rust_print(b"\n=== Graphics Initialization ===\n");
         
@@ -10156,7 +10238,8 @@ pub extern "C" fn graphics_shutdown() {
         // 4. Disable VBE - hardware last
         vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         //terminal_initialize();
-        // 5. Safe - rust_print uses VGA text, not the framebuffer
+        // 5. Back to the 1280x720 text console (no-op when the console is not in use)
+        fbcon_resume();
         rust_print(b"Graphics shut down\n");
     }
 }
@@ -13631,20 +13714,13 @@ pub extern "C" fn rust_start_demo_tasks() {
         init_net_defaults(); 
         draw_separator();
         rust_create_task_ex(keyboard_handler as u32, true, 10,  0, 0);
-        rust_create_task_ex(watchdog_task    as u32, true, 10,  0, 0);
-        
         rust_create_task_ex(heartbeat_task   as u32, true,  8,  0, 0);
         rust_create_task_ex(timed_message    as u32, true,  4,  0, 0);
-        
-        // --- NEW TASK ADDED HERE ---
-        
-        // ---------------------------
-
-        rust_create_task_ex(thermal_task     as u32, true,  7,  1, 0); 
-        rust_create_task_ex(io_stress_task   as u32, true,  5,  2, 0); 
-        rust_create_task_ex(reaper_task      as u32, true,  9,  0, 0);
-        rust_create_task_ex(affinity_task    as u32, true,  6,  0, 0);
-        rust_create_task_ex(ipc_monitor_task as u32, true,  7,  0, 0);
+        // These three cannot be killed and come back if they ever vanish; the guard tasks watch over them and the kernel.
+        guard::protect(keyboard_handler as u32, 10);
+        guard::protect(heartbeat_task   as u32,  8);
+        guard::protect(timed_message    as u32,  4);
+        guard::spawn_all();
     }
 }
 
@@ -13689,6 +13765,11 @@ pub extern "C" fn rust_kill_task(pid: u32) -> i32 {
         if pid == 0 { rust_print(b"Error: Cannot kill idle task\n"); return -1; }
         for i in 0..MAX_TASKS {
             if TASKS[i].is_active && TASKS[i].pid == pid {
+                if guard::is_essential(TASKS[i].entry_point) {
+                    guard::kill_refused(pid);
+                    rust_print(b"Error: that task is protected by the kernel guard\n");
+                    return -1;
+                }
                 // Mark as Zombie so the reaper can clean it up properly
                 TASKS[i].state = TaskState::Zombie;
                 rust_print(b"Marked PID "); print_num(pid as i32); rust_print(b" as Zombie\n");
@@ -13704,6 +13785,39 @@ pub extern "C" fn rust_kill_task(pid: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_get_task_count() -> u32 {
     unsafe { NUM_TASKS as u32 }
+}
+
+/// Fills `out` with 8 u32 per active task: pid, id, state (0 ready, 1 running, 2 blocked, 3 zombie, 4 sleeping),
+/// priority, affinity, total ticks, created tick, entry point. Returns the number of tasks written.
+#[no_mangle]
+pub extern "C" fn rust_task_snapshot(out: *mut u32, max: u32) -> u32 {
+    let mut n = 0u32;
+    if out.is_null() { return 0; }
+    unsafe {
+        for i in 0..MAX_TASKS {
+            if !TASKS[i].is_active || n >= max { continue; }
+            let p = out.add(n as usize * 8);
+            *p = TASKS[i].pid;
+            *p.add(1) = TASKS[i].id;
+            *p.add(2) = TASKS[i].state as u32;
+            *p.add(3) = TASKS[i].priority as u32;
+            *p.add(4) = TASKS[i].affinity as u32;
+            *p.add(5) = TASKS[i].total_ticks;
+            *p.add(6) = TASKS[i].created_tick;
+            *p.add(7) = TASKS[i].entry_point;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A NUL-terminated name for the built-in demo tasks, null for any other entry point.
+#[no_mangle]
+pub extern "C" fn rust_task_name(entry: u32) -> *const u8 {
+    if entry == keyboard_handler as u32 { return b"keyboard\0".as_ptr(); }
+    if entry == heartbeat_task as u32 { return b"heartbeat\0".as_ptr(); }
+    if entry == timed_message as u32 { return b"messages\0".as_ptr(); }
+    guard::name(entry)
 }
 
 #[no_mangle]

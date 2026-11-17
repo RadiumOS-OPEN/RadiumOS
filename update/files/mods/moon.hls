@@ -1,0 +1,20 @@
+// mod: Moon gravity: floaty jumps and falls
+include "/disk/mods/doom.hls";
+
+// state: [0] last tic handled
+fn main() {
+    if mod_frame() >= 0 {
+        if alive() == 1 {
+            let s = mod_state();
+            let t = api(A_GAMETIC);
+            if t != rd(s) {
+                wr(s, t);
+                if api(A_PAUSED) == 0 {
+                    if mo_get(O_MO_Z) > mo_get(O_MO_FLOORZ) {
+                        mo_set(O_MO_MOMZ, mo_get(O_MO_MOMZ) + 45000);
+                    }
+                }
+            }
+        }
+    }
+}

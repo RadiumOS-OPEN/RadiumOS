@@ -1,0 +1,6 @@
+// acmod: Infinite ammo, no reloading
+include "/disk/mods/ac.hls";
+
+fn main() {
+    if mod_frame() < 0 { out_set(OUT_AMMO_FULL, 0); } else { out_set(OUT_AMMO_FULL, 1); }
+}

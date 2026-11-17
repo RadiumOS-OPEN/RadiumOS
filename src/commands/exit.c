@@ -1,11 +1,14 @@
 #include "../terminal/terminal.h"
 #include "../io/io.h"
 #include "../timers/timer.h"
+#include "../Avfs/Avfs.h"
 
 void exit_command(int argc, char* argv[]) {
     terminal_setcolor(VGA_COLOR_GREEN);
     print("\n\n\nThank you for using RadiumOS!\n\n\n");
     terminal_setcolor(VGA_COLOR_WHITE);
+
+    avfs_mark_clean();
 
     // Disable interrupts
     asm volatile("cli");
