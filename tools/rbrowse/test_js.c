@@ -45,15 +45,17 @@ static void capture(const char *s, int len) {
     g_console[g_console_n] = 0;
 }
 
-static int fake_fetch(const char *url, char *out, int cap) {
+/* Scripts load with same_origin 0, fetch() reads with 1: each fake answer
+   only comes back with the flag its caller must pass. */
+static int fake_fetch(const char *url, char *out, int cap, int same_origin) {
     const char *b = 0;
-    if (strcmp(url, "http://cdn.example.net/lib.js") == 0) b = "window.libLoaded = (window.libLoaded || 0) + 1;";
+    if (strcmp(url, "http://cdn.example.net/lib.js") == 0 && !same_origin) b = "window.libLoaded = (window.libLoaded || 0) + 1;";
     if (b) {
         int n = (int)strlen(b);
         memcpy(out, b, (size_t)n);
         return n;
     }
-    if (strcmp(url, "http://example.com/data.json") == 0) {
+    if (strcmp(url, "http://example.com/data.json") == 0 && same_origin) {
         b = "{\"n\":42}";
         int n = (int)strlen(b);
         if (n >= cap) return -1;

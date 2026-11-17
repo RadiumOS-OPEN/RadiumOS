@@ -521,7 +521,7 @@ FN(n_fetch) {
     UNUSED;
     const char *u = JS_ToCString(ctx, argv[0]);
     if (!u) return JS_EXCEPTION;
-    int n = (g_fetch && same_origin(u, g_url)) ? g_fetch(u, g_fetch_buf, FETCH_MAX) : -1;
+    int n = (g_fetch && same_origin(u, g_url)) ? g_fetch(u, g_fetch_buf, FETCH_MAX, 1) : -1;
     JS_FreeCString(ctx, u);
     if (n < 0) return JS_NULL;
     return JS_NewStringLen(ctx, g_fetch_buf, (size_t)n);
@@ -534,7 +534,7 @@ FN(n_load_script) {
     UNUSED;
     const char *u = JS_ToCString(ctx, argv[0]);
     if (!u) return JS_EXCEPTION;
-    int n = (g_fetch && origin_len(u)) ? g_fetch(u, g_fetch_buf, FETCH_MAX) : -1;
+    int n = (g_fetch && origin_len(u)) ? g_fetch(u, g_fetch_buf, FETCH_MAX, 0) : -1;
     JS_FreeCString(ctx, u);
     if (n < 0) return JS_NULL;
     return JS_NewStringLen(ctx, g_fetch_buf, (size_t)n);

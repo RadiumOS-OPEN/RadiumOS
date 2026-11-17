@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
 #include "engine.h"
 #include "rjs.h"
@@ -30,12 +31,45 @@ void qjs_alloc_stats(size_t *a, size_t *b, size_t *c) { if (a) *a = 0; if (b) *b
 
 static void console_out(const char *s, int len) { fprintf(stderr, "\033[33m%.*s\033[0m", len, s); }
 
-/* curl into out; returns length or -1. */
-static int http_get(const char *url, char *out, int cap) {
+/* Length of "scheme://host[:port]" at the start of url. */
+static int origin_len(const char *u) {
+    const char *p = strstr(u, "://");
+    if (!p) return 0;
+    p += 3;
+    while (*p && *p != '/' && *p != '?' && *p != '#') p++;
+    return (int)(p - u);
+}
+
+/* curl into out; returns length or -1. same_origin (a script's fetch):
+   redirects are followed by hand and must keep the origin, as in the
+   kernel's rbrowse_http_get_same_origin. */
+static int http_get(const char *url, char *out, int cap, int same_origin) {
     if (strncmp(url, "http://", 7) && strncmp(url, "https://", 8)) return -1;
     for (const char *p = url; *p; p++) if (*p == '\'' || *p == '\\') return -1;
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "curl -sL --max-time 20 -A 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3' '%s'", url);
+    if (same_origin) {
+        char cur[1024], loc[1024];
+        snprintf(cur, sizeof(cur), "%s", url);
+        for (int hop = 0; hop <= 5; hop++) {
+            snprintf(cmd, sizeof(cmd), "curl -s -o /dev/null --max-time 20 -w '%%{redirect_url}' '%s'", cur);
+            FILE *p = popen(cmd, "r");
+            if (!p) return -1;
+            size_t n = fread(loc, 1, sizeof(loc) - 1, p);
+            pclose(p);
+            loc[n] = 0;
+            if (!loc[0]) break;                       /* not a redirect: fetch cur below */
+            int ol = origin_len(url);
+            if (hop == 5 || origin_len(loc) != ol || strncasecmp(loc, url, (size_t)ol) != 0) {
+                fprintf(stderr, "  fetch %s -> redirect to another origin refused\n", url);
+                return -1;
+            }
+            for (const char *q = loc; *q; q++) if (*q == '\'' || *q == '\\') return -1;
+            snprintf(cur, sizeof(cur), "%s", loc);
+        }
+        snprintf(cmd, sizeof(cmd), "curl -s --max-time 20 -A 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3' '%s'", cur);
+    } else {
+        snprintf(cmd, sizeof(cmd), "curl -sL --max-time 20 -A 'Mozilla/5.0 (RadiumOS; i686) rbrowse/0.3' '%s'", url);
+    }
     FILE *p = popen(cmd, "r");
     if (!p) return -1;
     int n = (int)fread(out, 1, (size_t)cap - 1, p);
@@ -53,7 +87,7 @@ int main(int argc, char **argv) {
     const char *url = argv[1];
     int seconds = argc > 2 ? atoi(argv[2]) : 3;
     int js = !(argc > 3 && strcmp(argv[3], "nojs") == 0);
-    int n = http_get(url, g_page, sizeof(g_page));
+    int n = http_get(url, g_page, sizeof(g_page), 0);
     if (n < 0) { fprintf(stderr, "page fetch failed\n"); return 1; }
     rb_set_scripting(js);
     rb_set_viewport(622, 332);      /* the kernel's 640x360 screen (paint.c rb_ui_layout) */
@@ -62,7 +96,7 @@ int main(int argc, char **argv) {
         char href[900], abs[900];
         rb_css_href(i, href, (int)sizeof(href));
         if (!rb_resolve(url, href, abs, (int)sizeof(abs))) continue;
-        int cn = http_get(abs, g_buf, sizeof(g_buf));
+        int cn = http_get(abs, g_buf, sizeof(g_buf), 0);
         if (cn > 0) rb_css_provide(i, g_buf, cn);
     }
     rb_relayout();
@@ -80,7 +114,7 @@ int main(int argc, char **argv) {
             if (rb_dom_has_attr(node, "src", 3) && rb_dom_get_attr(node, "src", 3, src, sizeof(src))) {
                 char abs[900];
                 if (!rb_resolve(url, src, abs, sizeof(abs))) continue;
-                int sn = http_get(abs, g_buf, sizeof(g_buf));
+                int sn = http_get(abs, g_buf, sizeof(g_buf), 0);
                 if (sn >= 0) rjs_dom_exec(node, g_buf, sn, abs);
             } else if (len > 0) {
                 fprintf(stderr, "  inline script %d bytes\n", len);

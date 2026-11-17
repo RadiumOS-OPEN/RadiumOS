@@ -13,8 +13,10 @@
 #ifndef RJS_DOM_H
 #define RJS_DOM_H
 
-/* Fetches url (absolute, http/https) into out; returns the length or -1. */
-typedef int (*RjsFetch)(const char *url, char *out, int cap);
+/* Fetches url (absolute, http/https) into out; returns the length or -1.
+   same_origin is 1 when the page reads the reply (fetch/XHR): then every
+   redirect must stay on url's origin, or the fetch fails. */
+typedef int (*RjsFetch)(const char *url, char *out, int cap, int same_origin);
 
 /* Install natives + prelude on the running context for the page at url.
    0 on success. */

@@ -372,8 +372,13 @@ fn execute(args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-fn http_body(url_text: &str, cap: usize) -> Result<Vec<u8>, Error> {
+/// GET `url_text` following up to five redirects. With `same_origin`, a
+/// redirect may not leave the first URL's origin (scheme, host, port): the
+/// page reads that reply, and a server must not be able to point the reader
+/// at another site or at the local network.
+fn http_body(url_text: &str, cap: usize, same_origin: bool) -> Result<Vec<u8>, Error> {
     let mut url = Url::parse(url_text)?;
+    let origin = (url.is_https, url.host.clone(), url.port);
     let started = unsafe { crate::get_ticks() };
     let timeout = 20000u32;
     let mut config = None;
@@ -412,6 +417,9 @@ fn http_body(url_text: &str, cap: usize) -> Result<Vec<u8>, Error> {
                 .as_deref()
                 .ok_or(Error::Message("redirect has no Location header"))?;
             url = url.redirect(location)?;
+            if same_origin && (url.is_https, url.host.as_str(), url.port) != (origin.0, origin.1.as_str(), origin.2) {
+                return Err(Error::Message("redirect to another origin refused"));
+            }
             redirects += 1;
             continue;
         }
@@ -439,6 +447,17 @@ const NIC_UNAVAILABLE: &str = "HTTP needs the network stack. Check the URL, NIC,
 /// is valid; otherwise HTTPS proceeds without date checks.
 #[no_mangle]
 pub unsafe extern "C" fn rbrowse_http_get(url: *const u8, out: *mut u8, cap: i32) -> i32 {
+    browser_get(url, out, cap, false)
+}
+
+/// rbrowse_http_get for a script's fetch(): redirects must stay on the
+/// URL's own origin (see http_body).
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_http_get_same_origin(url: *const u8, out: *mut u8, cap: i32) -> i32 {
+    browser_get(url, out, cap, true)
+}
+
+unsafe fn browser_get(url: *const u8, out: *mut u8, cap: i32, same_origin: bool) -> i32 {
     if url.is_null() || out.is_null() || cap < 2 {
         return -1;
     }
@@ -460,7 +479,7 @@ pub unsafe extern "C" fn rbrowse_http_get(url: *const u8, out: *mut u8, cap: i32
     crate::FETCH_NETWORK_SILENT.store(true, Ordering::Relaxed);
     let result = (|| {
         let text = unsafe { argument(url) }?;
-        http_body(text, BROWSER_BODY_LIMIT)
+        http_body(text, BROWSER_BODY_LIMIT, same_origin)
     })();
     match result {
         Ok(body) => {

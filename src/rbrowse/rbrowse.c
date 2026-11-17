@@ -26,6 +26,7 @@
 
 extern uint8_t vga_font_8x8[256][8];
 extern int rbrowse_http_get(const uint8_t *url, uint8_t *out, int cap);
+extern int rbrowse_http_get_same_origin(const uint8_t *url, uint8_t *out, int cap);
 extern bool rust_fetch_active(void);
 extern void rust_fetch_abort(void);
 extern int rust_tcp_force_reset(void);
@@ -657,9 +658,10 @@ static void js_console(const char *s, int len) {
 }
 
 /* fetch()/XHR from scripts. */
-static int js_fetch(const char *url, char *out, int cap) {
+static int js_fetch(const char *url, char *out, int cap, int same_origin) {
     fg_watchdog_pause();
-    int n = rbrowse_http_get((const uint8_t *)url, (uint8_t *)out, cap);
+    int n = same_origin ? rbrowse_http_get_same_origin((const uint8_t *)url, (uint8_t *)out, cap)
+                        : rbrowse_http_get((const uint8_t *)url, (uint8_t *)out, cap);
     fg_watchdog_resume();
     return n;
 }
