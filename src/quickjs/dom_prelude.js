@@ -2291,8 +2291,41 @@ function addTimer(fn, ms, args, every) {
 global.setTimeout = (fn, ms, ...args) => addTimer(fn, ms, args, false);
 global.setInterval = (fn, ms, ...args) => addTimer(fn, ms, args, true);
 global.clearTimeout = global.clearInterval = id => { timers.delete(id); scheduleNext(); };
-global.requestAnimationFrame = fn => addTimer(() => fn(rb.now()), 16, [], false);
-global.cancelAnimationFrame = global.clearTimeout;
+/* Animation frames. All callbacks requested for the next frame run together
+   (as in browsers, with one timestamp). A frame starts only once the last
+   one's canvas drawing is rasterized (the host does that between input
+   polls), and frames are spaced by what the last one cost: its script time
+   plus the host's repaint of it (rb.paintCost). A page whose frames are
+   expensive gets fewer of them; the pointer, scrolling and typing stay
+   smooth. */
+const rafQueue = new Map();
+let rafNext = 1, rafTimer = 0, rafEnd = -1e9, rafCost = 0;
+function scheduleFrame() {
+  if (rafTimer || !rafQueue.size) return;
+  const gap = Math.max(16, rafCost + rb.paintCost());
+  rafTimer = addTimer(runFrame, Math.max(0, rafEnd + gap - rb.now()), [], false);
+}
+function runFrame() {
+  rafTimer = 0;
+  /* the last frame's drawing is still being rasterized: wait for it */
+  if (rb.cvQueued()) { rafTimer = addTimer(runFrame, 16, [], false); return; }
+  const t0 = rb.now(), q = [...rafQueue.values()];
+  rafQueue.clear();
+  for (const fn of q) {
+    try { fn(t0); } catch (e) { reportError(e); }
+  }
+  rafEnd = rb.now();
+  rafCost = rafEnd - t0;
+  scheduleFrame();
+}
+global.requestAnimationFrame = fn => {
+  if (typeof fn !== 'function') throw new TypeError('requestAnimationFrame: not a function');
+  const id = rafNext++;
+  rafQueue.set(id, fn);
+  scheduleFrame();
+  return id;
+};
+global.cancelAnimationFrame = id => { rafQueue.delete(id); };
 global.requestIdleCallback = fn => addTimer(() => fn({didTimeout: false, timeRemaining: () => 10}), 1, [], false);
 global.cancelIdleCallback = global.clearTimeout;
 global.queueMicrotask = fn => { Promise.resolve().then(fn); };
@@ -2302,7 +2335,11 @@ global.queueMicrotask = fn => { Promise.resolve().then(fn); };
 global.__rb_tick = function (now) {
   maybeSweep();
   const due = [...timers].filter(([, t]) => t.due <= now).sort((a, b) => a[1].due - b[1].due);
+  const start = rb.now();
   for (const [id, t] of due) {
+    /* a long run of due timers yields after ~40 ms: the rest are still due
+       and run on the next turn, after the host has read input */
+    if (rb.now() - start > 40) break;
     if (!timers.has(id)) continue;
     if (t.every) t.due = now + t.every;
     else timers.delete(id);

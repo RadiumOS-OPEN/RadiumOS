@@ -489,6 +489,10 @@ FN(n_now) { UNUSED; (void)argv; return JS_NewFloat64(ctx, (double)ticks); }
    (the web profile halves vertical lengths, so two per screen row). */
 FN(n_view) { UNUSED; return INT(N(0) ? rb_view_height() * 2 : rb_view_width()); }
 
+static int g_paint_cost;
+void rjs_dom_set_paint_cost(int ms) { g_paint_cost = ms < 0 ? 0 : ms > 1000 ? 1000 : ms; }
+FN(n_paint_cost) { UNUSED; (void)argv; return INT(g_paint_cost); }
+
 FN(n_set_next_due) {
     UNUSED;
     double d = -1;
@@ -660,6 +664,7 @@ static const JSCFunctionListEntry g_natives[] = {
     JS_CFUNC_DEF("now", 0, n_now),
     JS_CFUNC_DEF("view", 1, n_view),
     JS_CFUNC_DEF("setNextDue", 1, n_set_next_due),
+    JS_CFUNC_DEF("paintCost", 0, n_paint_cost),
     JS_CFUNC_DEF("fetch", 1, n_fetch),
     JS_CFUNC_DEF("loadScript", 1, n_load_script),
 };

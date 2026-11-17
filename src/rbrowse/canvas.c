@@ -22,12 +22,18 @@ typedef struct {
     int w, h;               /* size as set; pixels exist only when `has` */
     uint32_t off, cap;      /* block in the arena, in pixels */
     uint8_t live, has;
+    uint8_t dirty;          /* drawn on since rb_canvas_present */
+    uint8_t shown_dirty;    /* the shown copy changed since rb_canvas_clean */
 } Slot;
 
 #define ARENA_PX (RB_CANVAS_ARENA / 4u)
 
 static Slot g_slot[RB_CANVAS_MAX];
 static uint32_t g_arena[ARENA_PX];
+/* What the screen shows of each canvas: a copy made by rb_canvas_present
+   when a frame's drawing is complete, at the same offset as the pixels, so
+   a frame that is still being rasterized is never seen half done. */
+static uint32_t g_shown[ARENA_PX];
 static uint32_t g_top;      /* first free pixel; everything above is free */
 static int g_dirty;
 
@@ -89,6 +95,9 @@ static void compact(void) {
             uint32_t *d = g_arena + pos;
             const uint32_t *src = g_arena + s->off;
             for (uint32_t k = 0; k < n; k++) d[k] = src[k];
+            d = g_shown + pos;
+            src = g_shown + s->off;
+            for (uint32_t k = 0; k < n; k++) d[k] = src[k];
             s->off = pos;
         }
         s->cap = n;
@@ -109,6 +118,8 @@ int rb_canvas_resize(int i, int w, int h) {
     s->w = w;
     s->h = h;
     s->has = 0;
+    s->dirty = 0;
+    s->shown_dirty = 1;     /* blank at the new size right away */
     g_dirty = 1;
     if (!w || !h || w > RB_CANVAS_DIM_MAX || h > RB_CANVAS_DIM_MAX) {
         s->cap = 0;
@@ -125,6 +136,7 @@ int rb_canvas_resize(int i, int w, int h) {
     }
     s->has = 1;
     memset(g_arena + s->off, 0, (size_t)need * 4);
+    memset(g_shown + s->off, 0, (size_t)need * 4);
     return 1;
 }
 
@@ -142,6 +154,38 @@ uint32_t *rb_canvas_pixels(int i) {
 
 unsigned rb_canvas_used(void) { return g_top * 4u; }
 
+/* n pixels: the kernel's memcpy goes a byte at a time, and a frame of a
+   big canvas is megabytes */
+static void copy_px(uint32_t *d, const uint32_t *s, size_t n) {
+#if defined(__i386__) && !defined(RBROWSE_HOST)
+    __asm__ volatile("rep movsl" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+#else
+    memcpy(d, s, n * 4);
+#endif
+}
+
+int rb_canvas_present(void) {
+    int n = 0;
+    for (int i = 0; i < RB_CANVAS_MAX; i++) {
+        Slot *s = &g_slot[i];
+        if (!s->live || !s->dirty) continue;
+        s->dirty = 0;
+        if (s->has) copy_px(g_shown + s->off, g_arena + s->off, (size_t)s->w * (size_t)s->h);
+        s->shown_dirty = 1;
+        n++;
+    }
+    return n;
+}
+
+int rb_canvas_node_dirty(int node) {
+    int i = rb_canvas_find(node);
+    return i >= 0 && g_slot[i].shown_dirty;
+}
+
+void rb_canvas_clean(void) {
+    for (int i = 0; i < RB_CANVAS_MAX; i++) g_slot[i].shown_dirty = 0;
+}
+
 int rb_canvas_take_dirty(void) {
     int d = g_dirty;
     g_dirty = 0;
@@ -152,9 +196,8 @@ int rb_canvas_view_node(int node, int w, int h, RbImageView *out) {
     (void)w;
     (void)h;
     int i = rb_canvas_find(node);
-    uint32_t *px = rb_canvas_pixels(i);
-    if (!px) return 0;
-    out->px = px;
+    if (!rb_canvas_pixels(i)) return 0;
+    out->px = g_shown + g_slot[i].off;
     out->w = g_slot[i].w;
     out->h = g_slot[i].h;
     out->stride = g_slot[i].w;
@@ -400,6 +443,7 @@ void rb_cv_fill(int i, int evenodd, const RbCvPaint *p, int alpha, int op, const
     if (ry0 >= ry1) return;
     sort_order(g_nedge);
     g_dirty = 1;
+    s->dirty = 1;
     uint32_t *px = g_arena + s->off;
     int next = 0, nact = 0;
     int lx = cx0 * 256, rx = cx1 * 256;
@@ -553,6 +597,7 @@ void rb_cv_image(int i, const uint32_t *src, int sw, int sh, int stride,
     if (by1 < cy1) cy1 = by1;
     if (cx0 >= cx1 || cy0 >= cy1) return;
     g_dirty = 1;
+    s->dirty = 1;
     for (int y = cy0; y < cy1; y++) {
         if (ABORT_ROW(y - cy0)) break;
         double cyc = y + 0.5;
@@ -621,6 +666,7 @@ void rb_cv_put(int i, const uint8_t *rgba, int iw, int ih, int dx, int dy, int x
     if (dy + y1 > s->h) y1 = s->h - dy;
     if (x0 >= x1 || y0 >= y1) return;
     g_dirty = 1;
+    s->dirty = 1;
     uint32_t *px = g_arena + s->off;
     for (int y = y0; y < y1; y++) {
         const uint8_t *in = rgba + ((size_t)y * (size_t)iw + (size_t)x0) * 4;

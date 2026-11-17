@@ -48,9 +48,18 @@ uint32_t *rb_canvas_pixels(int slot);
 unsigned rb_canvas_used(void);
 /* 1 when any canvas changed since the last call (the host repaints). */
 int rb_canvas_take_dirty(void);
+/* The screen shows a copy of each canvas (rb_canvas_view_node), taken by
+   rb_canvas_present once the drawing of a frame is complete, so a frame
+   being rasterized is never seen half done. Returns how many canvases it
+   copied. */
+int rb_canvas_present(void);
+/* Per canvas: 1 when the shown copy of the canvas element node changed
+   since the last rb_canvas_clean (the host repaints just those boxes). */
+int rb_canvas_node_dirty(int node);
+void rb_canvas_clean(void);
 
-/* Painter hook (paint.h rb_paint_set_canvas): the pixels of the canvas
-   element `node` at their own size (the painter scales to the box). */
+/* Painter hook (paint.h rb_paint_set_canvas): the shown copy of the canvas
+   element `node` at its own size (the painter scales to the box). */
 int rb_canvas_view_node(int node, int w, int h, RbImageView *out);
 
 /* ---- rasterizer ----

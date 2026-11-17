@@ -51,6 +51,10 @@ void rb_ui_layout(int w, int h);
 extern const uint32_t rb_ui_palette[16];
 
 void rb_paint_begin(uint32_t *fb, int w, int h);
+/* Narrow every later primitive to [x0,x1) x [y0,y1) until the next
+   rb_paint_begin: a partial repaint (a canvas frame, the pointer) redraws
+   just that area, everything that overlaps it included. */
+void rb_paint_clip(int x0, int y0, int x1, int y1);
 void rb_px(int x, int y, uint32_t c);
 /* Fill, clipped to [x0,x1) x [y0,y1) and the framebuffer. */
 void rb_rect(int x, int y, int w, int h, uint32_t c, int x0, int y0, int x1, int y1);

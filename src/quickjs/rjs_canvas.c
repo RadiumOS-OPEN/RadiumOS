@@ -25,8 +25,11 @@
 #include "../rbrowse/engine.h"
 #include "../rbrowse/canvas.h"
 #include "../rbrowse/image.h"
+#include "rjs_canvas.h"
 #include <math.h>
 #include <stdint.h>
+
+extern volatile uint32_t ticks;    /* ms */
 
 extern uint8_t vga_font_8x8[256][8];
 
@@ -482,7 +485,12 @@ static double mat_scale(const double m[6]) {
 /* open(node) -> slot or -1 */
 FN(c_open) { UNUSED; return JS_NewInt32(ctx, rb_canvas_open(inum(ctx, argv[0]))); }
 /* resize(slot, w, h) -> 1 when it has pixels */
-FN(c_resize) { UNUSED; return JS_NewInt32(ctx, rb_canvas_resize(inum(ctx, argv[0]), inum(ctx, argv[1]), inum(ctx, argv[2]))); }
+FN(c_resize) {
+    UNUSED;
+    int slot = inum(ctx, argv[0]), w = inum(ctx, argv[1]), h = inum(ctx, argv[2]);
+    rjs_canvas_flush();         /* commands recorded for the old size go first */
+    return JS_NewInt32(ctx, rb_canvas_resize(slot, w, h));
+}
 /* attrSize(node) -> [w, h] from the width/height attributes */
 FN(c_attr_size) {
     UNUSED;
@@ -604,6 +612,131 @@ FN(c_comp) {
 
 /* ---- path operations ---- */
 
+/* ---- the drawing queue ----
+   Drawing does not rasterize inside the script. fill, stroke, fillText and
+   drawImage record a command (with the paint, compositing and clip of the
+   moment) and return; the host rasterizes the queue between its input polls
+   with rjs_canvas_pump, one band of rows at a time, so a heavy canvas makes
+   its own frames slow but never the pointer, scrolling or typing. Commands
+   run in call order across all canvases (drawImage of one canvas onto
+   another sees exactly what it would have synchronously). Anything that
+   reads pixels or resizes a canvas (getImageData, toDataURL, putImageData,
+   width/height) flushes the queue first, so scripts can never observe the
+   delay. A full queue is flushed in the script. */
+
+enum { Q_FILL = 1, Q_STROKE, Q_TEXT, Q_IMAGE };
+#define Q_BYTES (8u * 1024 * 1024)
+#define BAND_ROWS 64
+
+typedef struct {
+    uint32_t size;              /* bytes of the record: header, LUT, payload; 8-aligned */
+    uint8_t op, evenodd, has_clip, grad;
+    uint8_t bounded, band;      /* rows narrowed to the shape yet; rasterize in bands */
+    uint8_t cap, join;
+    int slot, n;                /* n: path doubles or text bytes */
+    int alpha, cop, smooth;
+    int y0, y1;                 /* device rows still to rasterize */
+    RbCvClip clip;
+    RbCvPaint paint;            /* lut pointer is fixed up at replay */
+    double m[6];
+    double hw, miter, dash_off; /* stroke */
+    int ndash;
+    double dash[DASH_MAX];
+    double tx, ty, tsize;       /* text */
+    int kind, src;              /* image */
+    double img[8];
+} QCmd;
+
+static uint8_t g_q[Q_BYTES] __attribute__((aligned(8)));
+static uint32_t g_qhead, g_qtail;
+static const void *g_big_data;   /* payload of a command too big to queue */
+
+static int finite_xy(double x, double y) { return x == x && y == y && x > -1e12 && x < 1e12 && y > -1e12 && y < 1e12; }
+
+static uint32_t align8(uint32_t v) { return (v + 7u) & ~7u; }
+
+/* A command with the paint and compositing state of the moment. 0 when
+   that paint draws nothing at all. */
+static int cmd_init(QCmd *c, int op, int slot) {
+    if (!g_paint_ok) return 0;
+    for (size_t k = 0; k < sizeof(*c); k++) ((uint8_t *)c)[k] = 0;
+    c->op = (uint8_t)op;
+    c->slot = slot;
+    c->alpha = g_alpha;
+    c->cop = g_op;
+    c->smooth = g_smooth;
+    c->has_clip = (uint8_t)g_has_clip;
+    c->clip = g_clip;
+    c->paint = g_paint;
+    c->paint.lut = 0;
+    c->grad = g_paint.kind != RB_CV_SOLID;
+    c->band = 1;
+    int w, h;
+    rb_canvas_size(slot, &w, &h);
+    c->y0 = 0;
+    c->y1 = h;
+    return 1;
+}
+
+static void run_cmd(QCmd *c, int all);
+
+/* Rasterize queued commands: up to budget_ms of work (or everything when
+   budget_ms < 0). Returns 1 when work is left. */
+static int pump(int budget_ms) {
+    uint32_t t0 = ticks;
+    int bands = 0;
+    while (g_qhead < g_qtail) {
+        QCmd *c = (QCmd *)(void *)(g_q + g_qhead);
+        run_cmd(c, budget_ms < 0);
+        if (c->y0 >= c->y1) g_qhead += c->size;
+        if (budget_ms >= 0 && (++bands >= 256 || ticks - t0 >= (uint32_t)budget_ms)) break;
+    }
+    if (g_qhead >= g_qtail) g_qhead = g_qtail = 0;
+    return g_qhead < g_qtail;
+}
+
+void rjs_canvas_flush(void) { pump(-1); }
+int rjs_canvas_pending(void) { return g_qhead < g_qtail; }
+void rjs_canvas_discard(void) { g_qhead = g_qtail = 0; }
+
+int rjs_canvas_pump(int budget_ms) {
+    /* the host is not inside a script: no budget to poll */
+    rb_cv_set_abort(0);
+    int more = pump(budget_ms < 0 ? 0 : budget_ms);
+    rb_cv_set_abort(rjs_over_budget);
+    return more;
+}
+
+/* Append a command; data is its payload. A command that cannot fit even in
+   an empty queue runs at once. */
+static void submit(QCmd *c, const void *data, uint32_t dlen) {
+    uint32_t lut = c->grad ? 1024u : 0u;
+    uint32_t size = align8((uint32_t)sizeof(QCmd) + lut + dlen);
+    if (c->y0 >= c->y1) return;
+    if (size > Q_BYTES) {
+        /* run it straight from the caller's buffers */
+        rjs_canvas_flush();
+        static QCmd big;
+        big = *c;
+        big.size = 0;
+        g_big_data = data;
+        run_cmd(&big, 1);
+        g_big_data = 0;
+        return;
+    }
+    if (g_qtail + size > Q_BYTES) rjs_canvas_flush();
+    uint8_t *p = g_q + g_qtail;
+    c->size = size;
+    *(QCmd *)(void *)p = *c;
+    p += sizeof(QCmd);
+    if (lut) {
+        for (int k = 0; k < 256; k++) ((uint32_t *)(void *)p)[k] = g_lut[k];
+        p += lut;
+    }
+    for (uint32_t k = 0; k < dlen; k++) p[k] = ((const uint8_t *)data)[k];
+    g_qtail += size;
+}
+
 /* fill(slot, path, n, a..f, evenodd) */
 FN(c_fill) {
     UNUSED;
@@ -613,13 +746,13 @@ FN(c_fill) {
     mat(ctx, argv + 3, m);
     int evenodd = inum(ctx, argv[9]) != 0;
     const double *d = f64(ctx, argv[1], &cnt);
-    if (!d || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
-    flatten(d, n, m);
-    g_target = slot;
-    g_evenodd = evenodd;
-    rb_cv_begin();
-    fill_subpaths();
-    flush_fill();
+    if (!d || n <= 0 || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
+    QCmd c;
+    if (!cmd_init(&c, Q_FILL, slot)) return JS_UNDEFINED;
+    c.evenodd = (uint8_t)evenodd;
+    c.n = n;
+    for (int k = 0; k < 6; k++) c.m[k] = m[k];
+    submit(&c, d, (uint32_t)n * 8u);
     return JS_UNDEFINED;
 }
 
@@ -655,14 +788,20 @@ FN(c_stroke) {
     mat(ctx, argv + 3, m);
     line_style(ctx, argv + 9, m);
     const double *d = f64(ctx, argv[1], &cnt);
-    if (!d || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
+    if (!d || n <= 0 || n > cnt || !finite_mat(m) || !rb_canvas_pixels(slot)) return JS_UNDEFINED;
     if (!(g_hw > 0) || g_hw > 1e5) return JS_UNDEFINED;
-    flatten(d, n, m);
-    g_target = slot;
-    g_evenodd = 0;
-    rb_cv_begin();
-    stroke_subpaths();
-    flush_fill();
+    QCmd c;
+    if (!cmd_init(&c, Q_STROKE, slot)) return JS_UNDEFINED;
+    c.n = n;
+    for (int k = 0; k < 6; k++) c.m[k] = m[k];
+    c.hw = g_hw;
+    c.cap = (uint8_t)g_cap;
+    c.join = (uint8_t)g_join;
+    c.miter = g_miter;
+    c.ndash = g_ndash;
+    for (int k = 0; k < g_ndash; k++) c.dash[k] = g_dash[k];
+    c.dash_off = g_dash_off;
+    submit(&c, d, (uint32_t)n * 8u);
     return JS_UNDEFINED;
 }
 
@@ -735,37 +874,20 @@ FN(c_bounds) {
 
 /* ---- text: the 8x8 font, one cell = size/2 wide and size tall ---- */
 
-/* text(slot, str, x, y, size, a..f): glyph cells start at user (x, y), the
-   top-left of the first cell; the prelude did alignment and baseline. */
-FN(c_text) {
-    UNUSED;
-    int slot = inum(ctx, argv[0]);
-    size_t len;
-    const char *s = JS_ToCStringLen(ctx, &len, argv[1]);
-    if (!s) return JS_EXCEPTION;
-    double x = num(ctx, argv[2]), y = num(ctx, argv[3]), size = num(ctx, argv[4]);
-    double m[6];
-    mat(ctx, argv + 5, m);
-    if (!rb_canvas_pixels(slot) || !finite_mat(m) || !(size > 0) || size > 10000) {
-        JS_FreeCString(ctx, s);
-        return JS_UNDEFINED;
-    }
+static void text_edges(const char *s, size_t len, double x, double y, double size, const double m[6]) {
     double pw = size / 16.0, ph = size / 8.0;   /* one font pixel */
-    g_target = slot;
-    g_evenodd = 0;
-    rb_cv_begin();
     double cx = x;
     unsigned glyphs = 0;
     for (size_t i = 0; i < len;) {
         if ((++glyphs & 255) == 0 && rjs_over_budget()) break;
-        unsigned c = (uint8_t)s[i++];
-        if (c >= 0x80) {
+        unsigned ch = (uint8_t)s[i++];
+        if (ch >= 0x80) {
             /* one glyph per code point: skip continuation bytes */
             while (i < len && ((uint8_t)s[i] & 0xC0) == 0x80) i++;
-            c = '?';
+            ch = '?';
         }
-        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
-        const uint8_t *g = vga_font_8x8[c];
+        if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
+        const uint8_t *g = vga_font_8x8[ch];
         for (int row = 0; row < 8; row++) {
             uint8_t bits = g[row];
             int col = 0;
@@ -786,42 +908,101 @@ FN(c_text) {
         }
         cx += size / 2.0;
     }
+}
+
+/* Device rows a transformed rectangle covers, clamped into [*y0, *y1). */
+static void rect_rows(double x0, double y0, double x1, double y1, const double m[6], int *r0, int *r1) {
+    double xs[4] = {x0, x1, x1, x0}, ys[4] = {y0, y0, y1, y1}, lo = 1e9, hi = -1e9;
+    for (int k = 0; k < 4; k++) {
+        double Y = m[1] * xs[k] + m[3] * ys[k] + m[5];
+        if (Y < lo) lo = Y;
+        if (Y > hi) hi = Y;
+    }
+    if (lo > *r0) *r0 = lo > 1e6 ? 1000000 : (int)floor(lo);
+    if (hi + 1 < *r1) *r1 = hi < -1e6 ? -1000000 : (int)ceil(hi) + 1;
+}
+
+/* text(slot, str, x, y, size, a..f): glyph cells start at user (x, y), the
+   top-left of the first cell; the prelude did alignment and baseline. */
+FN(c_text) {
+    UNUSED;
+    int slot = inum(ctx, argv[0]);
+    double x = num(ctx, argv[2]), y = num(ctx, argv[3]), size = num(ctx, argv[4]);
+    double m[6];
+    mat(ctx, argv + 5, m);
+    size_t len;
+    const char *s = JS_ToCStringLen(ctx, &len, argv[1]);
+    if (!s) return JS_EXCEPTION;
+    QCmd c;
+    if (rb_canvas_pixels(slot) && finite_mat(m) && size > 0 && size <= 10000 && len > 0 &&
+        len < Q_BYTES / 2 && finite_xy(x, y) && cmd_init(&c, Q_TEXT, slot)) {
+        c.n = (int)len;
+        c.tx = x;
+        c.ty = y;
+        c.tsize = size;
+        for (int k = 0; k < 6; k++) c.m[k] = m[k];
+        rect_rows(x, y, x + (double)len * size / 2.0, y + size, m, &c.y0, &c.y1);
+        submit(&c, s, (uint32_t)len);
+    }
     JS_FreeCString(ctx, s);
-    flush_fill();
     return JS_UNDEFINED;
 }
 
 /* ---- images ---- */
 
+/* The pixels of an image source: an <img> (kind 0) or a canvas slot. */
+static int image_source(int kind, int src, const uint32_t **px, int *w, int *h, int *nw, int *nh) {
+    if (kind == 0) return rb_image_node_pixels(src, px, w, h, nw, nh);
+    *px = rb_canvas_pixels(src);
+    rb_canvas_size(src, w, h);
+    *nw = *w;
+    *nh = *h;
+    return 1;
+}
+
 /* image(slot, kind 0 = <img> node | 1 = canvas slot, src, sx, sy, sw, sh,
-   dx, dy, dw, dh, a..f) -> 1 drawn (or nothing to draw), 0 source not usable */
+   dx, dy, dw, dh, a..f) -> 1 queued (or nothing to draw), 0 source not usable */
 FN(c_image) {
     UNUSED;
     int slot = inum(ctx, argv[0]), kind = inum(ctx, argv[1]), src = inum(ctx, argv[2]);
-    double sx = num(ctx, argv[3]), sy = num(ctx, argv[4]), sw = num(ctx, argv[5]), sh = num(ctx, argv[6]);
-    double dx = num(ctx, argv[7]), dy = num(ctx, argv[8]), dw = num(ctx, argv[9]), dh = num(ctx, argv[10]);
+    double v[8];
+    for (int k = 0; k < 8; k++) v[k] = num(ctx, argv[3 + k]);
     double m[6];
     mat(ctx, argv + 11, m);
     const uint32_t *px = 0;
     int w = 0, h = 0, nw = 0, nh = 0;
-    if (kind == 0) {
-        if (!rb_image_node_pixels(src, &px, &w, &h, &nw, &nh)) return JS_NewInt32(ctx, 0);
-    } else {
-        px = rb_canvas_pixels(src);
-        rb_canvas_size(src, &w, &h);
-        nw = w;
-        nh = h;
-        if (!px) return JS_NewInt32(ctx, 1);   /* an empty canvas draws nothing */
-    }
+    if (!image_source(kind, src, &px, &w, &h, &nw, &nh)) return JS_NewInt32(ctx, 0);
+    if (!px && kind == 1) return JS_NewInt32(ctx, 1);   /* an empty canvas draws nothing */
     if (!rb_canvas_pixels(slot) || !finite_mat(m) || nw <= 0 || nh <= 0) return JS_NewInt32(ctx, 1);
+    QCmd c;
+    if (!cmd_init(&c, Q_IMAGE, slot)) return JS_NewInt32(ctx, 1);
+    c.kind = kind;
+    c.src = src;
+    for (int k = 0; k < 8; k++) c.img[k] = v[k];
+    for (int k = 0; k < 6; k++) c.m[k] = m[k];
+    /* a canvas drawn onto itself copies its source first: no bands */
+    if (kind == 1 && src == slot) c.band = 0;
+    double dx = v[4], dy = v[5], dw = v[6], dh = v[7];
+    if (finite_xy(dx, dy) && finite_xy(dw, dh)) rect_rows(dx, dy, dx + dw, dy + dh, m, &c.y0, &c.y1);
+    submit(&c, 0, 0);
+    return JS_NewInt32(ctx, 1);
+}
+
+static void image_rows(const QCmd *c, const RbCvClip *clip) {
+    const uint32_t *px = 0;
+    int w = 0, h = 0, nw = 0, nh = 0;
+    if (!image_source(c->kind, c->src, &px, &w, &h, &nw, &nh) || !px || nw <= 0 || nh <= 0) return;
+    const double *m = c->m;
+    double sx = c->img[0], sy = c->img[1], sw = c->img[2], sh = c->img[3];
+    double dx = c->img[4], dy = c->img[5], dw = c->img[6], dh = c->img[7];
     /* normalise negative sizes (the spec flips them into place) */
     if (sw < 0) { sx += sw; sw = -sw; }
     if (sh < 0) { sy += sh; sh = -sh; }
     if (dw < 0) { dx += dw; dw = -dw; }
     if (dh < 0) { dy += dh; dh = -dh; }
-    if (!(sw > 0) || !(sh > 0) || !(dw > 0) || !(dh > 0)) return JS_NewInt32(ctx, 1);
+    if (!(sw > 0) || !(sh > 0) || !(dw > 0) || !(dh > 0)) return;
     double inv[6];
-    if (!invert(m, inv)) return JS_NewInt32(ctx, 1);
+    if (!invert(m, inv)) return;
     double fx = (double)w / nw, fy = (double)h / nh, kx = sw / dw, ky = sh / dh;
     double t[6];
     t[0] = fx * kx * inv[0];
@@ -845,9 +1026,105 @@ FN(c_image) {
     if (bx1 > 1e6) bx1 = 1e6;
     if (by1 > 1e6) by1 = 1e6;
     int ix0 = (int)floor(bx0), iy0 = (int)floor(by0), ix1 = (int)ceil(bx1), iy1 = (int)ceil(by1);
-    rb_cv_image(slot, px, w, h, w, fx * sx, fy * sy, fx * (sx + sw), fy * (sy + sh), t,
-                ix0, iy0, ix1, iy1, g_alpha, g_op, g_smooth, g_has_clip ? &g_clip : 0);
-    return JS_NewInt32(ctx, 1);
+    rb_cv_image(c->slot, px, w, h, w, fx * sx, fy * sy, fx * (sx + sw), fy * (sy + sh), t,
+                ix0, iy0, ix1, iy1, c->alpha, c->cop, c->smooth, clip);
+}
+
+/* ---- replay ---- */
+
+/* Rasterize the next band of rows of c (all of it when `all`, or when it
+   is not banded), then move c->y0 past them. */
+static void run_cmd(QCmd *c, int all) {
+    /* the recording state (set by the script's last cvPaint/cvComp) is kept */
+    RbCvPaint sp = g_paint;
+    int sok = g_paint_ok, sa = g_alpha, so = g_op, ss = g_smooth, shc = g_has_clip;
+    RbCvClip sc = g_clip;
+    double shw = g_hw, smi = g_miter, sdo = g_dash_off;
+    int scap = g_cap, sjoin = g_join, snd = g_ndash;
+    double sdash[DASH_MAX];
+    for (int k = 0; k < snd; k++) sdash[k] = g_dash[k];
+
+    const uint8_t *payload = c->size ? (const uint8_t *)(c + 1) : 0;
+    const uint32_t *lut = 0;
+    if (payload && c->grad) {
+        lut = (const uint32_t *)(const void *)payload;
+        payload += 1024;
+    }
+    if (!c->size) payload = (const uint8_t *)g_big_data;
+    g_paint = c->paint;
+    g_paint.lut = c->grad ? (lut ? lut : g_lut) : 0;
+    g_paint_ok = 1;
+    g_alpha = c->alpha;
+    g_op = c->cop;
+    g_smooth = c->smooth;
+    g_evenodd = c->evenodd;
+    g_target = c->slot;
+
+    if ((c->op == Q_FILL || c->op == Q_STROKE) && payload) {
+        if (c->op == Q_STROKE) {
+            g_hw = c->hw;
+            g_cap = c->cap;
+            g_join = c->join;
+            g_miter = c->miter;
+            g_ndash = c->ndash;
+            for (int k = 0; k < c->ndash; k++) g_dash[k] = c->dash[k];
+            g_dash_off = c->dash_off;
+        }
+        flatten((const double *)(const void *)payload, c->n, c->m);
+        if (!c->bounded) {
+            /* narrow the rows to the shape (a stroke reaches out by its
+               half width, a miter by up to miterLimit times that) */
+            c->bounded = 1;
+            if (g_npt > 0) {
+                double lo = g_y[0], hi = g_y[0];
+                for (int k = 1; k < g_npt; k++) {
+                    if (g_y[k] < lo) lo = g_y[k];
+                    if (g_y[k] > hi) hi = g_y[k];
+                }
+                if (c->op == Q_STROKE) {
+                    double ext = c->hw * (c->miter > 1.5 ? c->miter : 1.5) + 2;
+                    lo -= ext;
+                    hi += ext;
+                }
+                if (lo > c->y0) c->y0 = lo > 1e6 ? 1000000 : (int)floor(lo);
+                if (hi + 1 < c->y1) c->y1 = hi < -1e6 ? -1000000 : (int)ceil(hi) + 1;
+            } else {
+                c->y0 = c->y1;
+            }
+        }
+    }
+    int r0 = c->y0, r1 = (all || !c->band || c->y1 - c->y0 <= BAND_ROWS) ? c->y1 : c->y0 + BAND_ROWS;
+    if (r0 < r1) {
+        RbCvClip band;
+        band.x0 = c->has_clip ? c->clip.x0 : 0;
+        band.x1 = c->has_clip ? c->clip.x1 : 65536;
+        band.y0 = c->has_clip && c->clip.y0 > r0 ? c->clip.y0 : r0;
+        band.y1 = c->has_clip && c->clip.y1 < r1 ? c->clip.y1 : r1;
+        g_clip = band;
+        g_has_clip = 1;
+        if (band.y0 < band.y1 && band.x0 < band.x1) {
+            rb_cv_begin();
+            if (c->op == Q_FILL) {
+                fill_subpaths();
+                flush_fill();
+            } else if (c->op == Q_STROKE) {
+                stroke_subpaths();
+                flush_fill();
+            } else if (c->op == Q_TEXT && payload) {
+                text_edges((const char *)payload, (size_t)c->n, c->tx, c->ty, c->tsize, c->m);
+                flush_fill();
+            } else if (c->op == Q_IMAGE) {
+                image_rows(c, &band);
+            }
+            rb_cv_begin();
+        }
+    }
+    c->y0 = r1;
+
+    g_paint = sp; g_paint_ok = sok; g_alpha = sa; g_op = so; g_smooth = ss;
+    g_has_clip = shc; g_clip = sc;
+    g_hw = shw; g_miter = smi; g_dash_off = sdo; g_cap = scap; g_join = sjoin; g_ndash = snd;
+    for (int k = 0; k < snd; k++) g_dash[k] = sdash[k];
 }
 
 /* imageSize(kind, src) -> [w, h] (natural size) or null when not usable */
@@ -877,11 +1154,13 @@ FN(c_get) {
     int w = inum(ctx, argv[3]), h = inum(ctx, argv[4]);
     uint8_t *p = u8(ctx, argv[5], &n);
     if (!p || w <= 0 || h <= 0 || (uint64_t)w * (uint64_t)h * 4 > n) return JS_UNDEFINED;
+    rjs_canvas_flush();
     rb_cv_get(slot, x, y, w, h, p);
     return JS_UNDEFINED;
 }
 
-/* put(slot, Uint8ClampedArray, iw, ih, dx, dy, x0, y0, x1, y1) */
+/* put(slot, Uint8ClampedArray, iw, ih, dx, dy, x0, y0, x1, y1): after
+   everything queued, at once (the image data may change right after) */
 FN(c_put) {
     UNUSED;
     size_t n;
@@ -892,6 +1171,7 @@ FN(c_put) {
     /* 64-bit product: on i686 size_t is 32 bits, and a page can set an
        ImageData's width and height to anything */
     if (!p || iw <= 0 || ih <= 0 || (uint64_t)iw * (uint64_t)ih * 4 > n) return JS_UNDEFINED;
+    rjs_canvas_flush();
     rb_cv_put(v[0], p, iw, ih, v[4], v[5], v[6], v[7], v[8], v[9]);
     return JS_UNDEFINED;
 }
@@ -901,6 +1181,7 @@ FN(c_put) {
 FN(c_png) {
     UNUSED;
     int slot = inum(ctx, argv[0]), cw, ch;
+    rjs_canvas_flush();
     if (!rb_canvas_size(slot, &cw, &ch)) return JS_NULL;
     size_t raw = (size_t)ch * (1 + 4 * (size_t)cw);
     size_t cap = raw + raw / 65535 * 5 + 256;
@@ -937,6 +1218,10 @@ FN(c_png) {
     return r;
 }
 
+/* queued(): 1 while drawn commands wait to be rasterized (the next
+   animation frame waits for them) */
+FN(c_queued) { UNUSED; (void)argv; return JS_NewBool(ctx, rjs_canvas_pending()); }
+
 static const JSCFunctionListEntry g_canvas_natives[] = {
     JS_CFUNC_DEF("cvOpen", 1, c_open),
     JS_CFUNC_DEF("cvResize", 3, c_resize),
@@ -957,10 +1242,12 @@ static const JSCFunctionListEntry g_canvas_natives[] = {
     JS_CFUNC_DEF("cvGet", 6, c_get),
     JS_CFUNC_DEF("cvPut", 10, c_put),
     JS_CFUNC_DEF("cvPng", 1, c_png),
+    JS_CFUNC_DEF("cvQueued", 0, c_queued),
 };
 
 void rjs_canvas_install(JSContext *ctx, JSValueConst rb) {
     rb_cv_set_abort(rjs_over_budget);
+    rjs_canvas_discard();
     g_paint_ok = 1;
     g_paint.kind = RB_CV_SOLID;
     g_paint.argb = 0xFF000000u;

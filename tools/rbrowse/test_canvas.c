@@ -28,6 +28,7 @@
 #include "image.h"
 #include "rjs.h"
 #include "rjs_dom.h"
+#include "rjs_canvas.h"
 #include "compat/qjs_port.h"
 #include "compat/qjs_alloc.h"
 
@@ -76,6 +77,7 @@ static void page(const char *html) {
     }
     rjs_dom_loaded();
     if (rjs_dom_take_dirty()) rb_relayout();
+    rjs_canvas_flush();         /* what the host's main loop would rasterize */
 }
 
 static char g_out[262144];
@@ -108,6 +110,7 @@ static int abort_after_3(void) { return ++g_abort_calls >= 3; }
 
 /* The canvas element with this id: its pixels, or 0. */
 static uint32_t *canvas_px(const char *id, int *w, int *h) {
+    rjs_canvas_flush();
     int node = rb_find_id(id);
     int slot = rb_canvas_find(node);
     if (slot < 0) return 0;
@@ -160,6 +163,7 @@ static int run_page_file(const char *path) {
         ticks += 17;
         rjs_dom_tick();
         if (rjs_dom_take_dirty()) rb_relayout();
+        while (rjs_canvas_pump(5)) {}
     }
     printf("console: %s\n", g_console_n ? g_console : "(empty)");
     dump("anim", "anim");
@@ -462,8 +466,57 @@ int main(void) {
         CHECK(rb_canvas_take_dirty());
         ticks += 20;
         rjs_dom_tick();
+        /* drawing is queued until the host rasterizes it */
+        CHECK(p[0] != 0xFFFF0000u && rjs_canvas_pending());
+        CHECK(rjs_canvas_pump(5) == 0);
         CHECK(p[0] == 0xFFFF0000u && rb_canvas_take_dirty());
         dump("c", "page");
+    }
+
+    /* the screen shows the last presented frame: drawing (even rasterized)
+       stays invisible until rb_canvas_present */
+    {
+        page("<canvas id=c width=10 height=10></canvas><script>"
+             "document.getElementById('c').getContext('2d').fillRect(0, 0, 10, 10);</script>");
+        int node = rb_find_id("c");
+        RbImageView v;
+        CHECK(rb_canvas_view_node(node, 10, 10, &v) && v.px[0] == 0);
+        CHECK(rb_canvas_present() == 1 && rb_canvas_node_dirty(node));
+        CHECK(rb_canvas_view_node(node, 10, 10, &v) && v.px[0] == 0xFF000000u);
+        rb_canvas_clean();
+        CHECK(!rb_canvas_node_dirty(node) && rb_canvas_present() == 0);
+    }
+
+    /* drawing rasterized one band of rows at a time (the host's pump with no
+       time to spare) gives exactly the pixels of drawing it in one go */
+    {
+        static const char *scene =
+            "var x = document.getElementById('c').getContext('2d'); x.clearRect(0, 0, 300, 260);"
+            "var g = x.createLinearGradient(0, 0, 300, 260); g.addColorStop(0, '#f00'); g.addColorStop(1, 'rgba(0,0,255,0.5)');"
+            "x.fillStyle = g; x.fillRect(5, 5, 290, 250);"
+            "x.save(); x.translate(150, 130); x.rotate(0.7); x.beginPath(); x.arc(0, 0, 100, 0, 5); x.lineWidth = 9;"
+            "x.lineJoin = 'round'; x.setLineDash([12, 5]); x.strokeStyle = 'rgba(0,255,0,0.6)'; x.stroke(); x.restore();"
+            "x.beginPath(); for (var i = 0; i < 400; i++) x.lineTo((i * 37) % 300, (i * 53) % 260); x.fillStyle = 'rgba(255,255,0,0.4)';"
+            "x.fill('evenodd'); x.font = '24px sans-serif'; x.fillStyle = '#000'; x.fillText('banded', 40, 200);"
+            "x.globalAlpha = 0.5; x.drawImage(x.canvas, 0, 0, 150, 130, 150, 130, 150, 130); x.globalAlpha = 1;"
+            "x.save(); x.beginPath(); x.rect(20, 100, 120, 70); x.clip(); x.fillStyle = 'navy'; x.fillRect(0, 0, 300, 260); x.restore(); 1";
+        page("<canvas id=c width=300 height=260></canvas>");
+        js(scene);
+        CHECK(rjs_canvas_pending());
+        int calls = 0;
+        while (rjs_canvas_pump(0) && calls < 100000) calls++;
+        int w, h;
+        static uint32_t banded[300 * 260];
+        uint32_t *p = canvas_px("c", &w, &h);
+        CHECK(p && w == 300 && h == 260 && calls > 8);
+        if (p) memcpy(banded, p, sizeof(banded));
+        js(scene);
+        rjs_canvas_flush();
+        p = canvas_px("c", &w, &h);
+        int diff = 0;
+        for (int i = 0; p && i < 300 * 260; i++) if (p[i] != banded[i]) diff++;
+        if (diff) printf("  %d pixels differ between banded and whole rasterization\n", diff);
+        CHECK(p && diff == 0);
     }
 
     /* a long fill polls the abort hook and stops when the script is out of

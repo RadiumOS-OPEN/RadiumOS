@@ -21,6 +21,7 @@
 #include "../scheduler/task.h"
 #include "../quickjs/rjs.h"
 #include "../quickjs/rjs_dom.h"
+#include "../quickjs/rjs_canvas.h"
 
 #include <stdint.h>
 
@@ -184,15 +185,24 @@ static void copy_dwords(void *dst, const void *src, int n) {
     __asm__ volatile("cld; rep movsl" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
 }
 
-static void present(void) {
+/* Copy [x0,x1) x [y0,y1) of the back buffer to the screen (mode 13h always
+   requantizes the whole frame). */
+static void present_rect(int x0, int y0, int x1, int y1) {
     if (g_lfb) {
-        for (int y = 0; y < rb_ui.h; y++)
-            copy_dwords(g_lfb + y * g_lfb_pitch, &g_fb[y * rb_ui.w], rb_ui.w);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > rb_ui.w) x1 = rb_ui.w;
+        if (y1 > rb_ui.h) y1 = rb_ui.h;
+        if (x0 >= x1) return;
+        for (int y = y0; y < y1; y++)
+            copy_dwords(g_lfb + y * g_lfb_pitch + x0 * 4, &g_fb[y * rb_ui.w + x0], x1 - x0);
         return;
     }
     rb_quantize_8bpp(g_fb, g_fb8, rb_ui.w, rb_ui.h);
     vga_gfx_present(g_fb8);
 }
+
+static void present(void) { present_rect(0, 0, rb_ui.w, rb_ui.h); }
 
 /* Arrow-key scroll step: two text lines of the 320x200 page, three at 640x360. */
 static int line_step(void) {
@@ -241,10 +251,13 @@ static void draw_cursor(void) {
     }
 }
 
-static void paint(void) {
+/* Repaint [cx0,cx1) x [cy0,cy1) of the screen: everything is drawn, but
+   every primitive is clipped to that area, and only it is presented. */
+static void paint_area(int cx0, int cy0, int cx1, int cy1) {
     const RbUi *u = &rb_ui;
     int W = u->w, H = u->h;
     rb_paint_begin(g_fb, W, H);
+    rb_paint_clip(cx0, cy0, cx1, cy1);
     rb_rect(0, 0, W, u->chrome_h, UI_CHROME, 0, 0, W, H);
     rb_rect(0, u->content_y, u->scroll_x, u->content_h, (uint32_t)rb_page_bg(), 0, 0, W, H);
     rb_rect(u->scroll_x, u->content_y, u->scroll_w, u->content_h, UI_SCROLL, 0, 0, W, H);
@@ -290,7 +303,49 @@ static void paint(void) {
     rb_text_at(2, sy, g_hover[0] ? g_hover : g_status, UI_STATUS_TEXT, 0, u->status_y, sx1, H);
     if (!g_mouse_ok) rb_text_at(W - 70, sy, "no mouse", UI_STATUS_TEXT, 0, u->status_y, W, H);
     draw_cursor();
-    present();
+    present_rect(cx0, cy0, cx1, cy1);
+}
+
+static void paint(void) { paint_area(0, 0, rb_ui.w, rb_ui.h); }
+
+/* ---- partial repaints ----
+   The pointer moving and a script drawing on a canvas change a small part
+   of the screen: they add damage instead of setting g_dirty, and the main
+   loop repaints just the damaged rectangle. Canvas damage is paced by what
+   its repaints cost, so a heavy canvas slows down itself, not the pointer,
+   scrolling or typing. */
+static int g_dmg, g_dmg_x0, g_dmg_y0, g_dmg_x1, g_dmg_y1;
+
+static void add_damage(int x0, int y0, int x1, int y1) {
+    if (x0 >= x1 || y0 >= y1) return;
+    if (!g_dmg) {
+        g_dmg = 1;
+        g_dmg_x0 = x0; g_dmg_y0 = y0; g_dmg_x1 = x1; g_dmg_y1 = y1;
+        return;
+    }
+    if (x0 < g_dmg_x0) g_dmg_x0 = x0;
+    if (y0 < g_dmg_y0) g_dmg_y0 = y0;
+    if (x1 > g_dmg_x1) g_dmg_x1 = x1;
+    if (y1 > g_dmg_y1) g_dmg_y1 = y1;
+}
+
+/* The pointer's footprint: the 8x12 arrow plus its drop shadow. */
+static void damage_cursor(int x, int y) { add_damage(x, y, x + 9, y + 13); }
+
+/* Damage the on-screen boxes of every canvas whose pixels changed. */
+static void damage_canvases(void) {
+    int n = rb_box_count();
+    for (int i = 0; i < n; i++) {
+        const RbBox *b = rb_box(i);
+        if (!b || b->kind != RB_BOX_CANVAS || !rb_canvas_node_dirty((int)b->toff)) continue;
+        int x, y, x0, y0, x1, y1;
+        if (!rb_box_paint_rect(i, g_scroll, &x, &y, &x0, &y0, &x1, &y1)) continue;
+        if (x > x0) x0 = x;
+        if (y > y0) y0 = y;
+        if (x + b->w < x1) x1 = x + b->w;
+        if (y + b->h < y1) y1 = y + b->h;
+        add_damage(x0, y0, x1, y1);
+    }
 }
 
 /* ---- start-up warning ----------------------------------------------------
@@ -466,13 +521,22 @@ static void on_mouse_packet(void) {
     if (dx < -lim) dx = -lim;
     if (dy > lim) dy = lim;
     if (dy < -lim) dy = -lim;
+    int ox = g_mx, oy = g_my;
     g_mx += dx;
     g_my -= dy;
     clamp_mouse();
     g_left = (g_pkt[0] & 1) ? 1 : 0;
     /* The full 3-bit button state rides along for the event payload. */
+    uint8_t btn_before = g_btn;
     g_btn = (uint8_t)(g_pkt[0] & 7);
-    g_dirty = 1;
+    /* A plain move only redraws where the pointer was and is; buttons (a
+       click, a scrollbar drag) may change anything. */
+    if (g_btn || btn_before) {
+        g_dirty = 1;
+    } else if (ox != g_mx || oy != g_my) {
+        damage_cursor(ox, oy);
+        damage_cursor(g_mx, g_my);
+    }
     if (g_wheel_bytes == 4) {
         int z = (int)(int8_t)g_pkt[3];
         /* Only a real wheel tick is a SCROLL event (a pure move, z==0, must
@@ -888,6 +952,7 @@ static int g_img_busy;                /* the status line shows image progress */
 
 static void images_new_page(void) {
     rb_image_reset();
+    rjs_canvas_discard();
     rb_canvas_reset();
     g_img_scan = 1;
     g_img_relayout = 0;
@@ -1485,6 +1550,7 @@ static void dispatch_wheel(int z) {
     }
     g_scroll += -z * (line_step() * 3 / 4);
     clamp_scroll();
+    g_dirty = 1;
 }
 
 /* The UI's caret/ring is exactly the DOM active element. Every seam that
@@ -1825,6 +1891,7 @@ static int recover_from_crash(void) {
     if (g_crash_n > RB_CRASH_BURST) return 0;
     rb_crash_reset();
     rjs_abandon();
+    rjs_canvas_discard();
     rb_canvas_reset();
     drain_ps2();
     g_left = 0;
@@ -1933,6 +2000,9 @@ void rbrowse(int argc, char *argv[]) {
 
     int quit = gave_up;
     int last_blink = 0;
+    int canvas_pending = 0;
+    uint32_t canvas_at = 0, canvas_cost = 0;
+    g_dmg = 0;
     while (!quit) {
         fg_pet();
         poll_input();
@@ -1943,12 +2013,50 @@ void rbrowse(int argc, char *argv[]) {
             break;
         }
         update_hover();
-        if (rb_canvas_take_dirty()) g_dirty = 1;   /* scripts drew on a canvas */
+        /* rasterize queued canvas drawing a few ms at a time, input first */
+        int raster_left = rjs_canvas_pump(10);
+        if (rb_canvas_take_dirty()) canvas_pending = 1;   /* the canvas pixels changed */
         int blink = (int)((get_ticks() / 400) & 1);
-        if (g_dirty || blink != last_blink) {
+        if (blink != last_blink) {
             last_blink = blink;
+            if (g_url_focus) add_damage(rb_ui.url_x, rb_ui.btn_y, rb_ui.url_x + rb_ui.url_w, rb_ui.btn_y + rb_ui.btn_h);
+        }
+        uint32_t now = get_time_ms();
+        if (g_dirty) {
             g_dirty = 0;
+            g_dmg = 0;
+            /* a finished canvas frame goes up with it; one still being
+               rasterized keeps showing the last finished frame */
+            if (canvas_pending && !raster_left) rb_canvas_present();
             paint();
+            rjs_dom_set_paint_cost((int)(get_time_ms() - now));
+            rb_canvas_clean();
+            if (!raster_left) {
+                canvas_pending = 0;
+                canvas_at = now;
+            }
+            continue;
+        }
+        /* A canvas frame is shown once its drawing is all rasterized (or every
+           two seconds when a page draws without pause, so it never freezes),
+           at most as often as showing it costs, and never faster than 60 Hz. */
+        int canvas_frame = 0;
+        if (canvas_pending && (!raster_left || now - canvas_at >= 2000) &&
+            now - canvas_at >= (canvas_cost > 16 ? canvas_cost : 16)) {
+            rb_canvas_present();
+            damage_canvases();
+            rb_canvas_clean();
+            canvas_pending = 0;
+            canvas_at = now;
+            canvas_frame = 1;
+        }
+        if (g_dmg) {
+            g_dmg = 0;
+            paint_area(g_dmg_x0, g_dmg_y0, g_dmg_x1, g_dmg_y1);
+            if (canvas_frame) {
+                canvas_cost = get_time_ms() - now;
+                rjs_dom_set_paint_cost((int)canvas_cost);
+            }
         }
     }
     fg_disarm();
@@ -1958,6 +2066,7 @@ void rbrowse(int argc, char *argv[]) {
     rb_image_reset();
     rb_set_canvas(0);
     rb_paint_set_canvas(0);
+    rjs_canvas_discard();
     rb_canvas_reset();
     mouse_off();
     reset_input();

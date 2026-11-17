@@ -50,11 +50,22 @@ void rb_ui_layout(int w, int h) {
 
 static uint32_t *g_fb;
 static int g_w, g_h;
+/* Clip rectangle every primitive also respects (rb_paint_clip): the whole
+   framebuffer unless a partial repaint narrowed it. */
+static int g_kx0, g_ky0, g_kx1, g_ky1;
 
 void rb_paint_begin(uint32_t *fb, int w, int h) {
     g_fb = fb;
     g_w = w;
     g_h = h;
+    g_kx0 = 0; g_ky0 = 0; g_kx1 = w; g_ky1 = h;
+}
+
+void rb_paint_clip(int x0, int y0, int x1, int y1) {
+    g_kx0 = x0 > 0 ? x0 : 0;
+    g_ky0 = y0 > 0 ? y0 : 0;
+    g_kx1 = x1 < g_w ? x1 : g_w;
+    g_ky1 = y1 < g_h ? y1 : g_h;
 }
 
 /* Opacity of the box being painted: 255 overwrites, anything less blends
@@ -73,7 +84,7 @@ static inline void put(int x, int y, uint32_t c) {
 }
 
 void rb_px(int x, int y, uint32_t c) {
-    if ((unsigned)x >= (unsigned)g_w || (unsigned)y >= (unsigned)g_h) return;
+    if (x < g_kx0 || x >= g_kx1 || y < g_ky0 || y >= g_ky1) return;
     put(x, y, c);
 }
 
@@ -81,10 +92,10 @@ void rb_rect(int x, int y, int w, int h, uint32_t c, int x0, int y0, int x1, int
     /* intersect first: a box can be tens of thousands of rows tall */
     int ya = y > y0 ? y : y0, yb = y + h < y1 ? y + h : y1;
     int xa = x > x0 ? x : x0, xb = x + w < x1 ? x + w : x1;
-    if (ya < 0) ya = 0;
-    if (yb > g_h) yb = g_h;
-    if (xa < 0) xa = 0;
-    if (xb > g_w) xb = g_w;
+    if (ya < g_ky0) ya = g_ky0;
+    if (yb > g_ky1) yb = g_ky1;
+    if (xa < g_kx0) xa = g_kx0;
+    if (xb > g_kx1) xb = g_kx1;
     if (xa >= xb) return;
     for (int yy = ya; yy < yb; yy++) {
         uint32_t *row = &g_fb[yy * g_w];
@@ -101,10 +112,10 @@ void rb_blit_rgb(int x, int y, const uint32_t *src, int sw, int sh, int src_stri
     if (!src || sw <= 0 || sh <= 0) return;
     int ya = y > y0 ? y : y0, yb = y + sh < y1 ? y + sh : y1;
     int xa = x > x0 ? x : x0, xb = x + sw < x1 ? x + sw : x1;
-    if (ya < 0) ya = 0;
-    if (yb > g_h) yb = g_h;
-    if (xa < 0) xa = 0;
-    if (xb > g_w) xb = g_w;
+    if (ya < g_ky0) ya = g_ky0;
+    if (yb > g_ky1) yb = g_ky1;
+    if (xa < g_kx0) xa = g_kx0;
+    if (xb > g_kx1) xb = g_kx1;
     for (int yy = ya; yy < yb; yy++) {
         const uint32_t *s = src + (yy - y) * src_stride + (xa - x);
         uint32_t *d = &g_fb[yy * g_w];
@@ -124,10 +135,10 @@ static void blit_nearest(int x, int y, int w, int h, const RbImageView *v, int x
     if (w <= 0 || h <= 0 || !v->px || v->w <= 0 || v->h <= 0) return;
     int ya = y > y0 ? y : y0, yb = y + h < y1 ? y + h : y1;
     int xa = x > x0 ? x : x0, xb = x + w < x1 ? x + w : x1;
-    if (ya < 0) ya = 0;
-    if (yb > g_h) yb = g_h;
-    if (xa < 0) xa = 0;
-    if (xb > g_w) xb = g_w;
+    if (ya < g_ky0) ya = g_ky0;
+    if (yb > g_ky1) yb = g_ky1;
+    if (xa < g_kx0) xa = g_kx0;
+    if (xb > g_kx1) xb = g_kx1;
     for (int yy = ya; yy < yb; yy++) {
         /* 32-bit products: box sides are below 16384 and views below 4096 */
         const uint32_t *s = v->px + (size_t)((yy - y) * v->h / h) * (size_t)v->stride;
@@ -207,10 +218,10 @@ void rb_frame_rect(int x, int y, int w, int h, uint32_t c) {
 static void glyph(int x, int y, int ch, uint32_t color, int scale, int x0, int y0, int x1, int y1) {
     if (ch < 0 || ch > 255) ch = '?';
     if (scale < 1) scale = 1;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > g_w) x1 = g_w;
-    if (y1 > g_h) y1 = g_h;
+    if (x0 < g_kx0) x0 = g_kx0;
+    if (y0 < g_ky0) y0 = g_ky0;
+    if (x1 > g_kx1) x1 = g_kx1;
+    if (y1 > g_ky1) y1 = g_ky1;
     /* the whole cell is outside the clip: nothing to do (most of a long page) */
     if (x >= x1 || y >= y1 || x + 8 * scale <= x0 || y + 8 * scale <= y0) return;
     const uint8_t *g = vga_font_8x8[ch];

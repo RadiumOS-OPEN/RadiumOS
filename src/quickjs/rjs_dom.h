@@ -43,4 +43,9 @@ int rjs_dom_take_dirty(void);
 /* Milliseconds until the next timer is due, or -1 if none. */
 int rjs_dom_next_due(void);
 
+/* What the host's last repaint after script activity cost, in ms:
+   requestAnimationFrame spaces frames by it, so a page whose frames are
+   expensive to draw gets fewer of them instead of starving input. */
+void rjs_dom_set_paint_cost(int ms);
+
 #endif
