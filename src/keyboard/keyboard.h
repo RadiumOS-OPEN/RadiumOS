@@ -47,6 +47,7 @@ void keyboard_await(const char* message, bool clear_screen);
 // Like keyboard_await, but carries on by itself after timeout_ms (usable before the PIT timer runs).
 void keyboard_await_timeout(const char *message, bool clear_screen, uint32_t timeout_ms);
 int register_command(const char* name, const char* description, void (*execute)(int, char*[]));
+int unregister_command(const char* name);
 int keyboard_input(char* userinput);
 void keyboard_input_secure(char* userinput);
 void keyboard_read_input();
