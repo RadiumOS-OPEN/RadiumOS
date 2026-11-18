@@ -1,5 +1,6 @@
 #[cfg(target_os = "none")]
 pub(crate) mod command;
+pub(crate) mod cookies;
 #[cfg(target_os = "none")]
 pub(crate) mod native;
 #[cfg(target_os = "none")]
@@ -123,6 +124,11 @@ impl Url {
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+
+    /// The URL as text (no fragment): what a redirect chain ended on.
+    pub fn href(&self) -> String {
+        format!("{}://{}{}", self.scheme(), self.authority(), self.path)
     }
 
     fn scheme(&self) -> &'static str {
@@ -294,6 +300,62 @@ fn request(url: &Url, head: bool, range: Option<(u64, u64)>) -> String {
         if head { "HEAD" } else { "GET" }, url.path, url.authority(), range_header)
 }
 
+/// A browser request: GET, or POST with `body` of type `content_type`, with
+/// the jar's Cookie header (empty: none). Values were validated by the
+/// caller (cookies hold no control characters, the type is checked).
+/// rbrowse's user agent: Firefox ESR on 32-bit Linux, the closest common
+/// browser to what rbrowse is (many sites serve an "unsupported browser"
+/// page or a harder check to anything they do not recognise). It must stay
+/// the same as navigator.userAgent in src/quickjs/dom_prelude.js: checks
+/// compare the two.
+pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0";
+
+/// What rbrowse says it is on sites that serve Firefox an application
+/// rbrowse cannot run but serve an unknown browser a plain page (a
+/// site-specific override, as browsers keep for broken sites). Google sends
+/// Firefox a homepage whose consent dialog needs a 1.2 MB script bundle, and
+/// an unknown browser a plain consent page, then results.
+pub(crate) const PLAIN_UA: &str = "Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4";
+
+/// The user agent for requests to `host` (and for navigator.userAgent of
+/// a page on it): PLAIN_UA on Google's sites (google.com, google.pl, ...),
+/// BROWSER_UA everywhere else.
+pub(crate) fn user_agent_for(host: &str) -> &'static str {
+    if cookies::site(host).split('.').next() == Some("google") { PLAIN_UA } else { BROWSER_UA }
+}
+
+/// rbrowse's request, headers in the order Firefox sends them. No
+/// compression is offered: bodies are read as they come.
+pub(crate) fn browser_request(url: &Url, cookie: &str, post: Option<(&[u8], &str)>) -> Vec<u8> {
+    let mut text = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+         Accept-Language: en-US,en;q=0.5\r\nAccept-Encoding: identity\r\n",
+        if post.is_some() { "POST" } else { "GET" },
+        url.path,
+        url.authority(),
+        user_agent_for(&url.host)
+    );
+    if let Some((body, content_type)) = post {
+        text.push_str(&format!(
+            "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    text.push_str("Connection: close\r\n");
+    if !cookie.is_empty() {
+        text.push_str("Cookie: ");
+        text.push_str(cookie);
+        text.push_str("\r\n");
+    }
+    text.push_str("\r\n");
+    let mut bytes = text.into_bytes();
+    if let Some((body, _)) = post {
+        bytes.extend_from_slice(body);
+    }
+    bytes
+}
+
 pub fn get_plain<T: Transport>(
     transport: &mut T,
     url: &Url,
@@ -378,7 +440,9 @@ pub(crate) fn exchange_tls<T: Transport>(
         .map_err(|_| Error::Message("invalid server name"))?;
     let mut connection = UnbufferedClientConnection::new(config, name)?;
     let mut incoming = vec![0u8; RECORD_BUFFER];
-    let mut outgoing = vec![0u8; RECORD_BUFFER];
+    // A request with a cookie header or a body can outgrow one buffer of
+    // records: each 1200-byte fragment adds 22 bytes, so 1/8 is plenty.
+    let mut outgoing = vec![0u8; RECORD_BUFFER.max(request.len() + request.len() / 8 + 1024)];
     let mut used = 0;
     let mut written = 0;
     let mut sent = false;

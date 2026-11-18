@@ -1,0 +1,8 @@
+public_suffix_list.txt is derived from the Public Suffix List,
+https://publicsuffix.org/list/public_suffix_list.dat (fetched 2026-11-18),
+converted by tools/rbrowse/psl2txt.py to lowercase ASCII rules (Unicode
+labels in their IDNA "xn--" form), sorted.
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.

@@ -11,7 +11,8 @@ src/commands/desktop.o: src/commands/desktop.c src/commands/desktop.h \
   src/commands/../memory/pmm.h src/commands/../Avfs/Avfs.h \
   src/commands/../user/users.h src/commands/../user/sudo.h \
   src/commands/../kernel/cmdline.h src/commands/../vulkan/vulkan.h \
-  src/commands/rsd.h src/commands/update.h src/commands/apprun.h
+  src/commands/../io/clipboard.h src/commands/rsd.h \
+  src/commands/update.h src/commands/apprun.h
 src/commands/desktop.h:
 src/commands/../terminal/terminal.h:
 src/commands/../terminal/../vga/vga.h:
@@ -33,6 +34,7 @@ src/commands/../user/users.h:
 src/commands/../user/sudo.h:
 src/commands/../kernel/cmdline.h:
 src/commands/../vulkan/vulkan.h:
+src/commands/../io/clipboard.h:
 src/commands/rsd.h:
 src/commands/update.h:
 src/commands/apprun.h:

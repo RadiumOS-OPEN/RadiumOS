@@ -769,6 +769,10 @@ pub extern "C" fn rust_rtl8139_get_mac(mac_out: *mut u8) -> i32 {
     }
 }
 
+pub(crate) fn nic_is_ready() -> bool {
+    unsafe { RTL8139_DEVICE.is_some() }
+}
+
 #[no_mangle]
 pub extern "C" fn rust_rtl8139_check_init() -> bool {
     unsafe {

@@ -1,0 +1,633 @@
+/* Host checks for the browser's JavaScript DOM: QuickJS + rjs + rjs_dom +
+   dom_prelude driving the real engine, natively (no kernel).
+
+     T=/tmp; Q=src/quickjs   # $T/font.c: made as in test_paint.c
+     clang -g -O1 -fsanitize=address,undefined -fwrapv -DRBROWSE_HOST '-DCONFIG_VERSION="host"' \
+         -I src/rbrowse -I $Q -w tools/rbrowse/test_js.c src/rbrowse/engine.c \
+         $Q/quickjs.c $Q/libregexp.c $Q/libunicode.c $Q/cutils.c $Q/dtoa.c \
+         $Q/rjs.c $Q/rjs_dom.c $Q/rjs_canvas.c $Q/dom_prelude.c \
+         src/rbrowse/canvas.c src/rbrowse/image.c src/stb/stb_image.c $T/font.c -lm -o /tmp/rbtest_js && /tmp/rbtest_js
+
+   clang >= 17 also reports upstream's benign js_realloc_rt cast in cutils.c
+   under -fsanitize=function; see src/quickjs/README.radiumos.
+
+   (Regenerate dom_prelude.c first if dom_prelude.js changed:
+    python3 tools/rbrowse/js2c.py src/quickjs/dom_prelude.js src/quickjs/dom_prelude.c rjs_dom_prelude)
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "engine.h"
+#include "rjs.h"
+#include "rjs_dom.h"
+#include "compat/qjs_port.h"
+#include "compat/qjs_alloc.h"
+
+/* ---- the kernel pieces rjs expects ---- */
+volatile uint32_t ticks = 1000;
+static QjsSink g_sink;
+void qjs_set_sink(QjsSink s) { g_sink = s; }
+void qjs_write(const char *s, int len) {
+    if (g_sink) g_sink(s, len);
+    else fwrite(s, 1, (size_t)len, stdout);
+}
+void qjs_alloc_reset(void) {}
+void qjs_alloc_stats(size_t *a, size_t *b, size_t *c) {
+    if (a) *a = 0;
+    if (b) *b = 0;
+    if (c) *c = 256u << 20;
+}
+
+static int g_fail, g_pass;
+static char g_console[8192];
+static int g_console_n;
+
+static void capture(const char *s, int len) {
+    for (int i = 0; i < len && g_console_n < (int)sizeof(g_console) - 1; i++) g_console[g_console_n++] = s[i];
+    g_console[g_console_n] = 0;
+}
+
+/* Scripts load with same_origin 0, fetch() reads with 1: each fake answer
+   only comes back with the flag its caller must pass. */
+static int fake_fetch(const char *url, char *out, int cap, int same_origin) {
+    const char *b = 0;
+    if (strcmp(url, "http://cdn.example.net/lib.js") == 0 && !same_origin) b = "window.libLoaded = (window.libLoaded || 0) + 1;";
+    if (b) {
+        int n = (int)strlen(b);
+        memcpy(out, b, (size_t)n);
+        return n;
+    }
+    if (strcmp(url, "http://example.com/data.json") == 0 && same_origin) {
+        b = "{\"n\":42}";
+        int n = (int)strlen(b);
+        if (n >= cap) return -1;
+        memcpy(out, b, (size_t)n);
+        return n;
+    }
+    return -1;
+}
+
+/* A stand-in for the kernel's cookie jar and POST (RjsNet): remembers what
+   it was handed. Pages under file:/// have no jar, like local files in
+   rbrowse. One cookie, "srv=1", plays a cookie the server set. */
+static char g_jar[512] = "srv=1";
+static char g_post_url[256], g_post_body[512], g_post_type[128];
+static int net_cookie_get(const char *url, char *out, int cap) {
+    if (strncmp(url, "http", 4) != 0) return -1;
+    int n = (int)strlen(g_jar);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, g_jar, (size_t)n);
+    out[n] = 0;
+    return n;
+}
+static int net_cookie_set(const char *url, const char *text) {
+    if (strncmp(url, "http", 4) != 0) return -1;
+    if (strstr(text, "HttpOnly")) return 0;   /* the jar refuses these from scripts */
+    const char *semi = strchr(text, ';');
+    int n = semi ? (int)(semi - text) : (int)strlen(text);
+    int w = (int)strlen(g_jar);
+    if (w + 2 + n >= (int)sizeof(g_jar)) return 0;
+    memcpy(g_jar + w, "; ", 2);
+    memcpy(g_jar + w + 2, text, (size_t)n);
+    g_jar[w + 2 + n] = 0;
+    return 1;
+}
+static int net_post(const char *url, const char *body, int len, const char *ctype, char *out, int cap) {
+    snprintf(g_post_url, sizeof(g_post_url), "%s", url);
+    snprintf(g_post_body, sizeof(g_post_body), "%.*s", len, body);
+    snprintf(g_post_type, sizeof(g_post_type), "%s", ctype);
+    int n = snprintf(out, (size_t)cap, "posted %d", len);
+    return n;
+}
+static const RjsNet g_fake_net = {net_cookie_get, net_cookie_set, net_post};
+static const char *g_page_url = "http://example.com/dir/page.html";
+
+/* Open a page the way rbrowse does and run its scripts. */
+static void page(const char *html) {
+    rb_set_scripting(1);
+    rb_open_web(html, -1);
+    g_console_n = 0;
+    g_console[0] = 0;
+    rjs_set_output(capture);
+    if (rjs_start() != RJS_OK) { printf("rjs_start failed\n"); exit(1); }
+    if (rjs_dom_install(g_page_url, fake_fetch) != 0) {
+        printf("prelude failed:\n%s\n", g_console);
+        exit(1);
+    }
+    for (int i = 0; i < rb_script_count(); i++) {
+        int node, len;
+        const char *text;
+        if (rb_script_get(i, &node, &text, &len) && len > 0) rjs_dom_exec(node, text, len, "inline");
+    }
+    rjs_dom_loaded();
+    if (rjs_dom_take_dirty()) rb_relayout();
+}
+
+static char g_out[8192];
+
+static const char *js(const char *src) {
+    int rc = rjs_eval(src, -1, "<check>", 2000, g_out, (int)sizeof(g_out));
+    if (rc != RJS_OK) {
+        static char err[8300];
+        snprintf(err, sizeof(err), "!%s", g_out);
+        return err;
+    }
+    return g_out;
+}
+
+#define EXPECT(src, want) do {                                              \
+    const char *got_ = js(src);                                             \
+    if (strcmp(got_, (want)) != 0) {                                        \
+        printf("FAIL line %d: %s\n  got:  %s\n  want: %s\n", __LINE__, (src), got_, (want)); \
+        g_fail++;                                                           \
+    } else g_pass++;                                                        \
+} while (0)
+
+static void tick(int ms) {
+    ticks += (uint32_t)ms;
+    rjs_dom_tick();
+    if (rjs_dom_take_dirty()) rb_relayout();
+}
+
+int main(void) {
+    /* tree basics and queries */
+    page("<!doctype html><html><head><title>T</title></head><body>"
+         "<div id=a class='x y'>Hello <b>world</b></div><ul><li>1<li>2<li>3</ul>"
+         "<my-widget data-k=v>c</my-widget></body></html>");
+    EXPECT("document.getElementById('a').textContent", "Hello world");
+    EXPECT("document.title", "T");
+    EXPECT("document.querySelectorAll('li').length", "3");
+    EXPECT("document.querySelector('ul > li:last-child').textContent", "3");
+    EXPECT("document.body.children.length", "3");
+    EXPECT("document.querySelector('my-widget').tagName", "MY-WIDGET");
+    EXPECT("document.querySelector('my-widget').dataset.k", "v");
+    EXPECT("document.getElementById('a') === document.getElementById('a')", "true");
+    EXPECT("document.getElementById('a').classList.contains('y')", "true");
+    EXPECT("try { document.querySelector('[[') } catch (e) { e.name }", "SyntaxError");
+    EXPECT("document.getElementsByClassName('x')[0].id", "a");
+    EXPECT("document.getElementById('a').parentNode === document.body", "true");
+    EXPECT("document.documentElement.tagName", "HTML");
+    /* the viewport comes from rb_set_viewport (304x200 by default = 304x400 css) */
+    EXPECT("innerWidth + 'x' + innerHeight + ' ' + screen.colorDepth", "304x400 24");
+    EXPECT("matchMedia('(min-width: 600px)').matches", "false");
+
+    /* the 640x360 screen's viewport */
+    rb_set_viewport(622, 332);
+    page("<!doctype html><body>v</body>");
+    EXPECT("innerWidth + 'x' + innerHeight", "622x664");
+    EXPECT("matchMedia('(min-width: 600px)').matches", "true");
+    rb_set_viewport(RB_VIEW_W_DEFAULT, RB_VIEW_H_DEFAULT);
+    page("<!doctype html><html><head><title>T</title></head><body>"
+         "<div id=a class='x y'>Hello <b>world</b></div><ul><li>1<li>2<li>3</ul>"
+         "<my-widget data-k=v>c</my-widget></body></html>");
+
+    /* mutation */
+    EXPECT("var d = document.createElement('p'); d.id = 'n'; d.textContent = 'new';"
+           "document.body.appendChild(d); document.querySelector('#n').textContent", "new");
+    EXPECT("var a = document.getElementById('a'); a.classList.toggle('x'); a.className", "y");
+    EXPECT("a.style.display = 'none'; a.getAttribute('style')", "display: none");
+    EXPECT("a.style.backgroundColor = 'red'; a.style.backgroundColor", "red");
+    EXPECT("a.style.display = ''; a.getAttribute('style')", "background-color: red");
+    EXPECT("a.setAttribute('aria-expanded', 'true'); a.getAttribute('aria-expanded')", "true");
+    EXPECT("document.querySelectorAll('[aria-expanded=true]').length", "1");
+    EXPECT("a.innerHTML = '<i>x</i><br>y'; a.innerHTML", "<i>x</i><br>y");
+    EXPECT("a.firstChild.tagName + a.childNodes.length", "I3");
+    EXPECT("var li = document.querySelector('li'); var ul = li.parentNode; ul.removeChild(li);"
+           "ul.appendChild(li); [...ul.children].map(e => e.textContent).join()", "2,3,1");
+    EXPECT("li.remove(); ul.children.length + ',' + li.isConnected", "2,false");
+    EXPECT("var f = document.createDocumentFragment(); f.appendChild(document.createElement('em'));"
+           "f.appendChild(document.createElement('em')); ul.appendChild(f); ul.querySelectorAll('em').length", "2");
+    EXPECT("a.insertAdjacentHTML('beforebegin', '<hr id=h>'); a.previousElementSibling.id", "h");
+    EXPECT("a.cloneNode(true).innerHTML === a.innerHTML", "true");
+    EXPECT("var r1 = document.createElement('p'); r1.id = 'r1'; ul.replaceChild(r1, ul.firstElementChild);"
+           "ul.firstElementChild.id", "r1");
+    EXPECT("a.outerHTML.slice(0, 7)", "<div id");
+
+    /* events: JS dispatch, el.click(), engine dispatch */
+    EXPECT("var hits = []; a.addEventListener('click', e => hits.push('a:' + e.eventPhase));"
+           "document.body.addEventListener('click', e => hits.push('body'), true);"
+           "a.click(); hits.join()", "body,a:2");
+    EXPECT("var got = ''; a.addEventListener('ping', e => got = e.detail);"
+           "a.dispatchEvent(new CustomEvent('ping', {detail: 7})); got", "7");
+    EXPECT("var stopped = 0; document.body.addEventListener('click', () => stopped++);"
+           "a.addEventListener('click', e => e.stopPropagation()); a.click(); stopped", "0");
+    {
+        int a = rb_find_id("a");
+        js("hits = []; a.addEventListener('mousedown', e => { hits.push(e.type + e.clientX); e.preventDefault(); })");
+        rb_dispatch_ex(a, RB_EV_MOUSEDOWN, 0, 5, 6, 0, 1, 0);
+        EXPECT("hits.join()", "mousedown5");
+        if (!rb_last_dispatch_prevented()) { printf("FAIL: preventDefault did not reach the engine\n"); g_fail++; }
+        else g_pass++;
+    }
+    EXPECT("var n = 0; a.onclick = () => n++; a.click(); a.click(); n", "2");
+
+    /* timers, promises, async */
+    EXPECT("var t = []; setTimeout(() => t.push('b'), 50); setTimeout(() => t.push('a'), 10);"
+           "Promise.resolve().then(() => t.push('p')); t.join()", "");
+    EXPECT("t.join()", "p");
+    tick(20);
+    EXPECT("t.join()", "p,a");
+    tick(40);
+    EXPECT("t.join()", "p,a,b");
+    EXPECT("var iv = 0, id = setInterval(() => { if (++iv == 3) clearInterval(id) }, 10); 0", "0");
+    for (int i = 0; i < 6; i++) tick(10);
+    EXPECT("iv", "3");
+
+    /* fetch over the host's fetcher */
+    EXPECT("var fr; fetch('/data.json').then(r => r.json()).then(j => fr = j.n); 0", "0");
+    tick(1);
+    EXPECT("fr", "42");
+    EXPECT("var xr; var x = new XMLHttpRequest(); x.open('GET', '../data.json'); x.onload = () => xr = x.responseText; x.send(); 0", "0");
+    tick(1);
+    EXPECT("xr", "{\"n\":42}");
+
+    EXPECT("var cr; fetch('http://other.example/data.json').catch(e => cr = 'blocked'); 0", "0");
+    tick(1);
+    EXPECT("cr", "blocked");
+    EXPECT("var u = new Uint32Array(4); crypto.getRandomValues(u); u.some(x => x !== 0)", "true");
+    EXPECT("/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())", "true");
+
+    /* location, URL, navigation */
+    EXPECT("location.hostname + location.pathname", "example.com/dir/page.html");
+    EXPECT("new URL('../x?q=1#h', 'http://e.com/a/b/c').href", "http://e.com/a/x?q=1#h");
+    EXPECT("new URLSearchParams('a=1&b=x%20y').get('b')", "x y");
+    {
+        char nav[256];
+        js("location.href = 'other.html'");
+        if (!rb_take_nav(nav, sizeof(nav)) || strcmp(nav, "http://example.com/dir/other.html") != 0) {
+            printf("FAIL: location.href navigation (%s)\n", nav);
+            g_fail++;
+        } else g_pass++;
+    }
+
+    /* load order, document.write, inline handlers, errors */
+    page("<body><p id=o>0</p>"
+         "<script>var order = ['s1']; document.addEventListener('DOMContentLoaded', () => order.push('dcl'));"
+         "window.onload = () => order.push('load');</script>"
+         "<script>document.write('<span id=w>written</span>'); order.push('s2');</script>"
+         "<button id=b onclick=\"document.getElementById('o').textContent = +document.getElementById('o').textContent + 1\">+</button>"
+         "<script>throw new Error('boom')</script>"
+         "</body>");
+    EXPECT("order.join()", "s1,s2,dcl");
+    rb_dispatch(1, RB_EV_LOAD);
+    EXPECT("order.join()", "s1,s2,dcl,load");
+    EXPECT("document.getElementById('w').previousElementSibling.tagName", "SCRIPT");
+    EXPECT("document.getElementById('b').click(); document.getElementById('b').click();"
+           "document.getElementById('o').textContent", "2");
+    if (!strstr(g_console, "Uncaught Error: boom")) { printf("FAIL: uncaught error not reported: %s\n", g_console); g_fail++; }
+    else g_pass++;
+    {
+        int b = rb_find_id("b");
+        rb_dispatch(b, RB_EV_CLICK);
+        EXPECT("document.getElementById('o').textContent", "3");
+    }
+
+    /* inline handlers in markup added after the page loaded: from an event
+       handler (innerHTML), a timer (insertAdjacentHTML), and setAttribute */
+    page("<body><div id=d></div><button id=go onclick=\"render()\">go</button><p id=sa>p</p><script>var hits = 0;"
+         "function render() { document.getElementById('d').innerHTML = '<button id=late onclick=\"hits++\">late</button>'; }"
+         "setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<button id=tm onclick=\"hits += 10\">t</button>');"
+         "  document.getElementById('sa').setAttribute('onclick', 'hits += 100'); }, 10);</script></body>");
+    rb_dispatch(rb_find_id("go"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("late"), RB_EV_CLICK);
+    EXPECT("hits", "1");
+    tick(20);
+    rb_dispatch(rb_find_id("tm"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("sa"), RB_EV_CLICK);
+    rb_dispatch(rb_find_id("late"), RB_EV_CLICK);       /* bound once, not once per rebind */
+    EXPECT("hits", "112");
+
+    /* scripts inserted by scripts */
+    EXPECT("var ev = []; var sc = document.createElement('script'); sc.src = 'http://cdn.example.net/lib.js';"
+           "sc.onload = () => ev.push('load'); document.head.appendChild(sc);"
+           "var bad = document.createElement('script'); bad.src = '/missing.js'; bad.onerror = () => ev.push('error');"
+           "document.body.appendChild(bad); var inl = document.createElement('script'); inl.textContent = 'window.inlineRan = 1';"
+           "document.body.appendChild(inl); window.inlineRan + ',' + ev.length", "1,0");
+    tick(1);
+    EXPECT("libLoaded + ',' + ev.sort().join()", "1,error,load");
+    EXPECT("document.body.appendChild(sc); document.body.innerHTML += '<script>window.never = 1</script>'; typeof never", "undefined");
+    tick(1);
+    EXPECT("libLoaded", "1");
+
+    /* old children survive textContent/innerHTML replacement (jQuery relies on it) */
+    EXPECT("var hold = document.createElement('div'); hold.innerHTML = '<b>1</b><i>2</i>'; var kids = [...hold.childNodes];"
+           "hold.textContent = ''; var dst = document.createElement('div'); kids.forEach(k => dst.appendChild(k)); dst.innerHTML", "<b>1</b><i>2</i>");
+    EXPECT("var k2 = dst.firstChild; dst.innerHTML = 'x'; hold.appendChild(k2); hold.innerHTML", "<b>1</b>");
+
+    /* ...while content no script ever looked at is recycled: a page that
+       rewrites textContent or innerHTML in a timer must not run out of
+       nodes (16384) however long it runs */
+    {
+        int before = rb_debug_stat(0);
+        EXPECT("var live = document.createElement('div'); document.body.appendChild(live); var bad = -1;"
+               "for (var i = 0; i < 40000 && bad < 0; i++) { live.textContent = 'tick ' + i; if (live.textContent !== 'tick ' + i) bad = i; }"
+               "for (var i = 0; i < 20000 && bad < 0; i++) { live.innerHTML = '<span>n <b>' + i + '</b></span>';"
+               "  if (live.innerHTML !== '<span>n <b>' + i + '</b></span>') bad = i; } bad", "-1");
+        if (rb_debug_stat(0) - before > 64) { printf("FAIL: %d nodes leaked by content updates\n", rb_debug_stat(0) - before); g_fail++; }
+        else g_pass++;
+    }
+    /* a held node deep inside keeps its whole branch; its unseen siblings go */
+    EXPECT("live.innerHTML = '<p><em id=deep>k</em></p><i>gone</i>'; var deep = live.querySelector('#deep'); live.textContent = 'x';"
+           "[deep.textContent, deep.parentNode.tagName, deep.isConnected, live.innerHTML].join()", "k,P,false,x");
+    EXPECT("live.innerHTML = '<b>1</b><i>2</i><u>3</u>'; var keepI = live.children[1], nu = document.createElement('s');"
+           "live.replaceChildren(nu, keepI); live.innerHTML", "<s></s><i>2</i>");
+    EXPECT("live.replaceChildren(); live.childNodes.length", "0");
+
+    /* ...and the text a content update replaces goes back to the engine's
+       text pool (1 MB). Strings of varying length, so most updates cannot
+       reuse the old slot in place: hundreds of times the pool's size in all. */
+    {
+        int oom0 = rb_oom();
+        int cmp[5];
+        cmp[0] = rb_debug_stat(14);   /* compactions so far */
+        EXPECT("var tx = document.createElement('p'); document.body.appendChild(tx); var bad = -1;"
+               "for (var i = 0; i < 400000 && bad < 0; i++) { var s = 'v' + i + '-'.repeat(i % 61); tx.textContent = s;"
+               "  if (i % 1009 == 0 && tx.textContent !== s) bad = i; } bad + ',' + tx.textContent.length", "-1,29");
+        cmp[1] = rb_debug_stat(14);
+        EXPECT("var bad = -1; for (var i = 0; i < 40000 && bad < 0; i++) {"
+               "  var h = '<span class=\"c' + i + '\" title=\"' + 't'.repeat(i % 37) + '\">n' + '.'.repeat(i % 29) + '</span>';"
+               "  tx.innerHTML = h; if (i % 997 == 0 && tx.innerHTML !== h) bad = i; } bad", "-1");
+        cmp[2] = rb_debug_stat(14);
+        EXPECT("var bad = -1; for (var i = 0; i < 100000 && bad < 0; i++) { var v = 'a'.repeat(i % 53) + i;"
+               "  tx.setAttribute('data-x', v); tx.id = 'id' + v; tx.className = 'k' + (i % 7 ? v : '');"
+               "  if (i % 1013 == 0 && (tx.getAttribute('data-x') !== v || tx.id !== 'id' + v)) bad = i; } bad", "-1");
+        cmp[3] = rb_debug_stat(14);
+        /* one more update, so the probe below checks text written after a compaction */
+        EXPECT("tx.textContent = 'still here'; tx.id = 'tx'; document.getElementById('tx') === tx", "true");
+        /* relayout between updates: each layout's box text (here ~6 KB of
+           filler) is reclaimed too, although an update lands after it */
+        EXPECT("var fill = document.createElement('div'); document.body.appendChild(fill);"
+               "for (var i = 0; i < 100; i++) { var q = document.createElement('p'); q.textContent = 'filler line ' + i + ' ' + 'w'.repeat(48); fill.appendChild(q); }"
+               "fill.children.length", "100");
+        char src[160], want[96];
+        int lay_bad = -1;
+        for (int k = 0; k < 4000 && lay_bad < 0; k++) {
+            snprintf(src, sizeof(src), "tx.textContent = 'frame-%d' + '#'.repeat(%d); tx.textContent.length", k, k % 67);
+            snprintf(want, sizeof(want), "%d", (int)strlen("frame-") + snprintf(0, 0, "%d", k) + k % 67);
+            if (strcmp(js(src), want) != 0) lay_bad = k;
+            rb_relayout();
+            if (k % 250 == 0) {
+                int found = 0;
+                snprintf(want, sizeof(want), "frame-%d", k);
+                for (int b = 0; b < rb_box_count() && !found; b++) {
+                    int tl;
+                    const char *t = rb_box_text(b, &tl);
+                    if (tl >= (int)strlen(want) && memcmp(t, want, strlen(want)) == 0) found = 1;
+                }
+                if (!found) lay_bad = k;
+            }
+        }
+        cmp[4] = rb_debug_stat(14);
+        int phases_ok = 1;
+        for (int k = 1; k < 5; k++) if (cmp[k] <= cmp[k - 1]) phases_ok = 0;   /* each phase had to compact */
+        if (lay_bad >= 0 || (!oom0 && rb_oom()) || !phases_ok) {
+            printf("FAIL: text pool: relayout loop broke at %d, rb_oom %d (was %d), pool %d, compactions %d %d %d %d %d\n",
+                   lay_bad, rb_oom(), oom0, rb_debug_stat(2), cmp[0], cmp[1], cmp[2], cmp[3], cmp[4]);
+            g_fail++;
+        } else g_pass++;
+        /* strings no update touched moved with the compaction intact */
+        EXPECT("document.getElementById('sa').textContent + '|' + document.getElementById('go').getAttribute('onclick') + '|' + document.getElementById('go').id", "p|render()|go");
+    }
+
+    /* Nodes a script made or held and then dropped are given back to the
+       engine (wrappers of detached trees are weak; their trees are released
+       when collected), while held detached trees keep their listeners and
+       connected nodes keep their wrapper state. */
+    {
+        int base = rb_debug_stat(13);
+        /* 30000 dropped elements with listeners: more than the 16384 slots */
+        EXPECT("var made = 0; for (var i = 0; i < 30000; i++) { var d = document.createElement('div');"
+               "  if (!d) break; d.textContent = 'x' + i; d.addEventListener('click', () => d.id); d.onclick = () => d; d.style.color = 'red'; made++; } made",
+               "30000");
+        EXPECT("var hits = 0; var keep = document.createElement('div'); (function () { var b = document.createElement('button');"
+               "  b.addEventListener('click', () => hits++); b.onclick = () => hits += 10; keep.appendChild(b); })();"
+               "var gone = document.createElement('section'); gone.innerHTML = '<p>a</p><p>b</p>'; gone.querySelector('p').onclick = () => gone; gone = null;"
+               "var ex = document.createElement('div'); ex.expando = 42; document.body.appendChild(ex); ex = null;"
+               "setTimeout(function () {}, 0); 1", "1");
+        for (int i = 0; i < 6; i++) {          /* a few sweeps (every 2 s) */
+            js("setTimeout(function () {}, 0); 1");
+            tick(2200);
+        }
+        int after = rb_debug_stat(13);
+        if (after - base > 40) { printf("FAIL: %d nodes still held after sweeps\n", after - base); g_fail++; }
+        else g_pass++;
+        EXPECT("document.body.appendChild(keep); keep.firstChild.click(); hits", "11");
+        EXPECT("document.body.lastChild.previousSibling.expando", "42");
+        EXPECT("keep.firstChild.tagName + (keep.firstChild === keep.childNodes[0])", "BUTTONtrue");
+    }
+    /* more listening elements than the engine's old 256-registration table:
+       an engine click still reaches the last one */
+    EXPECT("var lastHit = -1; for (var i = 0; i < 600; i++) { var bt = document.createElement('button'); bt.id = 'bt' + i;"
+           "  (function (k) { bt.addEventListener('click', () => lastHit = k); })(i); document.body.appendChild(bt); } 1", "1");
+    rb_dispatch(rb_find_id("bt599"), RB_EV_CLICK);
+    EXPECT("lastHit", "599");
+
+    /* messaging within the page: asynchronous, as in browsers */
+    EXPECT("var got = []; var mc = new MessageChannel(); mc.port2.onmessage = e => got.push('p:' + e.data);"
+           "mc.port1.postMessage('hi'); window.addEventListener('message', e => got.push('w:' + e.data + ':' + (e.source === window)));"
+           "window.postMessage('yo', '*'); var b1 = new BroadcastChannel('c'), b2 = new BroadcastChannel('c');"
+           "b2.addEventListener('message', e => got.push('b:' + e.data)); b1.postMessage('all'); got.length", "0");
+    tick(1);
+    EXPECT("got.sort().join()", "b:all,p:hi,w:yo:true");
+    EXPECT("window.postMessage('x', 'https://elsewhere.example'); new MessageEvent('message', {data: 5}).data", "5");
+
+    /* the user agent is Firefox's, consistently (the HTTP header is the same
+       string: BROWSER_UA in rust_lib/src/fetch/mod.rs) */
+    EXPECT("[navigator.userAgent, navigator.platform, navigator.vendor === '', 'userAgentData' in navigator].join('|')",
+           "Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0|Linux i686|true|false");
+
+    /* querySelectorAll returns every match, past the old 4096 cap */
+    EXPECT("var qa = document.createElement('div'); document.body.appendChild(qa); qa.innerHTML = '<i></i>'.repeat(5000);"
+           "var n5 = qa.querySelectorAll('i').length; qa.remove(); qa = null; n5", "5000");
+
+    /* node generations are 16 bits: the 65536th node made on a page must not
+       get generation 0 (which reads as a dead node) */
+    {
+        int bad = 0;
+        for (int i = 0; i < 140000 && !bad; i++) {
+            int n = rb_dom_create_element(RB_TAG_DIV);
+            if (!n || !rb_dom_generation(n)) bad = i + 1;
+            rb_dom_release(n);
+        }
+        if (bad) { printf("FAIL: node %d got generation 0\n", bad); g_fail++; } else g_pass++;
+    }
+
+    /* select.value against an option whose value is longer than the
+       engine's compare buffer (it used to memcmp past the buffer) */
+    EXPECT("live.innerHTML = '<select id=sl><option>short</option><option id=lo>x</option></select>';"
+           "var sl = document.getElementById('sl'), longv = 'v'.repeat(3000); document.getElementById('lo').value = longv;"
+           "sl.value = longv; sl.value = 'short'; sl.value", "short");
+
+    /* detached documents never touch the page */
+    EXPECT("var before = document.body.children.length; var d2 = document.implementation.createHTMLDocument('');"
+           "d2.body.innerHTML = '<form></form><form></form>'; d2.body.childNodes.length + ',' + (document.body.children.length === before)", "2,true");
+    EXPECT("new DOMParser().parseFromString('<p id=q>hi</p>', 'text/html').getElementById('q').textContent", "hi");
+
+    /* JSON data islands */
+    page("<body><script type=application/json id=cfg>{\"k\": [1, 2]}</script></body>");
+    EXPECT("JSON.parse(document.getElementById('cfg').textContent).k[1]", "2");
+
+    /* geometry after a script relayout */
+    page("<body><div id=g style='width:100px'>box</div></body>");
+    EXPECT("document.getElementById('g').getBoundingClientRect().width", "100");
+    EXPECT("var g = document.getElementById('g'); g.style.width = '50px'; g.offsetWidth", "50");
+
+    /* images: the host (rbrowse.c's loader) stores each outcome with
+       rb_dom_img_set and fires load/error through rjs_dom_image_event; here
+       the test plays the host */
+    rb_set_images(1);
+    rb_set_viewport(622, 332);
+    page("<body style='margin:0'><img id=im src=a.png onload=\"window.ev = (window.ev || '') + 'L'\">"
+         "<img id=bad src=b.png onerror=\"this.alt = 'gone'\"><img id=fx src=c.png width=30 height=20>"
+         "<a href=/x><img id=ln src=d.png width=40 height=10></a></body>");
+    EXPECT("var im = document.getElementById('im'); [im instanceof HTMLImageElement, im instanceof Image, im.complete, im.naturalWidth, im.width].join()",
+           "true,true,false,0,0");
+    EXPECT("var fx = document.getElementById('fx'); [fx.width, fx.height, fx.complete].join()", "30,20,false");
+    EXPECT("window.order = []; im.addEventListener('load', e => order.push(e.type + ':' + e.bubbles + ':' + (e.target === im)));"
+           "document.addEventListener('load', () => order.push('doc'), true);"
+           "window.addEventListener('load', () => order.push('win'), true); var dec = 'wait'; im.decode().then(() => dec = 'ok'); 1", "1");
+    {
+        int im = rb_find_id("im"), bad = rb_find_id("bad"), ln = rb_find_id("ln");
+        rb_dom_img_set(im, RB_IMG_OK, 0, 64, 48);
+        rjs_dom_image_event(im, 1);
+        rb_dom_img_set(bad, RB_IMG_BROKEN, 0, 0, 0);
+        rjs_dom_image_event(bad, 0);
+        rb_dom_img_set(ln, RB_IMG_OK, 1, 80, 20);
+        rjs_dom_image_event(ln, 1);
+        rb_relayout();
+    }
+    /* the window does not see an element's load; the document's capture
+       does (once for each of the two images that loaded) */
+    EXPECT("window.ev + ',' + order.join(' ') + ',' + dec", "L,doc load:false:true doc,ok");
+    EXPECT("[im.complete, im.naturalWidth, im.naturalHeight, im.width, im.height].join()", "true,64,48,64,48");
+    EXPECT("var r = im.getBoundingClientRect(); r.width + 'x' + r.height", "64x48");
+    EXPECT("var bad = document.getElementById('bad'); [bad.complete, bad.naturalWidth, bad.alt].join()", "true,0,gone");
+    EXPECT("var r2; bad.decode().catch(e => r2 = e.name); 1", "1");
+    EXPECT("r2", "EncodingError");
+    EXPECT("document.getElementById('ln').width", "40");                 /* inside a link */
+    /* new Image(): a detached <img> the host still finds and loads */
+    EXPECT("var ni = new Image(5, 6); ni.src = 'n.png'; window.nl = 0; ni.onload = () => nl++;"
+           "[ni.tagName, ni.width, ni.height, ni.complete, ni.isConnected, ni.currentSrc].join()",
+           "IMG,5,6,false,false,http://example.com/dir/n.png");
+    {
+        int found = 0;
+        for (int n = rb_dom_img_next(0); n; n = rb_dom_img_next(n)) {
+            char src[32];
+            if (rb_dom_get_attr(n, "src", 3, src, (int)sizeof(src)) && strcmp(src, "n.png") == 0 &&
+                rb_dom_img_state(n, 0, 0, 0) == RB_IMG_NONE) {
+                found = 1;
+                rb_dom_img_set(n, RB_IMG_OK, 2, 7, 9);
+                rjs_dom_image_event(n, 1);
+            }
+        }
+        if (!found) { printf("FAIL: new Image() not visible to the host\n"); g_fail++; } else g_pass++;
+    }
+    EXPECT("[nl, ni.complete, ni.naturalWidth, ni.naturalHeight].join()", "1,true,7,9");
+    EXPECT("ni.src = 'm.png'; ni.complete + ',' + ni.naturalWidth", "false,0");   /* a new src starts over */
+    EXPECT("var e2 = document.createElement('img'); e2.complete + ',' + e2.naturalWidth", "true,0");   /* no src */
+    rb_set_images(0);
+    rb_set_viewport(RB_VIEW_W_DEFAULT, RB_VIEW_H_DEFAULT);
+
+    /* runaway script is interrupted, page survives */
+    if (strncmp(js("while (true) {}"), "!InternalError: interrupted", 27) != 0) {
+        printf("FAIL: runaway loop not interrupted: %s\n", g_out);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("1 + 1", "2");
+    /* ...also after a native re-entered JS: el.click() runs the engine's
+       dispatch and its JS listener inside the script. Leaving that inner
+       entry used to disarm the outer script's time budget for good. */
+    page("<body><button id=b>x</button><script>var b = document.getElementById('b'), n = 0;"
+         "b.addEventListener('click', () => n++);</script></body>");
+    if (strncmp(js("b.click(); while (true) {}"), "!InternalError: interrupted", 27) != 0) {
+        printf("FAIL: runaway loop after a nested dispatch not interrupted: %s\n", g_out);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("n", "1");
+
+    /* document.cookie without a host jar: a per-page jar. */
+    page("<body><script>document.cookie = 'a=1; path=/'; document.cookie = 'b=2';</script></body>");
+    EXPECT("document.cookie", "a=1; b=2");
+    EXPECT("document.cookie = 'a=; max-age=0'; document.cookie", "b=2");
+    page("<body></body>");
+    EXPECT("document.cookie", "");
+    /* POST needs the host: without it fetch rejects. */
+    EXPECT("var pr; fetch('/p', {method: 'POST', body: 'x'}).catch(e => pr = 'rejected'); 0", "0");
+    tick(1);
+    EXPECT("pr", "rejected");
+
+    /* With the host's jar: reads and writes go through it, for this page. */
+    rjs_dom_set_net(&g_fake_net);
+    page("<body><script>document.cookie = 'js=2; path=/; secure';</script></body>");
+    EXPECT("document.cookie", "srv=1; js=2");
+    EXPECT("document.cookie = 'h=1; HttpOnly'; document.cookie", "srv=1; js=2");
+    /* ...and it outlives the page, as the session jar does. */
+    page("<body></body>");
+    EXPECT("document.cookie", "srv=1; js=2");
+    /* A local file has no jar: back to the per-page one. */
+    g_page_url = "/home/user/page.html";
+    page("<body></body>");
+    EXPECT("document.cookie = 'loc=1'; document.cookie", "loc=1");
+    g_page_url = "http://example.com/dir/page.html";
+
+    /* fetch / XHR POST: same origin only, body and type passed through. */
+    page("<body></body>");
+    EXPECT("var pr; fetch('/api?x=1', {method: 'post', body: 'a b', headers: {'Content-Type': 'application/json'}})"
+           ".then(r => r.text()).then(t => pr = t); 0", "0");
+    tick(1);
+    EXPECT("pr", "posted 3");
+    if (strcmp(g_post_url, "http://example.com/api?x=1") || strcmp(g_post_body, "a b") ||
+        strcmp(g_post_type, "application/json")) {
+        printf("FAIL: fetch POST passed %s / %s / %s\n", g_post_url, g_post_body, g_post_type);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("var pr; fetch('/f', {method: 'POST', body: new URLSearchParams({q: 'x y', n: '1'})}).then(r => r.text()).then(t => pr = t); 0", "0");
+    tick(1);
+    EXPECT("pr", "posted 9");
+    if (strcmp(g_post_body, "q=x+y&n=1")) {
+        printf("FAIL: URLSearchParams body %s\n", g_post_body);
+        g_fail++;
+    } else g_pass++;
+    if (strncmp(g_post_type, "application/x-www-form-urlencoded", 33)) {
+        printf("FAIL: URLSearchParams type %s\n", g_post_type);
+        g_fail++;
+    } else g_pass++;
+    EXPECT("var pr; fetch('http://other.example/p', {method: 'POST', body: 'x'}).catch(e => pr = 'blocked'); 0", "0");
+    tick(1);
+    EXPECT("pr", "blocked");
+    EXPECT("var xr; var x = new XMLHttpRequest(); x.open('POST', 'p2'); x.setRequestHeader('Content-Type', 'text/x');"
+           "x.onload = () => xr = x.responseText; x.send('hello'); 0", "0");
+    tick(1);
+    EXPECT("xr", "posted 5");
+    if (strcmp(g_post_url, "http://example.com/dir/p2") || strcmp(g_post_type, "text/x")) {
+        printf("FAIL: XHR POST passed %s / %s\n", g_post_url, g_post_type);
+        g_fail++;
+    } else g_pass++;
+    rjs_dom_set_net(0);
+
+    /* form.submit() on a POST form queues the action and the body. */
+    page("<body><form id=f method=post action=/save><input type=hidden name=k value='v w'></form></body>");
+    {
+        char nav[256], body[256];
+        js("document.getElementById('f').submit()");
+        if (!rb_take_nav(nav, sizeof(nav)) || strcmp(nav, "/save") != 0 ||
+            rb_nav_body(body, sizeof(body)) != 7 || strcmp(body, "k=v%20w") != 0) {
+            printf("FAIL: form.submit() POST (%s)\n", nav);
+            g_fail++;
+        } else g_pass++;
+    }
+
+    /* the page's user agent comes from the host (the same string as its HTTP
+       requests): on a few sites a plain rbrowse one */
+    rjs_dom_set_user_agent("Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4");
+    page("<p>ua</p>");
+    EXPECT("[navigator.userAgent, navigator.platform].join('|')", "Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4|RadiumOS i686");
+    rjs_dom_set_user_agent(0);
+    page("<p>ua</p>");
+    EXPECT("navigator.userAgent.includes(' Firefox/140.0')", "true");
+
+    printf("%d passed, %d failed\n", g_pass, g_fail);
+    if (!g_fail) printf("rbrowse js checks passed\n");
+    return g_fail ? 1 : 0;
+}

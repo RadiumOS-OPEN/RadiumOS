@@ -674,6 +674,14 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_address) {
         print(cmdline_has("nonet") || cmdline_has("safe") ? "Network disabled on the kernel command line\n" : "No network card found\n");
     }
     
+    // x87 FPU: reset it, then round to double precision (control word 0x27F,
+    // all exceptions masked). C doubles (QuickJS numbers) live on the x87
+    // without SSE; extended precision would double-round IEEE arithmetic.
+    {
+        uint16_t fpu_cw = 0x027F;
+        __asm__ volatile("fninit; fldcw %0" :: "m"(fpu_cw));
+    }
+
     // Initialize Rust multitasking
     boot_mark("network");
     rust_init_multitasking();
