@@ -310,16 +310,31 @@ fn request(url: &Url, head: bool, range: Option<(u64, u64)>) -> String {
 /// compare the two.
 pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0";
 
+/// What rbrowse says it is on sites that serve Firefox an application
+/// rbrowse cannot run but serve an unknown browser a plain page (a
+/// site-specific override, as browsers keep for broken sites). Google sends
+/// Firefox a homepage whose consent dialog needs a 1.2 MB script bundle, and
+/// an unknown browser a plain consent page, then results.
+pub(crate) const PLAIN_UA: &str = "Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4";
+
+/// The user agent for requests to `host` (and for navigator.userAgent of
+/// a page on it): PLAIN_UA on Google's sites (google.com, google.pl, ...),
+/// BROWSER_UA everywhere else.
+pub(crate) fn user_agent_for(host: &str) -> &'static str {
+    if cookies::site(host).split('.').next() == Some("google") { PLAIN_UA } else { BROWSER_UA }
+}
+
 /// rbrowse's request, headers in the order Firefox sends them. No
 /// compression is offered: bodies are read as they come.
 pub(crate) fn browser_request(url: &Url, cookie: &str, post: Option<(&[u8], &str)>) -> Vec<u8> {
     let mut text = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {BROWSER_UA}\r\n\
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n\
          Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
          Accept-Language: en-US,en;q=0.5\r\nAccept-Encoding: identity\r\n",
         if post.is_some() { "POST" } else { "GET" },
         url.path,
-        url.authority()
+        url.authority(),
+        user_agent_for(&url.host)
     );
     if let Some((body, content_type)) = post {
         text.push_str(&format!(

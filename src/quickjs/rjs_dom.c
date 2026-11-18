@@ -494,6 +494,14 @@ static int g_paint_cost;
 void rjs_dom_set_paint_cost(int ms) { g_paint_cost = ms < 0 ? 0 : ms > 1000 ? 1000 : ms; }
 FN(n_paint_cost) { UNUSED; (void)argv; return INT(g_paint_cost); }
 
+static char g_ua[256];
+void rjs_dom_set_user_agent(const char *ua) {
+    int i = 0;
+    for (; ua && ua[i] && i < (int)sizeof(g_ua) - 1; i++) g_ua[i] = ua[i];
+    g_ua[i] = 0;
+}
+FN(n_ua) { UNUSED; (void)argv; return JS_NewString(ctx, g_ua); }
+
 FN(n_set_next_due) {
     UNUSED;
     double d = -1;
@@ -709,6 +717,7 @@ static const JSCFunctionListEntry g_natives[] = {
     JS_CFUNC_DEF("now", 0, n_now),
     JS_CFUNC_DEF("view", 1, n_view),
     JS_CFUNC_DEF("setNextDue", 1, n_set_next_due),
+    JS_CFUNC_DEF("ua", 0, n_ua),
     JS_CFUNC_DEF("paintCost", 0, n_paint_cost),
     JS_CFUNC_DEF("fetch", 1, n_fetch),
     JS_CFUNC_DEF("loadScript", 1, n_load_script),

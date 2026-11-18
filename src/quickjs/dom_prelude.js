@@ -2249,15 +2249,19 @@ const history = {
   back() {}, forward() {}, go() {},
 };
 
-/* Firefox ESR on 32-bit Linux, as in every HTTP request (BROWSER_UA in
-   rust_lib/src/fetch/mod.rs: keep the two the same, checks compare them),
-   with the navigator fields Firefox has to match (no userAgentData, which
-   is Chrome's). */
+/* The user agent is the one the host sent for this page (rb.ua(): Firefox
+   ESR on 32-bit Linux, BROWSER_UA in rust_lib/src/fetch/mod.rs, or on a few
+   sites a plain rbrowse one, PLAIN_UA) - checks compare it with the HTTP
+   header. The other fields match it (Firefox's; no userAgentData, which is
+   Chrome's). */
+const UA_FIREFOX = 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0';
+const userAgent = rb.ua() || UA_FIREFOX;
+const firefox = userAgent.includes(' Firefox/');
 const navigator = {
-  userAgent: 'Mozilla/5.0 (X11; Linux i686; rv:140.0) Gecko/20100101 Firefox/140.0',
-  appName: 'Netscape', appVersion: '5.0 (X11)', appCodeName: 'Mozilla', product: 'Gecko',
-  productSub: '20100101', buildID: '20181001000000', oscpu: 'Linux i686',
-  platform: 'Linux i686', vendor: '', vendorSub: '', language: 'en-US', languages: ['en-US', 'en'],
+  userAgent,
+  appName: 'Netscape', appVersion: firefox ? '5.0 (X11)' : '5.0 (RadiumOS)', appCodeName: 'Mozilla', product: 'Gecko',
+  productSub: '20100101', buildID: '20181001000000', oscpu: firefox ? 'Linux i686' : 'RadiumOS i686',
+  platform: firefox ? 'Linux i686' : 'RadiumOS i686', vendor: '', vendorSub: '', language: 'en-US', languages: ['en-US', 'en'],
   onLine: true, cookieEnabled: true, doNotTrack: 'unspecified', hardwareConcurrency: 1, maxTouchPoints: 0,
   webdriver: false, pdfViewerEnabled: false,
   sendBeacon() { return true; },

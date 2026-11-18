@@ -438,6 +438,23 @@ impl ChainSite {
     }
 }
 
+/// rbrowse_user_agent(url, out, cap): the user agent rbrowse sends to url's
+/// host, for navigator.userAgent of that page (see user_agent_for). Writes
+/// it NUL-terminated and returns its length; -1 when url is not http(s).
+#[no_mangle]
+pub unsafe extern "C" fn rbrowse_user_agent(url: *const u8, out: *mut u8, cap: i32) -> i32 {
+    if out.is_null() || cap < 2 {
+        return -1;
+    }
+    let Some(parsed) = c_text(url, 2048).and_then(|text| Url::parse(text).ok()) else {
+        *out = 0;
+        return -1;
+    };
+    let ua = super::user_agent_for(&parsed.host);
+    write_out(out, cap, ua);
+    ua.len().min(cap as usize - 1) as i32
+}
+
 /// Set who causes rbrowse's next requests: `initiator` is the URL of the page
 /// (NULL or not http(s): the user, from the address bar or history), and
 /// `top_level` 1 for a navigation, 0 for a script, image, style sheet or
@@ -548,7 +565,8 @@ fn write_out(out: *mut u8, cap: i32, text: &str) {
     }
 }
 
-const BROWSER_BODY_LIMIT: usize = 1024 * 1024;
+/// Pages and scripts: plenty of sites ship script bundles over 1 MB.
+const BROWSER_BODY_LIMIT: usize = 4 * 1024 * 1024;
 const NIC_UNAVAILABLE: &str = "HTTP needs the network stack. Check the URL, NIC, and DNS.";
 
 /// GET a page for rbrowse. Returns the body length, or a negative error.

@@ -37,6 +37,11 @@ typedef struct {
 /* Set (or with 0, remove) the host's RjsNet; the struct is copied. */
 void rjs_dom_set_net(const RjsNet *net);
 
+/* The user agent the host sends for the page about to be installed (the
+   same string must be navigator.userAgent: checks compare them); NULL or
+   "" = the default, Firefox. */
+void rjs_dom_set_user_agent(const char *ua);
+
 /* Install natives + prelude on the running context for the page at url.
    0 on success. */
 int rjs_dom_install(const char *url, RjsFetch fetch);

@@ -618,6 +618,15 @@ int main(void) {
         } else g_pass++;
     }
 
+    /* the page's user agent comes from the host (the same string as its HTTP
+       requests): on a few sites a plain rbrowse one */
+    rjs_dom_set_user_agent("Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4");
+    page("<p>ua</p>");
+    EXPECT("[navigator.userAgent, navigator.platform].join('|')", "Mozilla/5.0 (RadiumOS; i686) rbrowse/0.4|RadiumOS i686");
+    rjs_dom_set_user_agent(0);
+    page("<p>ua</p>");
+    EXPECT("navigator.userAgent.includes(' Firefox/140.0')", "true");
+
     printf("%d passed, %d failed\n", g_pass, g_fail);
     if (!g_fail) printf("rbrowse js checks passed\n");
     return g_fail ? 1 : 0;

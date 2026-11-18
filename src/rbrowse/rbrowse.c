@@ -37,6 +37,7 @@ extern int rbrowse_cookie_get(const uint8_t *url, uint8_t *out, int cap);
 /* Who causes the next requests (SameSite): the page's URL (NULL: the user)
    and whether they are top-level navigations. */
 extern void rbrowse_http_context(const uint8_t *initiator, int top_level);
+extern int rbrowse_user_agent(const uint8_t *url, uint8_t *out, int cap);
 static void req_ctx(const char *page, int top) {
     rbrowse_http_context((const uint8_t *)(page && page[0] ? page : 0), top);
 }
@@ -736,7 +737,7 @@ static void open_html(const char *html, int len, const char *canonical, int web)
    then the engine's load. External scripts come from the network for remote
    pages and from AVFS for local ones. Console output goes to the QEMU debug
    port; uncaught errors also show in the status bar. */
-static char g_script[1024 * 1024];
+static char g_script[4 * 1024 * 1024];   /* script bundles over 1 MB are common */
 static char g_js_line[160];
 static int g_js_line_n;
 
@@ -827,6 +828,10 @@ static void run_page_scripts(const char *canonical) {
     g_js_line_n = 0;
     rjs_set_output(js_console);
     rjs_dom_set_net(&g_js_net);
+    /* navigator.userAgent says what the HTTP requests for this page said */
+    char ua[256];
+    if (rbrowse_user_agent((const uint8_t *)canonical, (uint8_t *)ua, (int)sizeof(ua)) < 0) ua[0] = 0;
+    rjs_dom_set_user_agent(ua);
     if (rjs_start() != RJS_OK || rjs_dom_install(canonical, js_fetch) != 0) {
         set_status("JS: engine failed to start");
         return;
@@ -837,9 +842,9 @@ static void run_page_scripts(const char *canonical) {
         const char *text;
         if (!rb_script_get(i, &node, &text, &len) || !script_is_classic(node)) continue;
         fg_pet();
-        char src[384];
+        static char src[2048];           /* bundle URLs run past 1000 characters; static: the task stack is small */
         if (rb_dom_has_attr(node, "src", 3) && rb_dom_get_attr(node, "src", 3, src, (int)sizeof(src)) > 0) {
-            char url[384];
+            static char url[2048];
             set_status("Loading script...");
             paint();
             int n = load_script(canonical, src, url, (int)sizeof(url));
@@ -961,12 +966,12 @@ static void open_fetched(const char *canonical, int n) {
 /* Fetch the document's external stylesheets (<link rel=stylesheet> and the
    @imports they pull in) and relayout once. A sheet that fails to load is
    skipped: the page still renders with whatever did arrive. */
-static char g_sheet_url[24][900];     /* resolved URL of each stylesheet, the base for its @imports */
+static char g_sheet_url[24][2048];     /* resolved URL of each stylesheet, the base for its @imports */
 
 static void load_styles(const char *base) {
     int fetched = 0;
     for (int i = 0; i < rb_css_pending() && i < 24; i++) {
-        char href[700];
+        static char href[2048];
         char *url = g_sheet_url[i];
         url[0] = 0;
         rb_css_href(i, href, (int)sizeof(href));
